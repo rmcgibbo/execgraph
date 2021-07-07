@@ -1,0 +1,23 @@
+[package]
+name = "execgraph"
+version = "0.1.0"
+authors = ["Robert T. McGibbon <rmcgibbo@gmail.com>"]
+edition = "2018"
+
+[lib]
+name = "_execgraph"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "^1.0"
+petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}
+pyo3 = "^0.13"
+rayon = "^1"
+num_cpus = "*"
+crossbeam-channel = "*"
+
+# https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
+# to run rust tests, need to do ``$ cargo test --no-default-features``
+[features]
+extension-module = ["pyo3/extension-module"]
+default = ["extension-module"]
