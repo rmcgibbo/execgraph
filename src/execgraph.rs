@@ -162,7 +162,8 @@ impl ExecGraph {
             return Ok((0, vec![]));
         }
 
-        let (mut servicer, receiver, sender) = ReadyTracker::new(&subgraph);
+        let count_offset = self.completed.len() as u32;
+        let (mut servicer, receiver, sender) = ReadyTracker::new(&subgraph, count_offset);
         tpool.scope(|s| {
             // this threads consumes events from a channel that record when processes were started and stopped
             // and writes them to a log file and to the console

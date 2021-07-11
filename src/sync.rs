@@ -12,6 +12,7 @@ pub struct ReadyTracker<'a, N, E> {
     pub finished_order: Vec<NodeIndex>,
     pub n_failed: u32,
     pub n_success: u32,
+    count_offset: u32,
 }
 
 pub struct StatusUpdater {
@@ -21,6 +22,7 @@ pub struct StatusUpdater {
 impl<'a, N, E> ReadyTracker<'a, N, E> {
     pub fn new(
         g: &'a Graph<N, E, Directed>,
+        count_offset: u32,
     ) -> (ReadyTracker<'a, N, E>, Receiver<NodeIndex>, StatusUpdater) {
         let (ready_s, ready_r) = unbounded();
         let (finished_s, finished_r) = unbounded();
@@ -33,6 +35,7 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
                 finished_order: vec![],
                 n_failed: 0,
                 n_success: 0,
+                count_offset: count_offset,
             },
             ready_r,
             StatusUpdater { s: finished_s },
@@ -76,7 +79,7 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
                                 self.ready.as_ref().expect("sfds").send(downstream_id)?;
                             }
                         }
-                        println!("[{}/{}] {}", self.n_success, total, e.cmd.display());
+                        println!("[{}/{}] {}", self.n_success + self.count_offset, total + self.count_offset, e.cmd.display());
                     } else {
                         println!("\x1b[1;31mFAILED:\x1b[0m {}", e.cmd.display());
                         self.n_failed += 1;
