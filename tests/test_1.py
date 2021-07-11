@@ -173,3 +173,15 @@ def test_order(tmp_path):
     a, b = eg.execute(id11)
     assert a == 0
     assert b == [id11]
+
+
+def test_not_execute_twice(tmp_path):
+    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+
+    eg.add_task("true", key="task0")
+    eg.add_task("false", key="task1", dependencies=[0])
+
+    nfailed1, order1 = eg.execute()
+    assert nfailed1 == 1 and order1 == [0, 1]
+    nfailed2, order2 = eg.execute()
+    assert nfailed2 == 0 and order2 == []

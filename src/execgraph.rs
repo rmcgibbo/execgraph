@@ -28,6 +28,7 @@ impl Cmd {
 pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     keyfile: String,
+    completed: Vec<NodeIndex>,
 }
 
 impl ExecGraph {
@@ -35,6 +36,7 @@ impl ExecGraph {
         ExecGraph {
             deps: Graph::new(),
             keyfile: keyfile,
+            completed: vec![],
         }
     }
 
@@ -128,9 +130,10 @@ impl ExecGraph {
         };
 
         // Now let's remove all edges from the dependency graph if the source has already finished
+        // or if we've already exeuted the task in a previous call to execute
         Ok(subgraph.filter_map(
             |_n, &w| {
-                if w.0.key != "" && previously_run_keys.contains(&w.0.key) {
+                if self.completed.contains(&w.1) ||  w.0.key != "" && previously_run_keys.contains(&w.0.key) {
                     None
                 } else {
                     Some(w)
@@ -208,13 +211,21 @@ impl ExecGraph {
             }
         });
 
+        let n_failed = servicer.n_failed;
+        // get indices of the tasks we executed, mapped back from the subgraph node ids
+        // to the node ids in the deps graph
+        let completed: Vec<NodeIndex> = servicer
+          .finished_order
+          .iter()
+          .map(|&n| (subgraph[n].1))
+          .collect();
+
+        drop(servicer);
+        drop(subgraph);
+        self.completed.extend(&completed);
         Ok((
-            servicer.n_failed,
-            servicer
-                .finished_order
-                .iter()
-                .map(|&n| (subgraph[n].1).index() as u32)
-                .collect(),
+            n_failed,
+            completed.iter().map(|n| n.index() as u32).collect()
         ))
     }
 }
