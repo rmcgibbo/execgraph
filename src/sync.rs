@@ -1,7 +1,8 @@
 use crate::execgraph::Cmd;
 use crate::logfile::LogWriter;
 use anyhow::Result;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+// use crossbeam_channel::{unbounded, Receiver, Sender};
+use async_channel::{unbounded, Receiver, Sender};
 use petgraph::prelude::*;
 use std::collections::HashMap;
 
@@ -15,6 +16,7 @@ pub struct ReadyTracker<'a, N, E> {
     count_offset: u32,
 }
 
+#[derive(Clone)]
 pub struct StatusUpdater {
     s: Sender<CompletedEvent>,
 }
@@ -42,7 +44,7 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
         );
     }
 
-    pub fn background_serve(&mut self, keyfile: &str) -> Result<()> {
+    pub async fn background_serve(&mut self, keyfile: &str) -> Result<()> {
         // for each task, how many unmet first-order dependencies does it have?
         let mut n_unmet_deps: HashMap<NodeIndex, usize> = self
             .g
@@ -52,14 +54,18 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
         // trigger all of the tasks that have zero unmet dependencies
         for (k, v) in n_unmet_deps.iter() {
             if *v == 0 {
-                self.ready.as_ref().expect("foo").send(*k)?;
+                self.ready
+                    .as_ref()
+                    .expect("send channel was already dropped?")
+                    .send(*k)
+                    .await?;
             }
         }
 
         let mut writer = LogWriter::new(keyfile)?;
         let total = n_unmet_deps.len() as u32;
 
-        while let Ok(event) = self.completed.recv() {
+        while let Ok(event) = self.completed.recv().await {
             match event {
                 CompletedEvent::Started(e) => {
                     writer.begin_command(&e.cmd.display(), &e.cmd.key, e.pid)?;
@@ -76,10 +82,19 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
                                 .expect("key doesn't exist");
                             *value -= 1;
                             if *value == 0 {
-                                self.ready.as_ref().expect("sfds").send(downstream_id)?;
+                                self.ready
+                                    .as_ref()
+                                    .expect("send channel was already dropped?")
+                                    .send(downstream_id)
+                                    .await?;
                             }
                         }
-                        println!("[{}/{}] {}", self.n_success + self.count_offset, total + self.count_offset, e.cmd.display());
+                        println!(
+                            "[{}/{}] {}",
+                            self.n_success,
+                            total + self.count_offset,
+                            e.cmd.display()
+                        );
                     } else {
                         println!("\x1b[1;31mFAILED:\x1b[0m {}", e.cmd.display());
                         self.n_failed += 1;
@@ -91,6 +106,9 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
                     // In addition to tracking n_failed and n_success, we need to also track the
                     // number of tasks that have been 'poisoned' by failures upstream of them and
                     // never executed.
+                    // Also, we would want to keep in mind that when the user ctrl-c this process
+                    // we get a single back that looks like the task failed. So we'd need to detect
+                    // that and actually quit, rather than keep going
 
                     if self.n_failed > 0 || self.n_success >= total {
                         // drop the send side of the channel. this will cause the receive side
@@ -108,17 +126,18 @@ impl<'a, N, E> ReadyTracker<'a, N, E> {
 }
 
 impl StatusUpdater {
-    pub fn send_started(&self, _v: NodeIndex, cmd: &Cmd, pid: u32) {
+    pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, pid: u32) {
         self.s
             .send(CompletedEvent::Started(StartedEvent {
                 // id: v,
                 cmd: cmd.clone(),
                 pid: pid,
             }))
+            .await
             .expect("cannot send to channel")
     }
 
-    pub fn send_finished(&self, v: NodeIndex, cmd: &Cmd, pid: u32, status: i32) {
+    pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, pid: u32, status: i32) {
         self.s
             .send(CompletedEvent::Finished(FinishedEvent {
                 id: v,
@@ -126,6 +145,7 @@ impl StatusUpdater {
                 pid: pid,
                 exit_status: status,
             }))
+            .await
             .expect("cannot send to channel");
     }
 }

@@ -40,7 +40,7 @@ def test_1(tmp_path):
         g, {j: i for i, j in enumerate(nx.topological_sort(g.reverse()))}
     )
 
-    eg = _execgraph.ExecGraph(num_threads=10, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(num_parallel=10, keyfile=str(tmp_path / "foo"))
 
     for u in nx.topological_sort(g.reverse()):
         # print(u)
@@ -62,7 +62,7 @@ def test_1(tmp_path):
 def test_2(seed, tmp_path):
     g = random_ordered_dag(seed)
 
-    eg = _execgraph.ExecGraph(num_threads=10, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(num_parallel=10, keyfile=str(tmp_path / "foo"))
 
     for u in sorted(g.nodes()):
         # these are dependencies that are supposed to be completed
@@ -144,7 +144,10 @@ def test_inward(tmp_path):
 def test_twice(tmp_path):
     eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
 
-    tasks = [eg.add_task("true", f"same_key_each_time", display="truedisplay") for i in range(5)]
+    tasks = [
+        eg.add_task("true", f"same_key_each_time", display="truedisplay")
+        for i in range(5)
+    ]
     eg.execute()
 
     with open(str(tmp_path / "foo")) as f:
@@ -185,3 +188,12 @@ def test_not_execute_twice(tmp_path):
     assert nfailed1 == 1 and order1 == [0, 1]
     nfailed2, order2 = eg.execute()
     assert nfailed2 == 0 and order2 == []
+
+
+def test_simple(tmp_path):
+    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+
+    eg.add_task("echo foo; sleep 1; echo foo", key="task0")
+    eg.add_task("echo bar; sleep 1; echo foo", key="task1")
+
+    eg.execute()

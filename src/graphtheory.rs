@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use petgraph::algo::toposort;
-use petgraph::graph::NodeIndex;
 use petgraph::graph::DiGraph;
+use petgraph::graph::NodeIndex;
 
 use std::collections::HashSet;
 
@@ -49,7 +49,9 @@ pub fn descendants_at_distance<N, V>(
 /// for all v, w in V there is an edge (v, w) in E+ if and only if there
 /// is a non-null path from v to w in G.
 /// https://github.com/networkx/networkx/blob/cabf22e98d06d6c34ff88515f339b515695a7455/networkx/algorithms/dag.py#L581
-pub fn transitive_closure_dag<N: Clone + Default, V>(graph: &DiGraph<N, V>) -> Result<DiGraph<N, ()>> {
+pub fn transitive_closure_dag<N: Clone + Default, V>(
+    graph: &DiGraph<N, V>,
+) -> Result<DiGraph<N, ()>> {
     let mut tc = graph.map(|_, w| w.clone(), |_, _| ());
     let toposort =
         toposort(&graph, None).map_err(|e| anyhow!("Graph contains a cycle: {:?}", e))?;

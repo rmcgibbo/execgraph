@@ -2,11 +2,13 @@ use crate::graphtheory::transitive_closure_dag;
 use crate::logfile::load_keys_exit_status_0;
 use crate::sync::ReadyTracker;
 use anyhow::{anyhow, Result};
+use futures::future::join_all;
 use petgraph::prelude::*;
 use std::collections::HashSet;
 use std::fs::File;
 use std::os::unix::process::ExitStatusExt;
-use std::process::Command;
+use std::sync::Arc;
+use tokio::process::Command;
 
 #[derive(Debug, Clone, Default)]
 pub struct Cmd {
@@ -97,7 +99,7 @@ impl ExecGraph {
         Ok(new_node.index() as u32)
     }
 
-    fn get_subgraph(&self, target: Option<u32>) -> Result<Graph<(&Cmd, NodeIndex), ()>> {
+    fn get_subgraph(&self, target: Option<u32>) -> Result<Graph<(Cmd, NodeIndex), ()>> {
         // Get the subgraph containing all cmds in the transitive closure of target.
         // these are all the commands we need to resolve first. if target is none, then
         // just get the whole subraph (with an unnecessary copy unfortunately)
@@ -132,11 +134,13 @@ impl ExecGraph {
         // Now let's remove all edges from the dependency graph if the source has already finished
         // or if we've already exeuted the task in a previous call to execute
         Ok(subgraph.filter_map(
-            |_n, &w| {
-                if self.completed.contains(&w.1) ||  w.0.key != "" && previously_run_keys.contains(&w.0.key) {
+            |_n, w| {
+                if self.completed.contains(&w.1)
+                    || w.0.key != "" && previously_run_keys.contains(&w.0.key)
+                {
                     None
                 } else {
-                    Some(w)
+                    Some((w.0.clone(), w.1))
                 }
             },
             |e, &w| {
@@ -151,42 +155,34 @@ impl ExecGraph {
         ))
     }
 
-    pub fn execute(
+    pub async fn execute(
         &mut self,
         target: Option<u32>,
-        tpool: &rayon::ThreadPool,
+        num_parallel: usize,
     ) -> Result<(u32, Vec<u32>)> {
-        let subgraph = self.get_subgraph(target)?;
-        // println!("Number of tasks to execute: {}", subgraph.raw_nodes().len());
+        let subgraph = Arc::new(self.get_subgraph(target)?);
         if subgraph.raw_nodes().len() == 0 {
             return Ok((0, vec![]));
         }
 
         let count_offset = self.completed.len() as u32;
         let (mut servicer, receiver, sender) = ReadyTracker::new(&subgraph, count_offset);
-        tpool.scope(|s| {
-            // this threads consumes events from a channel that record when processes were started and stopped
-            // and writes them to a log file and to the console
-            s.spawn(|_s| {
-                servicer
-                    .background_serve(&self.keyfile)
-                    .expect("Failed to write log file")
-            });
-            // these threads try to consume "ready events" from the ready queue, run the command,
-            // and then update the ready queue. they also records events via writing to a channel
-            // in record_started and record_finished so that we can write the log file
-            for _ in 0..tpool.current_num_threads() {
-                s.spawn(|_s| {
-                    while let Ok(subgraph_node_id) = receiver.recv() {
-                        let (cmd, _) = *subgraph
+
+        let handles = (0..num_parallel)
+            .map(|_| {
+                let receiver = receiver.clone();
+                let subgraph = subgraph.clone();
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    while let Ok(subgraph_node_id) = receiver.recv().await {
+                        let (cmd, _) = subgraph
                             .node_weight(subgraph_node_id)
                             .expect(&format!("failed to get node {:#?}", subgraph_node_id));
                         let skip_execution_debugging_race_conditions = cmd.cmdline == "";
-
                         let (pid, status) = if skip_execution_debugging_race_conditions {
                             let pid = 0;
                             let fake_status = 0;
-                            sender.send_started(subgraph_node_id, &cmd, pid);
+                            sender.send_started(subgraph_node_id, &cmd, pid).await;
 
                             (pid, fake_status)
                         } else {
@@ -195,38 +191,48 @@ impl ExecGraph {
                                 .arg(&cmd.cmdline)
                                 .spawn()
                                 .expect("failed to execute sh");
-                            sender.send_started(subgraph_node_id, &cmd, child.id());
-                            let status_obj = child.wait().expect("sh wasn't running");
+                            let pid = child
+                                .id()
+                                .expect("hasn't been polled yet, so this id should exist");
+                            sender.send_started(subgraph_node_id, &cmd, pid).await;
+                            let status_obj = child.wait().await.expect("sh wasn't running");
                             // status_obj.code().or(Some(status_obj.into_raw())).expect("foo")
                             let code = match status_obj.code() {
                                 Some(code) => code,
                                 None => status_obj.signal().expect("No exit code and no signal?"),
                             };
 
-                            (child.id(), code)
+                            (pid, code)
                         };
 
-                        sender.send_finished(subgraph_node_id, cmd, pid, status);
+                        sender
+                            .send_finished(subgraph_node_id, &cmd, pid, status)
+                            .await;
                     }
-                });
-            }
-        });
+                })
+            })
+            .collect::<Vec<tokio::task::JoinHandle<_>>>();
+
+        // run the background service that will send commands to the ready channel to be picked up by the
+        // tasks spawned above
+        servicer.background_serve(&self.keyfile).await?;
+        join_all(handles).await;
 
         let n_failed = servicer.n_failed;
         // get indices of the tasks we executed, mapped back from the subgraph node ids
         // to the node ids in the deps graph
         let completed: Vec<NodeIndex> = servicer
-          .finished_order
-          .iter()
-          .map(|&n| (subgraph[n].1))
-          .collect();
+            .finished_order
+            .iter()
+            .map(|&n| (subgraph[n].1))
+            .collect();
 
         drop(servicer);
         drop(subgraph);
         self.completed.extend(&completed);
         Ok((
             n_failed,
-            completed.iter().map(|n| n.index() as u32).collect()
+            completed.iter().map(|n| n.index() as u32).collect(),
         ))
     }
 }

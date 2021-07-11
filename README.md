@@ -16,9 +16,8 @@ class ExecGraph
   parallelism.
 
   Args:
-    num_threads (Optional[int]): Number of threads to use for
-      parallel stuff. If not supplied, we'll use 2 more than the number
-      of CPU cores.
+    num_parallel (Optional[int]): Maximum number of parallel processes
+      to run. If not supplied, we'll use 2 more than the number of CPU cores.
     keyfile (str): The path to the log file.
 
 

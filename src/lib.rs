@@ -7,7 +7,7 @@ use num_cpus;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use rayon;
+use tokio::runtime::Runtime;
 
 use execgraph::{Cmd, ExecGraph};
 
@@ -25,31 +25,26 @@ use execgraph::{Cmd, ExecGraph};
 /// parallelism.
 ///
 /// Args:
-///    num_threads (Optional[int]): Number of threads to use for
-///        parallel stuff. If not supplied, we'll use 2 more than the number
-///        of CPU cores.
+///    num_parallel (Optional[int]): Maximum number of parallel processes
+///      to run. If not supplied, we'll use 2 more than the number of CPU cores.
 ///    keyfile (str): The path to the log file.
 #[pyclass(name = "ExecGraph")]
 pub struct PyExecGraph {
     g: ExecGraph,
-    pool: rayon::ThreadPool,
+    num_parallel: usize,
 }
 
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_threads = 0)]
-    fn new(mut num_threads: usize, keyfile: String) -> PyResult<PyExecGraph> {
-        if num_threads == 0 {
-            num_threads = num_cpus::get() + 2;
+    #[args(num_parallel = 0)]
+    fn new(mut num_parallel: usize, keyfile: String) -> PyResult<PyExecGraph> {
+        if num_parallel == 0 {
+            num_parallel = num_cpus::get() + 2;
         }
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build()
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyExecGraph {
             g: ExecGraph::new(keyfile),
-            pool: pool,
+            num_parallel: num_parallel,
         })
     }
 
@@ -159,8 +154,8 @@ impl PyExecGraph {
     ///
     #[args(target = "None")]
     fn execute(&mut self, target: Option<u32>) -> PyResult<(u32, Vec<u32>)> {
-        self.g
-            .execute(target, &self.pool)
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async { self.g.execute(target, self.num_parallel).await })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 }
