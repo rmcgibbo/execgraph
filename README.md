@@ -24,9 +24,9 @@ class ExecGraph
 
 def add_task(cmdline, key, dependencies, display):
   Add a task to the graph.
-  
+
   Each task is identified by a couple pieces of information:
-  
+
     1. First, there's the shell command to execute. This is supplied
        as `cmdline`. It is interpreted with "sh -c", which is why it's
        just a string, rather than a list of strings to directly execve
@@ -46,11 +46,11 @@ def add_task(cmdline, key, dependencies, display):
        we run the command. If not supplied, we'll just use the cmdline for these
        purposes. But if the cmdline contains some boring wrapper scripts that you
        want to hide from your users, this might make sense.
-  
+
   Notes:
     If key == "", then the task will never be skipped (i.e. it will always be
     considered out of date).
-  
+
   Args:
     cmdline (str): command to execute
     key (str): unique identifier
@@ -61,23 +61,29 @@ def add_task(cmdline, key, dependencies, display):
 
 def execute(target: Optional[int] = None):
   Execute all the commands (in parallel to the extent possible while obeying
-  the dependencies), and skipping any that the log file identifies as having 
+  the dependencies), and skipping any that the log file identifies as having
   previously completed successfully.
-  
+
   Args:
     target (Optional[int]): if you'd like to particularly execute up to a single
       target, you can do this. in this case we'll only execute the tasks that
       are required for this target. if not supplied we'll try to execute the
       whole graph.
-  
+
   Notes:
     We currently do not do output buffering, so stdout goes directly to the
     terminal, including the bad behavior of overlapping streams for stout of
     commands executed in parallel.
-  
+
   Returns:
     num_failed (int): the number of tasks that failed. a failure is identified
       when a task exits with a nonzero exit code.
     execution_order (List[int]): the ids of the tasks that finished (success
       or failure) in order of when they finished.
 ```
+
+## Hacking
+
+1. `nix develop` should get you a shell with all the dependencies installed.
+2. `cargo build && py.test` to run the python tests.
+3. `cargo test --no-default-feature` to run the rust tests.
