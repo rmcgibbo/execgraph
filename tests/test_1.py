@@ -8,13 +8,28 @@ import networkx as nx
 import pytest
 import os
 
-N = multiprocessing.cpu_count() + 2
+import logging
+FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
+logging.basicConfig(format=FORMAT)
+logging.getLogger().setLevel(logging.DEBUG)
 
-if os.path.exists("target/debug/lib_execgraph.so"):
-    shutil.copy("target/debug/lib_execgraph.so", "_execgraph.so")
+
+
+if os.path.exists("target/release/libexecgraph.so"):
+    shutil.copy("target/release/libexecgraph.so", "execgraph.so")
     sys.path.insert(0, ".")
 
-import _execgraph
+elif os.path.exists("target/debug/libexecgraph.so"):
+    shutil.copy("target/debug/libexecgraph.so", "execgraph.so")
+    sys.path.insert(0, ".")
+
+import execgraph as _execgraph
+
+@pytest.fixture
+def num_parallel():
+    N = multiprocessing.cpu_count() + 2
+    return N
+
 
 
 def random_ordered_dag(seed):
@@ -33,14 +48,14 @@ def random_ordered_dag(seed):
     return g
 
 
-def test_1(tmp_path):
+def test_1(num_parallel, tmp_path):
     g = nx.DiGraph([(i, i + 1) for i in range(10)])
     g.add_edges_from([(i, i + 1) for i in range(10, 20)])
     g = nx.relabel_nodes(
         g, {j: i for i, j in enumerate(nx.topological_sort(g.reverse()))}
     )
 
-    eg = _execgraph.ExecGraph(num_parallel=10, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(num_parallel=num_parallel, keyfile=str(tmp_path / "foo"))
 
     for u in nx.topological_sort(g.reverse()):
         # print(u)
@@ -71,6 +86,7 @@ def test_2(seed, tmp_path):
         eg.add_task("", "", dependencies)
 
     failed, execution_order = eg.execute()
+    assert len(execution_order) == g.number_of_nodes()
     assert failed == 0
 
     # Verify that the execution actually happened in topological order
@@ -79,23 +95,23 @@ def test_2(seed, tmp_path):
         assert execution_order.index(node) > execution_order.index(dependency)
 
 
-def test_3(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_3(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
     eg.add_task("false", "")
     nfailed, _ = eg.execute()
     assert nfailed == 1
 
 
-def test_4(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_4(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
     eg.add_task("false", "")
     eg.add_task("true", "", [0])
     nfailed, order = eg.execute()
     assert nfailed == 1 and order == [0]
 
 
-def test_5(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_5(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     eg.add_task("true", "", [])
     for i in range(1, 10):
@@ -117,8 +133,8 @@ def test_help():
     assert inspect.getdoc(_execgraph.ExecGraph.execute) is not None
 
 
-def test_key(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_key(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     eg.add_task("true", "0", [])
     for i in range(1, 10):
@@ -126,23 +142,23 @@ def test_key(tmp_path):
     assert len(eg.execute()[1]) == 10
     assert len(eg.execute()[1]) == 0
 
-    eg2 = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+    eg2 = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
     eg2.add_task("true", "0", [])
     for i in range(1, 11):
         eg2.add_task("true", str(i), [i - 1])
     assert len(eg2.execute()[1]) == 1
 
 
-def test_inward(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_inward(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     tasks = [eg.add_task("sleep 0.5 && false", "") for i in range(5)]
     eg.add_task("true", "", tasks)
     eg.execute()
 
 
-def test_twice(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_twice(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     tasks = [
         eg.add_task("true", f"same_key_each_time", display="truedisplay")
@@ -155,8 +171,8 @@ def test_twice(tmp_path):
     assert len(lines) == 2
 
 
-def test_scan_keys(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_scan_keys(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     for i in range(10):
         eg.add_task("", key=f"helloworld{i}")
@@ -166,8 +182,8 @@ def test_scan_keys(tmp_path):
     assert eg.scan_keys("helloworld7 helloworld1") == [1, 7]
 
 
-def test_order(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_order(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     for i in range(10):
         eg.add_task("", key=f"helloworld{i}")
@@ -178,8 +194,8 @@ def test_order(tmp_path):
     assert b == [id11]
 
 
-def test_not_execute_twice(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_not_execute_twice(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     eg.add_task("true", key="task0")
     eg.add_task("false", key="task1", dependencies=[0])
@@ -190,10 +206,46 @@ def test_not_execute_twice(tmp_path):
     assert nfailed2 == 0 and order2 == []
 
 
-def test_simple(tmp_path):
-    eg = _execgraph.ExecGraph(N, str(tmp_path / "foo"))
+def test_simple_remote(num_parallel, tmp_path):
+    provisioner = os.path.dirname(__file__) + "/../target/debug/execgraph-remote"
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=provisioner)
 
     eg.add_task("echo foo; sleep 1; echo foo", key="task0")
-    eg.add_task("echo bar; sleep 1; echo foo", key="task1")
+    for i in range(1, 5):
+        eg.add_task("echo foo; sleep 0.1; echo foo", key="", dependencies=[i-1])
 
-    eg.execute()
+    nfailed, _ = eg.execute()
+    assert nfailed == 0
+
+
+def test_poisoned(tmp_path):
+    eg = _execgraph.ExecGraph(8, str(tmp_path / "foo"), failures_allowed=0)
+    first = []
+    for i in range(10):
+        cmd = "true" if i % 2 == 0 else f"false {i}"
+        first.append(eg.add_task(cmd, key="",))
+    final = eg.add_task("true", key="", dependencies=first)
+    final2 = eg.add_task("true", key="", dependencies=[final])
+    nfailed, order = eg.execute()
+    assert nfailed == 5
+    assert len(order) == 10
+
+
+def test_no_such_command(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
+
+    eg.add_task("skdfjsbfjdbsbjdfssdf", key="task0")
+
+    nfailed1, order1 = eg.execute()
+    assert nfailed1 == 1
+
+
+@pytest.mark.parametrize("provisioner", ["sdfjsbndfjsdkfsdsdfsd", "false", "true"])
+def test_no_such_provisioner(num_parallel, tmp_path, provisioner):
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=provisioner)
+
+    eg.add_task("skdfjsbfjdbsbjdfssdf", key="task0")
+
+    nfailed, order = eg.execute()
+    assert nfailed == 0
+    assert order == []

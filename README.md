@@ -16,9 +16,20 @@ class ExecGraph
   parallelism.
 
   Args:
-    num_parallel (Optional[int]): Maximum number of parallel processes
-      to run. If not supplied, we'll use 2 more than the number of CPU cores.
+    num_parallel (int): Maximum number of parallel processes
+      to run. [default=2 more than the number of CPU cores].
     keyfile (str): The path to the log file.
+    remote_provisioner (Optional[str]): Path to a remote provisioning script.
+      If supplied, we call this script with the url of an emphemeral server
+      as the first argument, and it can launch processes that can connect back
+      to this ExecGraph instance's http server to run tasks. Note: this package
+      includes a binary called ``execgraph-remote`` which implemenets the HTTP
+      protocol to "check out" tasks from the server, run them, and report their
+      status back. You'll need to write a provisioner script that arranges for
+      these execgraph-remote processes to be executed remotely using whatever
+      job queuing system you have though.
+    failures_allowed (int): keep going until N jobs fail (0 means infinity)
+      [default=1].
 
 
 def add_task(cmdline, key, dependencies, display):
@@ -86,3 +97,26 @@ def execute(target: Optional[int] = None):
 1. `nix develop` should get you a shell with all the dependencies installed.
 2. `cargo build && py.test` to run the python tests.
 3. `cargo test --no-default-feature` to run the rust tests.
+
+
+## Remote protocol
+In its default mode of operation, execgraph executes tasks on your local CPUs.
+However, it also includes a feature that enables you to execute them remotely
+across a cluster. Here's how it works:
+ * The execgraph object can run a little bundled http server on a random port
+   that is capable of giving out jobs and collecting their results.
+ * We bundle a binary called `execgraph-remote`. It is invoked with the URL
+   of an execgraph server, pulls jobs from the server, executes them, and
+   sends back the exit status (it does not send back stdout/stderr, but maybe
+   it should).
+ * If you want to use this feature, you supply execgraph with the path to an
+   executable called `remote_provisioner`. During the `execute()` call, we'll
+   run this script, passing it the the url of the embedded server and it should
+   arrange for `execgraph-remote` to be run on your cluster using whatever
+   cluster management system you run. This requires a little setup, but it's
+   required since we don't know what kind of cluster system you run and there are
+   so many possible varieties.
+ * There's a http endpoint called /status on the server, which will reply with
+   some information about the current number of ready, inflight, success, and
+   failed tasks. You can hit this endpoint from your provisioner script to decide
+   how many workers to spawn according to whatever policies you prefer.

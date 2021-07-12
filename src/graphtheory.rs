@@ -21,7 +21,7 @@ pub fn descendants_at_distance<N, V>(
 
     // this is basically BFS, except that the queue only stores the nodes at
     // current_distance from source at each iteration
-    while queue.len() > 0 {
+    while !queue.is_empty() {
         if current_distance == distance {
             return queue;
         }

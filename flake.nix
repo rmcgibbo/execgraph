@@ -22,6 +22,7 @@
         buildInputs = with pkgs; with python39Packages; [
           cargo
           rustc
+          clippy
           maturin
 
           rustfmt

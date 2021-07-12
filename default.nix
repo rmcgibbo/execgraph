@@ -33,7 +33,8 @@ in buildPythonPackage rec {
   cargoDeps = rustPlatform.fetchCargoTarball {
     inherit src;
     name = "${pname}-${version}";
-    sha256 = "sha256-2sYu7leg9ZpplucdYapBFfSYvOkwvb8+1j0RP+cmK3k=";
+    sha256 = "sha256-q46C5qW6gsZQgNT/RV43zT0QgIWdnE9lZwozSKnVKhY=";
+    # sha256 = "0000000000000000000000000000000000000000000000000000";
   };
 
   nativeBuildInputs = with rustPlatform; [
@@ -51,5 +52,5 @@ in buildPythonPackage rec {
     scipy
     networkx
   ] ;
-  pythonImportsCheck = [ "_execgraph" ];
+  pythonImportsCheck = [ "execgraph" ];
 }

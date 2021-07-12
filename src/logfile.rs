@@ -10,7 +10,7 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = String> {
 
     lines.filter_map(|line| {
         let line_ = line.ok()?;
-        let fields = line_.splitn(5, "\t").collect::<Vec<_>>();
+        let fields = line_.splitn(5, '\t').collect::<Vec<_>>();
         if fields.len() == 5 {
             let _time = fields[0].parse::<u128>().ok()?;
             let key = fields[1];
@@ -18,7 +18,7 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = String> {
             let _pid = fields[3].parse::<u32>().ok()?;
             let _cmd = fields[4];
             if exit_status == 0 {
-                Some(key.to_string())
+                Some(key.to_owned())
             } else {
                 None
             }
@@ -38,12 +38,12 @@ impl LogWriter {
             .create(true)
             .append(true)
             .open(filename)?;
-        Ok(LogWriter { file: file })
+        Ok(LogWriter { file })
     }
 
     pub fn begin_command(&mut self, cmd: &str, key: &str, pid: u32) -> Result<()> {
         let fake_exit_status = -1;
-        if key != "" {
+        if !key.is_empty() {
             writeln!(
                 self.file,
                 "{}\t{}\t{}\t{}\t{}",
@@ -58,7 +58,7 @@ impl LogWriter {
     }
 
     pub fn end_command(&mut self, cmd: &str, key: &str, exit_status: i32, pid: u32) -> Result<()> {
-        if key != "" {
+        if !key.is_empty() {
             writeln!(
                 self.file,
                 "{}\t{}\t{}\t{}\t{}",

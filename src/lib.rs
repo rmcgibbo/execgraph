@@ -1,15 +1,16 @@
 mod execgraph;
 mod graphtheory;
+pub mod httpinterface;
 mod logfile;
-mod sync;
+mod server;
+pub mod sync;
 
-use num_cpus;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use tokio::runtime::Runtime;
 
-use execgraph::{Cmd, ExecGraph};
+use crate::execgraph::{Cmd, ExecGraph};
 
 /// Parallel execution of shell commands with DAG dependencies.
 /// It's sort of like the core routine behind a build system like Make
@@ -25,26 +26,50 @@ use execgraph::{Cmd, ExecGraph};
 /// parallelism.
 ///
 /// Args:
-///    num_parallel (Optional[int]): Maximum number of parallel processes
-///      to run. If not supplied, we'll use 2 more than the number of CPU cores.
+///    num_parallel (int): Maximum number of local parallel processes
+///      to run. [default=2 more than the number of CPU cores].
 ///    keyfile (str): The path to the log file.
+///    remote_provisioner (Optional[str]): Path to a remote provisioning script.
+///      If supplied, we call this script with the url of an emphemeral server
+///      as the first argument, and it can launch processes that can connect back
+///      to this ExecGraph instance's http server to run tasks. Note: this package
+///      includes a binary called ``execgraph-remote`` which implemenets the HTTP
+///      protocol to "check out" tasks from the server, run them, and report their
+///      status back. You'll need to write a provisioner script that arranges for
+///      these execgraph-remote processes to be executed remotely using whatever
+///      job queuing system you have though.
+///   failures_allowed (int): keep going until N jobs fail (0 means infinity)d
+///     [default=1].
+///
 #[pyclass(name = "ExecGraph")]
 pub struct PyExecGraph {
     g: ExecGraph,
-    num_parallel: usize,
+    num_parallel: u32,
+    failures_allowed: u32,
 }
 
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_parallel = 0)]
-    fn new(mut num_parallel: usize, keyfile: String) -> PyResult<PyExecGraph> {
-        if num_parallel == 0 {
-            num_parallel = num_cpus::get() + 2;
+    #[args(num_parallel = -1, remote_provisioner = "None", failures_allowed = 1)]
+    fn new(
+        mut num_parallel: i32,
+        keyfile: String,
+        failures_allowed: u32,
+        remote_provisioner: Option<String>,
+    ) -> PyResult<PyExecGraph> {
+        if num_parallel < 0 {
+            num_parallel = num_cpus::get() as i32 + 2;
         }
+
         Ok(PyExecGraph {
-            g: ExecGraph::new(keyfile),
-            num_parallel: num_parallel,
+            g: ExecGraph::new(keyfile, remote_provisioner),
+            num_parallel: num_parallel as u32,
+            failures_allowed: (if failures_allowed == 0 {
+                u32::MAX
+            } else {
+                failures_allowed
+            }),
         })
     }
 
@@ -83,25 +108,25 @@ impl PyExecGraph {
     ///
     /// Each task is identified by a couple pieces of information:
     ///
-    ///     1. First, there's the shell command to execute. This is supplied
-    ///        as `cmdline`. It is interpreted with "sh -c", which is why it's
-    ///        just a string, rather than a list of strings to directly execve
-    ///     2. Second, there's `key`. The idea is that this is a unique identifier
-    ///        for the command -- it could be the hash of the cmdline, or the hash
-    ///        of the cmdline and all of its inputs, or something like that. (We don't
-    ///        do it for you). When we execute the command, we'll append the key to
-    ///        a log file. That way when we rerun the graph at some later time, we'll
-    ///        be able to skip executing any commands that have already been executed.
-    ///        Note: the key may not contain any tab characters.
-    ///     3. Finally, there's the list of dependencies, identified by integer ids
-    ///        that reference previous tasks. A task cannot depend on itself, and can only
-    ///        depend on previous tasks tha have already been added. This enforces a DAG
-    ///        structure.
-    ///     4. Oh, actually there's one more thing: the display string. This is the
-    ///        string associated with the command that will be printed to stdout when
-    ///        we run the command. If not supplied, we'll just use the cmdline for these
-    ///        purposes. But if the cmdline contains some boring wrapper scripts that you
-    ///        want to hide from your users, this might make sense.
+    ///   1. First, there's the shell command to execute. This is supplied
+    ///      as "cmdline". It is interpreted with "sh -c", which is why it's
+    ///      just a string, rather than a list of strings to directly execve
+    ///   2. Second, there's "key". The idea is that this is a unique identifier
+    ///      for the command -- it could be the hash of the cmdline, or the hash
+    ///      of the cmdline and all of its inputs, or something like that. (We don't
+    ///      do it for you). When we execute the command, we'll append the key to
+    ///      a log file. That way when we rerun the graph at some later time, we'll
+    ///      be able to skip executing any commands that have already been executed.
+    ///      Note: the key may not contain any tab characters.
+    ///   3. Finally, there's the list of dependencies, identified by integer ids
+    ///      that reference previous tasks. A task cannot depend on itself, and can only
+    ///      depend on previous tasks tha have already been added. This enforces a DAG
+    ///      structure.
+    ///   4. Oh, actually there's one more thing: the display string. This is the
+    ///      string associated with the command that will be printed to stdout when
+    ///      we run the command. If not supplied, we'll just use the cmdline for these
+    ///      purposes. But if the cmdline contains some boring wrapper scripts that you
+    ///      want to hide from your users, this might make sense.
     ///
     /// Notes:
     ///   If key == "", then the task will never be skipped (i.e. it will always be
@@ -122,9 +147,9 @@ impl PyExecGraph {
         display: Option<String>,
     ) -> PyResult<u32> {
         let cmd = Cmd {
-            cmdline: cmdline,
-            key: key,
-            display: display,
+            cmdline,
+            key,
+            display,
         };
         self.g
             .add_task(cmd, dependencies)
@@ -153,15 +178,22 @@ impl PyExecGraph {
     ///         or failure) in order of when they finished.
     ///
     #[args(target = "None")]
-    fn execute(&mut self, target: Option<u32>) -> PyResult<(u32, Vec<u32>)> {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async { self.g.execute(target, self.num_parallel).await })
+    fn execute(&mut self, py: Python, target: Option<u32>) -> PyResult<(u32, Vec<u32>)> {
+        py.allow_threads(move || {
+            let rt = Runtime::new().unwrap();
+            rt.block_on(async {
+                self.g
+                    .execute(target, self.num_parallel, self.failures_allowed)
+                    .await
+            })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        })
     }
 }
 
 #[pymodule]
-pub fn _execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
+pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
+    pyo3_log::init();
     m.add_class::<PyExecGraph>()?;
     Ok(())
 }

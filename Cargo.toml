@@ -3,19 +3,37 @@ name = "execgraph"
 version = "0.1.0"
 authors = ["Robert T. McGibbon <rmcgibbo@gmail.com>"]
 edition = "2018"
+resolver = "2"
 
 [lib]
-name = "_execgraph"
-crate-type = ["cdylib"]
+name = "execgraph"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow = "^1.0"
-petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}
-tokio = { version = "1.8", features = ["full"] }
 async-channel = "1.6.1"
-pyo3 = "^0.13"
-futures = "0.3"
+env_logger = "*"
+futures = "*"
+getrandom = "0.2"
+gethostname = "*"
+hyper = "*"
+log = "*"
 num_cpus = "*"
+petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}
+pyo3 = "^0.14"
+pyo3-log = "*"
+reqwest = { version = "0.11", features = ["json"],  default-features = false }
+routerify = "*"
+routerify-json-response = "2"
+serde = {version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# drop_guard is not yet in the released version of tokio-util (need version after 0.6.7)
+tokio = {version = "1.8.1", features=["full"]}
+tokio-util = {version = "0.6.7"}
+structopt = { version = "0.3", default-features = false }
+url = "*"
+whoami = "*"
+
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
 # to run rust tests, need to do ``$ cargo test --no-default-features``
