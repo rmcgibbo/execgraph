@@ -18,9 +18,7 @@ pub struct DropGuard {
 }
 impl DropGuard {
     pub fn new(token: CancellationToken) -> DropGuard {
-        DropGuard {
-            inner: Some(token)
-        }
+        DropGuard { inner: Some(token) }
     }
 }
 impl Drop for DropGuard {

@@ -2,6 +2,7 @@ use crate::graphtheory::transitive_closure_dag;
 use crate::logfile::load_keys_exit_status_0;
 use crate::server::router;
 use crate::server::State as ServerState;
+use crate::sync::DropGuard;
 use crate::sync::{ReadyTracker, StatusUpdater};
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-use crate::sync::DropGuard;
 
 #[derive(Debug, Clone, Default)]
 pub struct Cmd {
@@ -45,7 +45,11 @@ pub struct ExecGraph {
 }
 
 impl ExecGraph {
-    pub fn new(keyfile: String, provisioner: Option<String>, provisioner_arg2: Option<String>) -> ExecGraph {
+    pub fn new(
+        keyfile: String,
+        provisioner: Option<String>,
+        provisioner_arg2: Option<String>,
+    ) -> ExecGraph {
         ExecGraph {
             deps: Graph::new(),
             keyfile,
@@ -197,6 +201,7 @@ impl ExecGraph {
         //
         let token = CancellationToken::new();
         let token1 = token.clone();
+        let token2 = token.clone();
 
         if self.provisioner.is_some() {
             let subgraph1 = subgraph.clone();
@@ -211,16 +216,14 @@ impl ExecGraph {
                 let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                 let server = Server::bind(&addr).serve(service);
                 let bound_addr = server.local_addr();
-
+                let graceful = server.with_graceful_shutdown(token1.cancelled());
 
                 tokio::spawn(async move {
                     // if this task exits, it'll dropping the _drop_guard will
                     // trigger the cancellation token
-                    let _drop_guard = DropGuard::new(token1);
+                    let _drop_guard = DropGuard::new(token2);
                     let mut cmd = Command::new(&provisioner);
-                    let mut rcmd = cmd
-                        .arg(format!("http://{}", bound_addr))
-                        .kill_on_drop(true);
+                    let mut rcmd = cmd.arg(format!("http://{}", bound_addr)).kill_on_drop(true);
                     if let Some(p2) = p2 {
                         rcmd = rcmd.arg(p2);
                     }
@@ -236,7 +239,7 @@ impl ExecGraph {
                     }
                 });
 
-                if let Err(err) = server.await {
+                if let Err(err) = graceful.await {
                     log::error!("Server error: {}", err);
                 }
             });
@@ -247,8 +250,11 @@ impl ExecGraph {
         tokio::select! {
             _ = servicer.background_serve(&self.keyfile) => {
                 join_all(handles).await;
+                token.cancel();
             },
-            _ = signal::ctrl_c() => {},
+            _ = signal::ctrl_c() => {
+                token.cancel();
+            },
             _ = token.cancelled() => {},
         };
 

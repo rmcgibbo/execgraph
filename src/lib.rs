@@ -198,7 +198,7 @@ impl PyExecGraph {
 
 #[pymodule]
 pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
-    pyo3_log::init();
+    env_logger::init();
     m.add_class::<PyExecGraph>()?;
     Ok(())
 }

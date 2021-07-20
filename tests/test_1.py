@@ -7,23 +7,17 @@ import scipy.sparse
 import networkx as nx
 import pytest
 import os
-
-import logging
-FORMAT = '%(levelname)s %(name)s %(asctime)-15s %(filename)s:%(lineno)d %(message)s'
-logging.basicConfig(format=FORMAT)
-logging.getLogger().setLevel(logging.DEBUG)
+from distutils.spawn import find_executable
 
 
-
-if os.path.exists("target/release/libexecgraph.so"):
-    shutil.copy("target/release/libexecgraph.so", "execgraph.so")
-    sys.path.insert(0, ".")
-
-elif os.path.exists("target/debug/libexecgraph.so"):
+if os.path.exists("target/debug/libexecgraph.so"):
     shutil.copy("target/debug/libexecgraph.so", "execgraph.so")
     sys.path.insert(0, ".")
+    os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"
+    # print(os.environ["PATH"])
 
 import execgraph as _execgraph
+# print(dir(_execgraph))
 
 @pytest.fixture
 def num_parallel():
@@ -207,8 +201,7 @@ def test_not_execute_twice(num_parallel, tmp_path):
 
 
 def test_simple_remote(num_parallel, tmp_path):
-    provisioner = os.path.dirname(__file__) + "/../target/debug/execgraph-remote"
-    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=provisioner)
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner="execgraph-remote")
 
     eg.add_task("echo foo; sleep 1; echo foo", key="task0")
     for i in range(1, 5):
@@ -249,3 +242,20 @@ def test_no_such_provisioner(num_parallel, tmp_path, provisioner):
     nfailed, order = eg.execute()
     assert nfailed == 0
     assert order == []
+
+
+def test_shutdown(tmp_path):
+    assert find_executable("execgraph-remote") is not None
+    with open(tmp_path / "multi-provisioner", "w") as f:
+        print("#!/bin/sh", file=f)
+        print("set -e -x", file=f)
+        print("sleep 1", file=f)
+        for i in range(10):
+            print(f"execgraph-remote $1 &", file=f)
+        print("wait", file=f)
+
+    os.chmod(tmp_path / "multi-provisioner", 0o744)
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner"))
+    eg.add_task("false", key="")
+    nfailed, _ = eg.execute()
+    assert nfailed == 1

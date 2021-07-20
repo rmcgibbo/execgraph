@@ -76,7 +76,7 @@ async fn middleware_after(
         .context::<(tokio::time::Instant, SocketAddr)>()
         .unwrap();
     let duration = started.elapsed();
-    log::trace!(
+    log::debug!(
         "{} {} {} {}us {}",
         remote_addr,
         req_info.method(),
@@ -183,6 +183,16 @@ async fn start_handler(
     let transaction_id = get_random_u32();
     let state = req.data::<Arc<State>>().unwrap();
 
+    let node_id = match state.tasks_ready.recv().await {
+        Ok(node_id) => node_id,
+        Err(e) => {
+            return json_failed_resp_with_message(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{}", e),
+            );
+        }
+    };
+
     let (ping_tx, ping_rx) = bounded::<()>(1);
     let token = CancellationToken::new();
     let token1 = token.clone();
@@ -191,10 +201,20 @@ async fn start_handler(
         loop {
             tokio::select! {
                 to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
-                    if to.is_err() {
-                        ping_timeout_handler(transaction_id, state1).await;
-                        break;
+                    match to {
+                        Err(_) => {
+                            ping_timeout_handler(transaction_id, state1).await;
+                            break;
+                        }, Ok(Err(e)) => {
+                            // send side of the ping channel has been dropped. server probably shutting down?
+                            log::debug!("{}", e);
+                            break;
+                        },
+                        _ => {
+                            log::debug!("Got ping within timeout");
+                        }
                     }
+
                 }
                 _ = token1.cancelled() => {
                     break;
@@ -203,15 +223,6 @@ async fn start_handler(
         }
     });
 
-    let node_id = match state.tasks_ready.recv().await {
-        Ok(node_id) => {node_id},
-        Err(e) => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{}", e),
-            );
-        }
-    };
     let (cmd, _) = state
         .subgraph
         .node_weight(node_id)

@@ -39,11 +39,23 @@ in buildPythonPackage rec {
 
   nativeBuildInputs = with rustPlatform; [
     cargoSetupHook
+    rust.rustc
+    rust.cargo
     maturinBuildHook
   ];
 
-  postInstall = ''
-    cargo test --verbose --no-default-features
+  preBuild = ''
+    cargo build -j $NIX_BUILD_CORES \
+      --frozen \
+      --release \
+      --bins
+
+    mkdir -p $out/bin
+    install -Dv target/release/execgraph-remote $out/bin/
+  '';
+
+  preCheck = ''
+    export PATH=$out/bin:$PATH
   '';
 
   checkInputs = [

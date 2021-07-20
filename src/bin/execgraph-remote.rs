@@ -52,6 +52,7 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client) -> Result<()
         .get( start_route)
         .send()
         .await?
+        .error_for_status()?
         .json::<StartResponseFull>()
         .await?;
 
