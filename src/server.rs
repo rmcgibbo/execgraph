@@ -327,7 +327,7 @@ pub fn router(state: State) -> Router<Body, routerify_json_response::Error> {
         .data(Arc::new(state))
         .middleware(Middleware::pre(middleware_before))
         .middleware(Middleware::post_with_info(middleware_after))
-        .post("/status", status_handler)
+        .get("/status", status_handler)
         .post("/ping", ping_handler)
         .get("/start", start_handler)
         .post("/begun", begun_handler)
