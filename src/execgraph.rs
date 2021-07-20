@@ -17,6 +17,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::signal;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Default)]
@@ -217,6 +218,7 @@ impl ExecGraph {
                 let server = Server::bind(&addr).serve(service);
                 let bound_addr = server.local_addr();
                 let graceful = server.with_graceful_shutdown(token1.cancelled());
+                let (tx, rx) = oneshot::channel();
 
                 tokio::spawn(async move {
                     // if this task exits, it'll dropping the _drop_guard will
@@ -228,8 +230,10 @@ impl ExecGraph {
                         rcmd = rcmd.arg(p2);
                     }
 
-                    let status = rcmd.status();
-                    match status.await {
+                    let mut child = rcmd.spawn().unwrap_or_else(|_| panic!("command failed to start: {}", provisioner));
+                    tx.send(()).expect("failed to send");
+
+                    match child.wait().await {
                         Ok(status) => {
                             log::error!("provisioner exited with status={}", status);
                         }
@@ -239,6 +243,7 @@ impl ExecGraph {
                     }
                 });
 
+                rx.await.expect("failed to receive");
                 if let Err(err) = graceful.await {
                     log::error!("Server error: {}", err);
                 }

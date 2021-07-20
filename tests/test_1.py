@@ -249,7 +249,6 @@ def test_shutdown(tmp_path):
     with open(tmp_path / "multi-provisioner", "w") as f:
         print("#!/bin/sh", file=f)
         print("set -e -x", file=f)
-        print("sleep 1", file=f)
         for i in range(10):
             print(f"execgraph-remote $1 &", file=f)
         print("wait", file=f)
