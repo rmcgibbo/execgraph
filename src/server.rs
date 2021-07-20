@@ -203,11 +203,15 @@ async fn start_handler(
         }
     });
 
-    let node_id = state
-        .tasks_ready
-        .recv()
-        .await
-        .expect("failed to receive from tasks_ready queue");
+    let node_id = match state.tasks_ready.recv().await {
+        Ok(node_id) => {node_id},
+        Err(e) => {
+            return json_failed_resp_with_message(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{}", e),
+            );
+        }
+    };
     let (cmd, _) = state
         .subgraph
         .node_weight(node_id)

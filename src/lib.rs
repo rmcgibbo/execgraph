@@ -29,6 +29,8 @@ use crate::execgraph::{Cmd, ExecGraph};
 ///    num_parallel (int): Maximum number of local parallel processes
 ///      to run. [default=2 more than the number of CPU cores].
 ///    keyfile (str): The path to the log file.
+///    failures_allowed (int): keep going until N jobs fail (0 means infinity)
+///      [default=1].
 ///    remote_provisioner (Optional[str]): Path to a remote provisioning script.
 ///      If supplied, we call this script with the url of an emphemeral server
 ///      as the first argument, and it can launch processes that can connect back
@@ -38,8 +40,10 @@ use crate::execgraph::{Cmd, ExecGraph};
 ///      status back. You'll need to write a provisioner script that arranges for
 ///      these execgraph-remote processes to be executed remotely using whatever
 ///      job queuing system you have though.
-///   failures_allowed (int): keep going until N jobs fail (0 means infinity)d
-///     [default=1].
+///   remote_provisioner_arg2 (Optional[str]): If you have extra data that you
+///     want to pass to the remote provisioner script, you can use this. If supplied
+///     it'll be passed as the second argument to remote_provisioner. The first
+///     argument will be the url.
 ///
 #[pyclass(name = "ExecGraph")]
 pub struct PyExecGraph {
@@ -51,19 +55,20 @@ pub struct PyExecGraph {
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_parallel = -1, remote_provisioner = "None", failures_allowed = 1)]
+    #[args(num_parallel = -1, failures_allowed = 1, remote_provisioner = "None", remote_provisioner_arg2 = "None")]
     fn new(
         mut num_parallel: i32,
         keyfile: String,
         failures_allowed: u32,
         remote_provisioner: Option<String>,
+        remote_provisioner_arg2: Option<String>,
     ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
         }
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(keyfile, remote_provisioner),
+            g: ExecGraph::new(keyfile, remote_provisioner, remote_provisioner_arg2),
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX

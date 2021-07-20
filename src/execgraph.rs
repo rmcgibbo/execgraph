@@ -10,7 +10,6 @@ use hyper::Server;
 use petgraph::prelude::*;
 use routerify::RouterService;
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::os::unix::process::ExitStatusExt;
@@ -42,15 +41,17 @@ pub struct ExecGraph {
     keyfile: String,
     completed: Vec<NodeIndex>,
     provisioner: Option<String>,
+    provisioner_arg2: Option<String>,
 }
 
 impl ExecGraph {
-    pub fn new(keyfile: String, provisioner: Option<String>) -> ExecGraph {
+    pub fn new(keyfile: String, provisioner: Option<String>, provisioner_arg2: Option<String>) -> ExecGraph {
         ExecGraph {
             deps: Graph::new(),
             keyfile,
             completed: vec![],
             provisioner,
+            provisioner_arg2,
         }
     }
 
@@ -201,7 +202,8 @@ impl ExecGraph {
             let subgraph1 = subgraph.clone();
             let tasks_ready1 = tasks_ready.clone();
             let status_updater1 = status_updater.clone();
-            let provisioner = self.provisioner.clone().unwrap();
+            let provisioner = format!("{}", self.provisioner.clone().unwrap());
+            let p2 = self.provisioner_arg2.clone();
             tokio::spawn(async move {
                 let state = ServerState::new(subgraph1, tasks_ready1, status_updater1);
                 let router = router(state);
@@ -210,22 +212,26 @@ impl ExecGraph {
                 let server = Server::bind(&addr).serve(service);
                 let bound_addr = server.local_addr();
 
-                let p: Arc<OsString> = Arc::new(provisioner.into());
+
                 tokio::spawn(async move {
                     // if this task exits, it'll dropping the _drop_guard will
                     // trigger the cancellation token
                     let _drop_guard = DropGuard::new(token1);
-                    match Command::new(&*p)
+                    let mut cmd = Command::new(&provisioner);
+                    let mut rcmd = cmd
                         .arg(format!("http://{}", bound_addr))
-                        .kill_on_drop(true)
-                        .status()
-                        .await
-                    {
+                        .kill_on_drop(true);
+                    if let Some(p2) = p2 {
+                        rcmd = rcmd.arg(p2);
+                    }
+
+                    let status = rcmd.status();
+                    match status.await {
                         Ok(status) => {
                             log::error!("provisioner exited with status={}", status);
                         }
                         Err(e) => {
-                            log::error!("command failed to start: {:?} {}", p, e);
+                            log::error!("command failed to start: {:?} {}", provisioner, e);
                         }
                     }
                 });
