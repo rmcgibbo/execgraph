@@ -183,7 +183,7 @@ async fn start_handler(
     let transaction_id = get_random_u32();
     let state = req.data::<Arc<State>>().unwrap();
 
-    let node_id = match state.tasks_ready.recv().await {
+    let node_id = match state.tasks_ready.try_recv() {
         Ok(node_id) => node_id,
         Err(e) => {
             return json_failed_resp_with_message(
