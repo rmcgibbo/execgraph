@@ -17,6 +17,7 @@ futures = "*"
 getrandom = "0.2"
 gethostname = "*"
 hyper = "*"
+libc = "*"
 log = "*"
 num_cpus = "*"
 petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}

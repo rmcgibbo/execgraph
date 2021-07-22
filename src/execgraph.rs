@@ -2,8 +2,8 @@ use crate::graphtheory::transitive_closure_dag;
 use crate::logfile::load_keys_exit_status_0;
 use crate::server::router;
 use crate::server::State as ServerState;
-use crate::sync::DropGuard;
 use crate::sync::{ReadyTracker, StatusUpdater};
+use crate::unsafecode;
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
 use futures::future::join_all;
@@ -201,8 +201,7 @@ impl ExecGraph {
         // Create the server that can manage farming off tasks to remote machines over http
         //
         let token = CancellationToken::new();
-        let token1 = token.clone();
-        let token2 = token.clone();
+        let (provisioner_exited_tx, provisioner_exited_rx) = oneshot::channel();
 
         if self.provisioner.is_some() {
             let subgraph1 = subgraph.clone();
@@ -210,6 +209,10 @@ impl ExecGraph {
             let status_updater1 = status_updater.clone();
             let provisioner = format!("{}", self.provisioner.clone().unwrap());
             let p2 = self.provisioner_arg2.clone();
+            let token1 = token.clone();
+            let token2 = token.clone();
+            let token3 = token.clone();
+
             tokio::spawn(async move {
                 let state = ServerState::new(subgraph1, tasks_ready1, status_updater1);
                 let router = router(state);
@@ -218,36 +221,24 @@ impl ExecGraph {
                 let server = Server::bind(&addr).serve(service);
                 let bound_addr = server.local_addr();
                 let graceful = server.with_graceful_shutdown(token1.cancelled());
-                let (tx, rx) = oneshot::channel();
+                let (server_start_tx, server_start_rx) = oneshot::channel();
 
                 tokio::spawn(async move {
-                    // if this task exits, it'll dropping the _drop_guard will
-                    // trigger the cancellation token
-                    let _drop_guard = DropGuard::new(token2);
-                    let mut cmd = Command::new(&provisioner);
-                    let mut rcmd = cmd.arg(format!("http://{}", bound_addr)).kill_on_drop(true);
-                    if let Some(p2) = p2 {
-                        rcmd = rcmd.arg(p2);
-                    }
-
-                    let mut child = rcmd.spawn().unwrap_or_else(|_| panic!("command failed to start: {}", provisioner));
-                    tx.send(()).expect("failed to send");
-
-                    match child.wait().await {
-                        Ok(status) => {
-                            log::error!("provisioner exited with status={}", status);
-                        }
-                        Err(e) => {
-                            log::error!("command failed to start: {:?} {}", provisioner, e);
-                        }
-                    }
+                    server_start_rx.await.expect("failed to recv");
+                    drop(spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2).await);
+                    token3.cancel();
+                    provisioner_exited_tx
+                        .send(())
+                        .expect("could not send to channel");
                 });
 
-                rx.await.expect("failed to receive");
+                server_start_tx.send(()).expect("failed to send");
                 if let Err(err) = graceful.await {
                     log::error!("Server error: {}", err);
                 }
             });
+        } else {
+            provisioner_exited_tx.send(()).expect("Could not send");
         }
 
         // run the background service that will send commands to the ready channel to be picked up by the
@@ -262,6 +253,9 @@ impl ExecGraph {
             },
             _ = token.cancelled() => {},
         };
+        provisioner_exited_rx
+            .await
+            .expect("failed to close provisioner");
 
         let n_failed = servicer.n_failed;
         // get indices of the tasks we executed, mapped back from the subgraph node ids
@@ -325,6 +319,34 @@ async fn run_local_process_loop(
         status_updater
             .send_finished(subgraph_node_id, &cmd, pid, status)
             .await;
+    }
+
+    Ok(())
+}
+
+async fn spawn_and_wait_for_provisioner(
+    provisioner: &str,
+    arg2: Option<String>,
+    bound_addr: SocketAddr,
+    token: CancellationToken,
+) -> Result<()> {
+    let mut cmd = Command::new(provisioner);
+    let mut rcmd = cmd.arg(format!("http://{}", bound_addr)).kill_on_drop(true);
+    if let Some(arg2) = arg2 {
+        rcmd = rcmd.arg(arg2);
+    }
+
+    let mut child = rcmd.spawn()?;
+    tokio::select! {
+        // if this process got a ctrl-c, then this token is cancelled
+        _ = token.cancelled() => {
+            unsafecode::sigint_then_kill(&mut child, std::time::Duration::from_millis(250)).await;
+        },
+
+        result = child.wait() => {
+            let status = result?;
+            log::error!("provisioner exited with status={}", status);
+        }
     }
 
     Ok(())

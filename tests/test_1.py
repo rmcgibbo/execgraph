@@ -258,3 +258,25 @@ def test_shutdown(tmp_path):
     eg.add_task("false", key="")
     nfailed, _ = eg.execute()
     assert nfailed == 1
+
+#
+# Interactive test. Run  RUST_LOG=debug py.test tests/test_1.py::test_shutdown2 -s
+# and then ctrl-c it. Should see "sending sigint to provisioner" followed by
+# "sending SIGKILL to provisioner" after 250ms.
+#
+# def test_shutdown2(tmp_path):
+#     with open(tmp_path / "multi-provisioner", "w") as f:
+#         print("""#!/nix/store/ph6hpbx4pr31146wpb72yrk3f3yy0xcs-python3-3.9.4/bin/python
+# import time
+# import signal
+# signal.signal(signal.SIGINT, signal.SIG_IGN)  # remote this and no sigkill should be sent
+# for i in range(60):
+#     print(i)
+#     time.sleep(1)
+# """, file=f)
+
+#     os.chmod(tmp_path / "multi-provisioner", 0o744)
+#     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner"))
+#     eg.add_task("false", key="")
+#     nfailed, _ = eg.execute()
+#     assert nfailed == 1

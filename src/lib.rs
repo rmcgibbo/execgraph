@@ -4,6 +4,7 @@ pub mod httpinterface;
 mod logfile;
 mod server;
 pub mod sync;
+mod unsafecode;
 
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
