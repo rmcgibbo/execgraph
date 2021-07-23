@@ -29,7 +29,7 @@ async fn main() -> Result<(), RemoteError> {
     let base = reqwest::Url::parse(&opt.url)?;
 
     loop {
-        match run_command(&base, &client).await {
+        match run_command(&base, &client, &opt.queue).await {
             Err(RemoteError::Connection(e))  => {
                 // break with no error message
                 debug!("{:#?}", e);
@@ -42,7 +42,7 @@ async fn main() -> Result<(), RemoteError> {
     Ok(())
 }
 
-async fn run_command(base: &reqwest::Url, client: &reqwest::Client) -> Result<(), RemoteError> {
+async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Option<String>) -> Result<(), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
@@ -50,6 +50,9 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client) -> Result<()
 
     let start = client
         .get( start_route)
+        .json(&StartRequest{
+            queuename: queue.clone(),
+        })
         .send()
         .await?
         .error_for_status()?
@@ -188,6 +191,7 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client) -> Result<()
 #[structopt(name = "execgraph-remote")]
 struct Opt {
     url: String,
+    queue: Option<String>,
 }
 
 #[derive(Debug)]

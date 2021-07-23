@@ -124,7 +124,7 @@ impl PyExecGraph {
     ///      a log file. That way when we rerun the graph at some later time, we'll
     ///      be able to skip executing any commands that have already been executed.
     ///      Note: the key may not contain any tab characters.
-    ///   3. Finally, there's the list of dependencies, identified by integer ids
+    ///   3. Next, there's the list of dependencies, identified by integer ids
     ///      that reference previous tasks. A task cannot depend on itself, and can only
     ///      depend on previous tasks tha have already been added. This enforces a DAG
     ///      structure.
@@ -133,6 +133,10 @@ impl PyExecGraph {
     ///      we run the command. If not supplied, we'll just use the cmdline for these
     ///      purposes. But if the cmdline contains some boring wrapper scripts that you
     ///      want to hide from your users, this might make sense.
+    ///   5. Oh, also there's the concept of a "queue name". You can associate each
+    ///      job with a resource (arbitrary string), like "gpu", and then it will be
+    ///      restricted and only run on remote runners that identify themselves as having
+    ////     that resource.
     ///
     /// Notes:
     ///   If key == "", then the task will never be skipped (i.e. it will always be
@@ -144,18 +148,20 @@ impl PyExecGraph {
     ///     dependencies (List[int], default=[]): dependencies for this task
     /// Returns:
     ///     taskid (int): integer id of this task
-    #[args(display = "None", dependencies = "vec![]")]
+    #[args(dependencies = "vec![]", display = "None", queuename = "None")]
     fn add_task(
         &mut self,
         cmdline: String,
         key: String,
         dependencies: Vec<u32>,
         display: Option<String>,
+        queuename: Option<String>,
     ) -> PyResult<u32> {
         let cmd = Cmd {
             cmdline,
             key,
             display,
+            queuename,
         };
         self.g
             .add_task(cmd, dependencies)

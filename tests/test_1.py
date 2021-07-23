@@ -7,6 +7,7 @@ import scipy.sparse
 import networkx as nx
 import pytest
 import os
+import json
 from distutils.spawn import find_executable
 
 
@@ -17,13 +18,14 @@ if os.path.exists("target/debug/libexecgraph.so"):
     # print(os.environ["PATH"])
 
 import execgraph as _execgraph
+
 # print(dir(_execgraph))
+
 
 @pytest.fixture
 def num_parallel():
     N = multiprocessing.cpu_count() + 2
     return N
-
 
 
 def random_ordered_dag(seed):
@@ -201,11 +203,13 @@ def test_not_execute_twice(num_parallel, tmp_path):
 
 
 def test_simple_remote(num_parallel, tmp_path):
-    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner="execgraph-remote")
+    eg = _execgraph.ExecGraph(
+        0, str(tmp_path / "foo"), remote_provisioner="execgraph-remote"
+    )
 
     eg.add_task("echo foo; sleep 1; echo foo", key="task0")
     for i in range(1, 5):
-        eg.add_task("echo foo; sleep 0.1; echo foo", key="", dependencies=[i-1])
+        eg.add_task("echo foo; sleep 0.1; echo foo", key="", dependencies=[i - 1])
 
     nfailed, _ = eg.execute()
     assert nfailed == 0
@@ -216,7 +220,12 @@ def test_poisoned(tmp_path):
     first = []
     for i in range(10):
         cmd = "true" if i % 2 == 0 else f"false {i}"
-        first.append(eg.add_task(cmd, key="",))
+        first.append(
+            eg.add_task(
+                cmd,
+                key="",
+            )
+        )
     final = eg.add_task("true", key="", dependencies=first)
     final2 = eg.add_task("true", key="", dependencies=[final])
     nfailed, order = eg.execute()
@@ -254,10 +263,89 @@ def test_shutdown(tmp_path):
         print("wait", file=f)
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
-    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner"))
+    eg = _execgraph.ExecGraph(
+        0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner")
+    )
     eg.add_task("false", key="")
     nfailed, _ = eg.execute()
     assert nfailed == 1
+
+
+def test_status(tmp_path):
+    assert find_executable("execgraph-remote") is not None
+    with open(tmp_path / "multi-provisioner", "w") as f:
+        print("#!/bin/sh", file=f)
+        print("set -e -x", file=f)
+        print("curl $1/status > %s/resp.json" % tmp_path, file=f)
+
+    os.chmod(tmp_path / "multi-provisioner", 0o744)
+    eg = _execgraph.ExecGraph(
+        0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner")
+    )
+    eg.add_task("false", key="foo")
+    eg.add_task("false", key="bar")
+    nfailed, _ = eg.execute()
+
+    with open(tmp_path / "resp.json") as f:
+        assert (
+            f.read()
+            == '{"status":"success","code":200,"data":{"queues":[[null,{"num_ready":2,"num_failed":0,"num_success":0,"num_inflight":0}]]}}'
+        )
+
+    assert nfailed == 0
+
+
+def test_queue(tmp_path):
+    assert find_executable("execgraph-remote") is not None
+    with open(tmp_path / "multi-provisioner", "w") as f:
+        print("#!/bin/sh", file=f)
+        print("set -e -x", file=f)
+        print("curl $1/status > %s/resp.json" % tmp_path, file=f)
+        print(f"execgraph-remote $1 gpu &", file=f)
+        print(f"execgraph-remote $1 doesntexistdoesntexist &", file=f)
+        print(f"execgraph-remote $1 &", file=f)
+        print(f"wait", file=f)
+
+    os.chmod(tmp_path / "multi-provisioner", 0o744)
+    eg = _execgraph.ExecGraph(
+        0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner")
+    )
+    eg.add_task("true", key="foo", queuename="gpu")
+    eg.add_task("true", key="bar")
+    nfailed, _ = eg.execute()
+
+    with open(tmp_path / "resp.json") as f:
+        value = json.load(f)
+        value["data"]["queues"] = sorted(value["data"]["queues"], key=lambda x: str(x[0]))
+        assert value == {
+            "status": "success",
+            "code": 200,
+            "data": {
+                "queues": sorted([
+                    [
+                        None,
+                        {
+                            "num_ready": 1,
+                            "num_failed": 0,
+                            "num_success": 0,
+                            "num_inflight": 0,
+                        },
+                    ],
+                    [
+                        "gpu",
+                        {
+                            "num_ready": 1,
+                            "num_failed": 0,
+                            "num_success": 0,
+                            "num_inflight": 0,
+                        },
+                    ],
+                ], key=lambda x: str(x[0]))
+            },
+        }
+
+    assert nfailed == 0
+
 
 #
 # Interactive test. Run  RUST_LOG=debug py.test tests/test_1.py::test_shutdown2 -s

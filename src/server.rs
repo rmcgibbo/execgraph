@@ -1,6 +1,6 @@
 use crate::execgraph::Cmd;
 use crate::httpinterface::*;
-use crate::sync::StatusUpdater;
+use crate::sync::{Queuename, StatusUpdater};
 use anyhow::Result;
 use async_channel::{bounded, Receiver, Sender};
 use hyper::{Body, Request, Response, StatusCode};
@@ -34,14 +34,14 @@ struct ConnectionState {
 pub struct State {
     connections: Mutex<HashMap<u32, ConnectionState>>,
     subgraph: Arc<DiGraph<(Cmd, NodeIndex), ()>>,
-    tasks_ready: Receiver<NodeIndex>,
+    tasks_ready: HashMap<Queuename, Receiver<NodeIndex>>,
     status_updater: StatusUpdater,
 }
 
 impl State {
     pub fn new(
         subgraph: Arc<DiGraph<(Cmd, NodeIndex), ()>>,
-        tasks_ready: Receiver<NodeIndex>,
+        tasks_ready: HashMap<Queuename, Receiver<NodeIndex>>,
         status_updater: StatusUpdater,
     ) -> State {
         State {
@@ -63,9 +63,13 @@ async fn error_handler(err: routerify::RouteError, _: RequestInfo) -> Response<B
         .unwrap()
 }
 
-async fn get_json_body<T: DeserializeOwned>(req: &mut Request<Body>) -> Result<T> {
-    let body = hyper::body::to_bytes(req.body_mut()).await?;
-    serde_json::from_slice(&body.to_vec().as_slice()).map_err(|err| err.into())
+// async fn get_json_body<T: DeserializeOwned>(req: &mut Request<Body>) -> Result<T> {
+//     let body = hyper::body::to_bytes(req.body_mut()).await?;
+//     serde_json::from_slice(&body.to_vec().as_slice()).map_err(|err| err.into())
+// }
+async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T> {
+    let bytes = hyper::body::to_bytes(req.into_body()).await?;
+    serde_json::from_slice(&bytes.to_vec().as_slice()).map_err(|err| err.into())
 }
 
 async fn middleware_after(
@@ -129,29 +133,42 @@ async fn status_handler(
 ) -> Result<Response<Body>, routerify_json_response::Error> {
     let state = req.data::<Arc<State>>().unwrap();
     let snapshot = state.status_updater.get_queuestate();
-    let num_ready = state.tasks_ready.len() as u32;
 
-    // the 'pending' count includes all tasks between the stages of having
-    // been added to the ready queue and having been marked as completed.
-    // so we'll say that the that can be broken into the number in the ready
-    // queue and the number that are currently inflight.
-    if snapshot.n_pending < num_ready {
-        panic!("this shouldn't happen, and indiciates some kind of internal accounting bug");
-    }
+    let resp = snapshot
+        .iter()
+        .map(|(name, queue)| {
+            let num_ready = state.tasks_ready.get(name).unwrap().len() as u32;
+            // the 'pending' count includes all tasks between the stages of having
+            // been added to the ready queue and having been marked as completed.
+            // so we'll say that the that can be broken into the number in the ready
+            // queue and the number that are currently inflight.
+            if queue.n_pending < num_ready {
+                panic!(
+                    "this shouldn't happen, and indiciates some kind of internal accounting bug"
+                );
+            }
 
-    json_success_resp(&StatusReply {
-        num_ready,
-        num_failed: snapshot.n_failed,
-        num_success: snapshot.n_success,
-        num_inflight: snapshot.n_pending - num_ready,
-    })
+            (
+                name.clone(),
+                StatusQueueReply {
+                    num_ready,
+                    num_failed: queue.n_failed,
+                    num_success: queue.n_success,
+                    num_inflight: queue.n_pending - num_ready,
+                },
+            )
+        })
+        .collect::<HashMap<Queuename, StatusQueueReply>>();
+
+    json_success_resp(&StatusReply { queues: resp })
 }
 
 // POST /ping
 async fn ping_handler(
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, routerify_json_response::Error> {
-    let request = match get_json_body::<Ping>(&mut req).await {
+    let state = req.data::<Arc<State>>().unwrap().clone();
+    let request = match get_json_body::<Ping>(req).await {
         Ok(request) => request,
         Err(e) => {
             return json_failed_resp_with_message(
@@ -163,8 +180,6 @@ async fn ping_handler(
 
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    let state = req.data::<Arc<State>>().unwrap();
     let resp = match state.connections.lock().await.get(&request.transaction_id) {
         Some(cstate) => {
             cstate.pings.send(()).await?;
@@ -180,15 +195,31 @@ async fn ping_handler(
 async fn start_handler(
     req: Request<Body>,
 ) -> Result<Response<Body>, routerify_json_response::Error> {
-    let transaction_id = get_random_u32();
-    let state = req.data::<Arc<State>>().unwrap();
-
-    let node_id = match state.tasks_ready.try_recv() {
-        Ok(node_id) => node_id,
+    let state = req.data::<Arc<State>>().unwrap().clone();
+    let request = match get_json_body::<StartRequest>(req).await {
+        Ok(request) => request,
         Err(e) => {
             return json_failed_resp_with_message(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{}", e),
+                format!("Malformed request: {}", e),
+            );
+        }
+    };
+    let transaction_id = get_random_u32();
+    let node_id = match state.tasks_ready.get(&request.queuename) {
+        Some(channel) => match channel.try_recv() {
+            Ok(node_id) => node_id,
+            Err(e) => {
+                return json_failed_resp_with_message(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Channel closed?: {}", e),
+                );
+            }
+        },
+        None => {
+            return json_failed_resp_with_message(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("No such Queuename: {:?}", request.queuename),
             );
         }
     };
@@ -252,9 +283,10 @@ async fn start_handler(
 
 // POST /begun
 async fn begun_handler(
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, routerify_json_response::Error> {
-    let request = match get_json_body::<BegunRequest>(&mut req).await {
+    let state = req.data::<Arc<State>>().unwrap().clone();
+    let request = match get_json_body::<BegunRequest>(req).await {
         Ok(request) => request,
         Err(e) => {
             return json_failed_resp_with_message(
@@ -263,7 +295,6 @@ async fn begun_handler(
             );
         }
     };
-    let state = req.data::<Arc<State>>().unwrap();
 
     {
         let mut lock = state.connections.lock().await;
@@ -288,10 +319,9 @@ async fn begun_handler(
 }
 
 // POST /end
-async fn end_handler(
-    mut req: Request<Body>,
-) -> Result<Response<Body>, routerify_json_response::Error> {
-    let request = match get_json_body::<EndRequest>(&mut req).await {
+async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_json_response::Error> {
+    let state = req.data::<Arc<State>>().unwrap().clone();
+    let request = match get_json_body::<EndRequest>(req).await {
         Ok(request) => request,
         Err(e) => {
             return json_failed_resp_with_message(
@@ -300,7 +330,6 @@ async fn end_handler(
             );
         }
     };
-    let state = req.data::<Arc<State>>().unwrap();
 
     let cstate = {
         let mut lock = state.connections.lock().await;

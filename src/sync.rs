@@ -3,9 +3,8 @@ use crate::logfile::LogWriter;
 use anyhow::Result;
 use async_channel::{unbounded, Receiver, Sender};
 use petgraph::prelude::*;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::watch;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 /// A wrapper for cancellation token which automatically cancels
@@ -28,6 +27,7 @@ impl Drop for DropGuard {
         }
     }
 }
+pub type Queuename = Option<String>;
 
 #[derive(Clone, Debug)]
 pub struct QueueSnapshot {
@@ -36,44 +36,73 @@ pub struct QueueSnapshot {
     pub n_failed: u32,
 }
 
-pub struct ReadyTracker<N, E> {
+pub struct ReadyTracker {
     pub finished_order: Vec<NodeIndex>,
     pub n_failed: u32,
 
-    g: Arc<Graph<N, E>>,
-    ready: Option<Sender<NodeIndex>>,
+    g: Arc<Graph<(Cmd, NodeIndex), (), Directed>>,
+    ready: Option<HashMap<Queuename, Sender<NodeIndex>>>,
     completed: Receiver<CompletedEvent>,
-    queuestate_s: watch::Sender<QueueSnapshot>,
     n_success: u32,
     n_pending: u32,
     count_offset: u32,
     failures_allowed: u32,
+    queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
 }
 
 #[derive(Clone)]
 pub struct StatusUpdater {
     s: Sender<CompletedEvent>,
-    queuestate_r: watch::Receiver<QueueSnapshot>,
+    queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
 }
 
 struct TaskStatus {
     n_unmet_deps: usize,
     poisoned: bool,
+    queuename: Queuename,
 }
 
-impl<'a, N, E> ReadyTracker<N, E> {
+impl ReadyTracker {
     pub fn new(
-        g: Arc<Graph<N, E, Directed>>,
+        g: Arc<Graph<(Cmd, NodeIndex), (), Directed>>,
         count_offset: u32,
         failures_allowed: u32,
-    ) -> (ReadyTracker<N, E>, Receiver<NodeIndex>, StatusUpdater) {
-        let (ready_s, ready_r) = unbounded();
+    ) -> (
+        ReadyTracker,
+        HashMap<Queuename, Receiver<NodeIndex>>,
+        StatusUpdater,
+    ) {
+        let mut ready_s = HashMap::<Queuename, Sender<NodeIndex>>::new();
+        let mut ready_r = HashMap::<Queuename, Receiver<NodeIndex>>::new();
+        for queuename in g
+            .node_indices()
+            .map(|i| g.node_weight(i).unwrap().0.queuename.clone())
+            .chain(std::iter::once(None))
+            .collect::<HashSet<_>>()
+            .iter()
+        {
+            let (sender, receiver) = unbounded::<NodeIndex>();
+            ready_s.insert(queuename.clone(), sender);
+            ready_r.insert(queuename.clone(), receiver);
+        }
+
+        let queuestate = Arc::new(Mutex::new(
+            ready_s
+                .keys()
+                .map(|queuename| {
+                    (
+                        queuename.clone(),
+                        QueueSnapshot {
+                            n_pending: 0,
+                            n_success: 0,
+                            n_failed: 0,
+                        },
+                    )
+                })
+                .collect::<HashMap<Queuename, QueueSnapshot>>(),
+        ));
+
         let (finished_s, finished_r) = unbounded();
-        let (queuestate_s, queuestate_r) = watch::channel(QueueSnapshot {
-            n_pending: 0,
-            n_success: 0,
-            n_failed: 0,
-        });
 
         (
             ReadyTracker {
@@ -81,17 +110,17 @@ impl<'a, N, E> ReadyTracker<N, E> {
                 g,
                 ready: Some(ready_s),
                 completed: finished_r,
-                queuestate_s,
                 n_failed: 0,
                 n_success: 0,
                 n_pending: 0,
                 count_offset,
                 failures_allowed,
+                queuestate: queuestate.clone(),
             },
             ready_r,
             StatusUpdater {
                 s: finished_s,
-                queuestate_r,
+                queuestate: queuestate.clone(),
             },
         )
     }
@@ -107,6 +136,7 @@ impl<'a, N, E> ReadyTracker<N, E> {
                     TaskStatus {
                         n_unmet_deps: self.g.edges_directed(i, Direction::Incoming).count(),
                         poisoned: false,
+                        queuename: self.g.node_weight(i).unwrap().0.queuename.clone(),
                     },
                 )
             })
@@ -116,19 +146,21 @@ impl<'a, N, E> ReadyTracker<N, E> {
         for (k, v) in statuses.iter() {
             if v.n_unmet_deps == 0 {
                 self.n_pending += 1;
+                self.queuestate
+                    .lock()
+                    .unwrap()
+                    .get_mut(&v.queuename)
+                    .expect("No such Queuename")
+                    .n_pending += 1;
                 self.ready
-                    .as_ref()
+                    .as_mut()
                     .expect("send channel was already dropped?")
+                    .get_mut(&v.queuename)
+                    .expect("No such Queuename")
                     .send(*k)
                     .await?;
             }
         }
-
-        self.queuestate_s.send(QueueSnapshot {
-            n_pending: self.n_pending,
-            n_failed: self.n_failed,
-            n_success: self.n_success,
-        })?;
 
         // every time we put a task into the ready queue, we increment n_pending.
         // every time a task completes, we decrement n_pending.
@@ -162,13 +194,20 @@ impl<'a, N, E> ReadyTracker<N, E> {
         Ok(())
     }
 
-    async fn _finished_bookkeeping(
+    async fn _finished_bookkeeping<'a>(
         &mut self,
         statuses: &mut HashMap<NodeIndex, TaskStatus>,
         e: FinishedEvent,
     ) -> Result<()> {
         let is_success = e.exit_status == 0;
         let total = statuses.len() as u32;
+
+        self.queuestate
+            .lock()
+            .unwrap()
+            .get_mut(&statuses.get(&e.id).unwrap().queuename)
+            .unwrap()
+            .n_pending -= 1;
         self.n_pending -= 1;
 
         if is_success {
@@ -192,9 +231,17 @@ impl<'a, N, E> ReadyTracker<N, E> {
                     status.n_unmet_deps -= 1;
                     if status.n_unmet_deps == 0 {
                         self.n_pending += 1;
+                        self.queuestate
+                            .lock()
+                            .unwrap()
+                            .get_mut(&status.queuename)
+                            .expect("No such Queuename")
+                            .n_pending += 1;
                         self.ready
-                            .as_ref()
+                            .as_mut()
                             .expect("send channel was already dropped?")
+                            .get_mut(&status.queuename)
+                            .expect("No such Queuename")
                             .send(downstream_id)
                             .await?;
                     }
@@ -205,11 +252,6 @@ impl<'a, N, E> ReadyTracker<N, E> {
             }
         }
 
-        self.queuestate_s.send(QueueSnapshot {
-            n_pending: self.n_pending,
-            n_failed: self.n_failed,
-            n_success: self.n_success,
-        })?;
         Ok(())
     }
 }
@@ -241,8 +283,8 @@ impl StatusUpdater {
     }
 
     /// Retreive a snapshot of the state of the queue
-    pub fn get_queuestate(&self) -> QueueSnapshot {
-        (*self.queuestate_r.borrow()).clone()
+    pub fn get_queuestate(&self) -> HashMap<Queuename, QueueSnapshot> {
+        self.queuestate.lock().unwrap().clone()
     }
 }
 

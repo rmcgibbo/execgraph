@@ -20,11 +20,12 @@ use tokio::signal;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Cmd {
     pub cmdline: String,
     pub key: String,
     pub display: Option<String>,
+    pub queuename: Option<String>,
 }
 
 impl Cmd {
@@ -191,7 +192,7 @@ impl ExecGraph {
             .map(|_| {
                 tokio::spawn(run_local_process_loop(
                     subgraph.clone(),
-                    tasks_ready.clone(),
+                    tasks_ready.get(&None).expect("No null queue").clone(),
                     status_updater.clone(),
                 ))
             })
@@ -225,7 +226,9 @@ impl ExecGraph {
 
                 tokio::spawn(async move {
                     server_start_rx.await.expect("failed to recv");
-                    drop(spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2).await);
+                    drop(
+                        spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2).await,
+                    );
                     token3.cancel();
                     provisioner_exited_tx
                         .send(())
