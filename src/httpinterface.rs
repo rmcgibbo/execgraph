@@ -42,6 +42,8 @@ pub struct BegunRequest {
 pub struct EndRequest {
     pub transaction_id: u32,
     pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 pub mod vectorize {

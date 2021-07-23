@@ -107,8 +107,7 @@ across a cluster. Here's how it works:
    that is capable of giving out jobs and collecting their results.
  * We bundle a binary called `execgraph-remote`. It is invoked with the URL
    of an execgraph server, pulls jobs from the server, executes them, and
-   sends back the exit status (it does not send back stdout/stderr, but maybe
-   it should).
+   sends back the exit status.
  * If you want to use this feature, you supply execgraph with the path to an
    executable called `remote_provisioner`. During the `execute()` call, we'll
    run this script, passing it the the url of the embedded server and it should

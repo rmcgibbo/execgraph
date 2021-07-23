@@ -13,6 +13,7 @@ use gethostname::gethostname;
 use structopt::StructOpt;
 use execgraph::sync::DropGuard;
 
+
 #[tokio::main]
 async fn main() -> Result<(), RemoteError> {
     env_logger::init();
@@ -125,9 +126,11 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
     });
 
     // Run the command and record the pid
-    let mut child = tokio::process::Command::new("/bin/sh")
+    let child = tokio::process::Command::new("/bin/sh")
         .arg("-c")
         .arg(&start.data.cmdline)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to execute /bin/sh");
     let pid = child
@@ -151,13 +154,17 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
     };
 
     // Wait for the command to finish
-    let status: i32 = tokio::select! {
-        status = child.wait() => {
-            let status_obj = status.expect("sh wasn't running");
-            match status_obj.code() {
+    let (status, stdout, stderr) = tokio::select! {
+        status = child.wait_with_output() => {
+            let output = status.expect("sh wasn't running");
+            let status_obj = output.status;
+            let status = match status_obj.code() {
                 Some(code) => code,
                 None => status_obj.signal().expect("No exit code and no signal?"),
-            }
+            };
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            (status, stdout, stderr)
         }
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
@@ -174,6 +181,8 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
         .json(&EndRequest{
             transaction_id,
             status,
+            stdout,
+            stderr
         })
         .send() => {
             value?.error_for_status()?;
