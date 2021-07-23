@@ -6,6 +6,7 @@
 , numpy
 , scipy
 , networkx
+, curl
 }:
 
 let
@@ -63,6 +64,7 @@ in buildPythonPackage rec {
     numpy
     scipy
     networkx
+    curl
   ] ;
   pythonImportsCheck = [ "execgraph" ];
 }
