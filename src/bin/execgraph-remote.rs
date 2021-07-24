@@ -21,7 +21,7 @@ async fn main() -> Result<(), RemoteError> {
     let opt = Opt::from_args();
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("X-EXECGRAPH-USERNAME", reqwest::header::HeaderValue::from_str(&username()).unwrap());
-    headers.insert("X-EXECGRAPH-HOSTNAME", reqwest::header::HeaderValue::from_str(&gethostname().to_str().unwrap()).unwrap());
+    headers.insert("X-EXECGRAPH-HOSTNAME", reqwest::header::HeaderValue::from_str(&gethostname().to_string_lossy()).unwrap());
 
     let client = reqwest::Client::builder()
         .default_headers(headers)
@@ -143,7 +143,7 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
         value = client.post(begun_route)
         .json(&BegunRequest{
             transaction_id,
-            pid,
+            hostpid: format!("{}:{}", gethostname().to_string_lossy(), pid),
         })
         .send() => {
             value?.error_for_status()?;

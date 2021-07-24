@@ -204,14 +204,14 @@ def test_not_execute_twice(num_parallel, tmp_path):
 
 def test_simple_remote(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo"), remote_provisioner="execgraph-remote"
+        0, str(tmp_path / "foo")
     )
 
     eg.add_task("echo foo; sleep 1; echo foo", key="task0")
     for i in range(1, 5):
         eg.add_task("echo foo; sleep 0.1; echo foo", key="", dependencies=[i - 1])
 
-    nfailed, _ = eg.execute()
+    nfailed, _ = eg.execute(remote_provisioner="execgraph-remote")
     assert nfailed == 0
 
 
@@ -244,11 +244,11 @@ def test_no_such_command(num_parallel, tmp_path):
 
 @pytest.mark.parametrize("provisioner", ["sdfjsbndfjsdkfsdsdfsd", "false", "true"])
 def test_no_such_provisioner(num_parallel, tmp_path, provisioner):
-    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=provisioner)
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
 
     eg.add_task("skdfjsbfjdbsbjdfssdf", key="task0")
 
-    nfailed, order = eg.execute()
+    nfailed, order = eg.execute(remote_provisioner=provisioner)
     assert nfailed == 0
     assert order == []
 
@@ -264,10 +264,10 @@ def test_shutdown(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner")
+        0, str(tmp_path / "foo")
     )
     eg.add_task("false", key="")
-    nfailed, _ = eg.execute()
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
     assert nfailed == 1
 
 
@@ -280,11 +280,11 @@ def test_status(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner")
+        0, str(tmp_path / "foo")
     )
     eg.add_task("false", key="foo")
     eg.add_task("false", key="bar")
-    nfailed, _ = eg.execute()
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
         assert (
@@ -308,11 +308,11 @@ def test_queue(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner")
+        0, str(tmp_path / "foo")
     )
     eg.add_task("true", key="foo", queuename="gpu")
     eg.add_task("true", key="bar")
-    nfailed, _ = eg.execute()
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
         value = json.load(f)
@@ -364,7 +364,7 @@ def test_queue(tmp_path):
 # """, file=f)
 
 #     os.chmod(tmp_path / "multi-provisioner", 0o744)
-#     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"), remote_provisioner=str(tmp_path / "multi-provisioner"))
+#     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
 #     eg.add_task("false", key="")
-#     nfailed, _ = eg.execute()
+#     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 #     assert nfailed == 1

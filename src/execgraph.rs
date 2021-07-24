@@ -42,22 +42,16 @@ pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     keyfile: String,
     completed: Vec<NodeIndex>,
-    provisioner: Option<String>,
-    provisioner_arg2: Option<String>,
 }
 
 impl ExecGraph {
     pub fn new(
         keyfile: String,
-        provisioner: Option<String>,
-        provisioner_arg2: Option<String>,
     ) -> ExecGraph {
         ExecGraph {
             deps: Graph::new(),
             keyfile,
             completed: vec![],
-            provisioner,
-            provisioner_arg2,
         }
     }
 
@@ -177,6 +171,8 @@ impl ExecGraph {
         target: Option<u32>,
         num_parallel: u32,
         failures_allowed: u32,
+        provisioner: Option<String>,
+        provisioner_arg2: Option<String>,
     ) -> Result<(u32, Vec<u32>)> {
         let subgraph = Arc::new(self.get_subgraph(target)?);
         if subgraph.raw_nodes().is_empty() {
@@ -204,12 +200,12 @@ impl ExecGraph {
         let token = CancellationToken::new();
         let (provisioner_exited_tx, provisioner_exited_rx) = oneshot::channel();
 
-        if self.provisioner.is_some() {
+        if provisioner.is_some() {
             let subgraph1 = subgraph.clone();
             let tasks_ready1 = tasks_ready.clone();
             let status_updater1 = status_updater.clone();
-            let provisioner = format!("{}", self.provisioner.clone().unwrap());
-            let p2 = self.provisioner_arg2.clone();
+            let provisioner = format!("{}", provisioner.clone().unwrap());
+            let p2 = provisioner_arg2.clone();
             let token1 = token.clone();
             let token2 = token.clone();
             let token3 = token.clone();
@@ -289,14 +285,16 @@ async fn run_local_process_loop(
             .node_weight(subgraph_node_id)
             .unwrap_or_else(|| panic!("failed to get node {:#?}", subgraph_node_id));
         let skip_execution_debugging_race_conditions = cmd.cmdline.is_empty();
-        let (pid, status) = if skip_execution_debugging_race_conditions {
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
+        let (hostpid, status) = if skip_execution_debugging_race_conditions {
             let pid = 0;
             let fake_status = 0;
+            let hostpid = format!("{}:{}", hostname, pid);
             status_updater
-                .send_started(subgraph_node_id, &cmd, pid)
+                .send_started(subgraph_node_id, &cmd, &hostpid)
                 .await;
 
-            (pid, fake_status)
+            (hostpid, fake_status)
         } else {
             let mut child = Command::new("/bin/sh")
                 .arg("-c")
@@ -306,8 +304,9 @@ async fn run_local_process_loop(
             let pid = child
                 .id()
                 .expect("hasn't been polled yet, so this id should exist");
+            let hostpid = format!("{}:{}", hostname, pid);
             status_updater
-                .send_started(subgraph_node_id, &cmd, pid)
+                .send_started(subgraph_node_id, &cmd, &hostpid)
                 .await;
             let status_obj = child.wait().await.expect("sh wasn't running");
             // status_obj.code().or(Some(status_obj.into_raw())).expect("foo")
@@ -316,11 +315,11 @@ async fn run_local_process_loop(
                 None => status_obj.signal().expect("No exit code and no signal?"),
             };
 
-            (pid, code)
+            (hostpid, code)
         };
 
         status_updater
-            .send_finished(subgraph_node_id, &cmd, pid, status)
+            .send_finished(subgraph_node_id, &cmd, &hostpid, status)
             .await;
     }
 

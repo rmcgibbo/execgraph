@@ -35,7 +35,7 @@ pub struct StartResponse {
 #[derive(Serialize, Deserialize)]
 pub struct BegunRequest {
     pub transaction_id: u32,
-    pub pid: u32,
+    pub hostpid: String,
 }
 
 #[derive(Serialize, Deserialize)]

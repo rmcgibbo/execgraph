@@ -173,12 +173,12 @@ impl ReadyTracker {
         loop {
             match self.completed.recv().await.unwrap() {
                 CompletedEvent::Started(e) => {
-                    writer.begin_command(&e.cmd.display(), &e.cmd.key, e.pid)?;
+                    writer.begin_command(&e.cmd.display(), &e.cmd.key, &e.hostpid)?;
                 }
                 CompletedEvent::Finished(e) => {
                     self.finished_order.push(e.id);
-                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.exit_status, e.pid)?;
-                    self._finished_bookkeeping(&mut statuses, e).await?;
+                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.exit_status, &e.hostpid)?;
+                    self._finished_bookkeeping(&mut statuses, &e).await?;
 
                     if self.n_failed >= self.failures_allowed || self.n_pending == 0 {
                         // drop the send side of the channel. this will cause the receive side
@@ -197,7 +197,7 @@ impl ReadyTracker {
     async fn _finished_bookkeeping<'a>(
         &mut self,
         statuses: &mut HashMap<NodeIndex, TaskStatus>,
-        e: FinishedEvent,
+        e: &FinishedEvent,
     ) -> Result<()> {
         let is_success = e.exit_status == 0;
         let total = statuses.len() as u32;
@@ -258,24 +258,24 @@ impl ReadyTracker {
 
 impl StatusUpdater {
     /// When a task is started, notify the tracker by calling this.
-    pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, pid: u32) {
+    pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, hostpid: &str) {
         self.s
             .send(CompletedEvent::Started(StartedEvent {
                 // id: v,
                 cmd: cmd.clone(),
-                pid,
+                hostpid: hostpid.to_string(),
             }))
             .await
             .expect("cannot send to channel")
     }
 
     /// When a task is finished, notify the tracker by calling this.
-    pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, pid: u32, status: i32) {
+    pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str, status: i32) {
         self.s
             .send(CompletedEvent::Finished(FinishedEvent {
                 id: v,
                 cmd: cmd.clone(),
-                pid,
+                hostpid: hostpid.to_string(),
                 exit_status: status,
             }))
             .await
@@ -291,13 +291,13 @@ impl StatusUpdater {
 struct StartedEvent {
     // id: NodeIndex,
     cmd: Cmd,
-    pid: u32,
+    hostpid: String,
 }
 #[derive(Debug)]
 struct FinishedEvent {
     id: NodeIndex,
     cmd: Cmd,
-    pid: u32,
+    hostpid: String,
     exit_status: i32,
 }
 enum CompletedEvent {

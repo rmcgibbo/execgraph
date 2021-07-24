@@ -32,19 +32,6 @@ use crate::execgraph::{Cmd, ExecGraph};
 ///    keyfile (str): The path to the log file.
 ///    failures_allowed (int): keep going until N jobs fail (0 means infinity)
 ///      [default=1].
-///    remote_provisioner (Optional[str]): Path to a remote provisioning script.
-///      If supplied, we call this script with the url of an emphemeral server
-///      as the first argument, and it can launch processes that can connect back
-///      to this ExecGraph instance's http server to run tasks. Note: this package
-///      includes a binary called ``execgraph-remote`` which implemenets the HTTP
-///      protocol to "check out" tasks from the server, run them, and report their
-///      status back. You'll need to write a provisioner script that arranges for
-///      these execgraph-remote processes to be executed remotely using whatever
-///      job queuing system you have though.
-///   remote_provisioner_arg2 (Optional[str]): If you have extra data that you
-///     want to pass to the remote provisioner script, you can use this. If supplied
-///     it'll be passed as the second argument to remote_provisioner. The first
-///     argument will be the url.
 ///
 #[pyclass(name = "ExecGraph")]
 pub struct PyExecGraph {
@@ -56,20 +43,18 @@ pub struct PyExecGraph {
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_parallel = -1, failures_allowed = 1, remote_provisioner = "None", remote_provisioner_arg2 = "None")]
+    #[args(num_parallel = -1, failures_allowed = 1)]
     fn new(
         mut num_parallel: i32,
         keyfile: String,
         failures_allowed: u32,
-        remote_provisioner: Option<String>,
-        remote_provisioner_arg2: Option<String>,
     ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
         }
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(keyfile, remote_provisioner, remote_provisioner_arg2),
+            g: ExecGraph::new(keyfile),
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -173,10 +158,23 @@ impl PyExecGraph {
     /// previously completed successfully.
     ///
     /// Args:
-    ///     target (Optional[int]): if you'd like to particularly execute up to a single
-    ///         target, you can do this. in this case we'll only execute the tasks that
-    ///         are required for this target. if not supplied we'll try to execute the
-    ///         whole graph.
+    ///    target (Optional[int]): if you'd like to particularly execute up to a single
+    ///      target, you can do this. in this case we'll only execute the tasks that
+    ///      are required for this target. if not supplied we'll try to execute the
+    ///      whole graph.
+    ///    remote_provisioner (Optional[str]): Path to a remote provisioning script.
+    ///      If supplied, we call this script with the url of an emphemeral server
+    ///      as the first argument, and it can launch processes that can connect back
+    ///      to this ExecGraph instance's http server to run tasks. Note: this package
+    ///      includes a binary called ``execgraph-remote`` which implemenets the HTTP
+    ///      protocol to "check out" tasks from the server, run them, and report their
+    ///      status back. You'll need to write a provisioner script that arranges for
+    ///      these execgraph-remote processes to be executed remotely using whatever
+    ///      job queuing system you have though.
+    ///   remote_provisioner_arg2 (Optional[str]): If you have extra data that you
+    ///     want to pass to the remote provisioner script, you can use this. If supplied
+    ///     it'll be passed as the second argument to remote_provisioner. The first
+    ///     argument will be the url.
     ///
     /// Notes:
     ///     We currently do not do output buffering, so stdout goes directly to the
@@ -189,13 +187,18 @@ impl PyExecGraph {
     ///     execution_order (List[int]): the ids of the tasks that finished (success
     ///         or failure) in order of when they finished.
     ///
-    #[args(target = "None")]
-    fn execute(&mut self, py: Python, target: Option<u32>) -> PyResult<(u32, Vec<u32>)> {
+    #[args(target = "None",  remote_provisioner = "None", remote_provisioner_arg2 = "None")]
+    fn execute(
+        &mut self, py: Python,
+        target: Option<u32>,
+        remote_provisioner: Option<String>,
+        remote_provisioner_arg2: Option<String>,
+    ) -> PyResult<(u32, Vec<u32>)> {
         py.allow_threads(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
                 self.g
-                    .execute(target, self.num_parallel, self.failures_allowed)
+                    .execute(target, self.num_parallel, self.failures_allowed, remote_provisioner, remote_provisioner_arg2)
                     .await
             })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))

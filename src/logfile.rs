@@ -15,7 +15,7 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = String> {
             let _time = fields[0].parse::<u128>().ok()?;
             let key = fields[1];
             let exit_status = fields[2].parse::<i32>().ok()?;
-            let _pid = fields[3].parse::<u32>().ok()?;
+            let _hostpid = fields[3];
             let _cmd = fields[4];
             if exit_status == 0 {
                 Some(key.to_owned())
@@ -41,7 +41,7 @@ impl LogWriter {
         Ok(LogWriter { file })
     }
 
-    pub fn begin_command(&mut self, cmd: &str, key: &str, pid: u32) -> Result<()> {
+    pub fn begin_command(&mut self, cmd: &str, key: &str, hostpid: &str) -> Result<()> {
         let fake_exit_status = -1;
         if !key.is_empty() {
             writeln!(
@@ -50,14 +50,14 @@ impl LogWriter {
                 time()?,
                 key,
                 fake_exit_status,
-                pid,
+                hostpid,
                 cmd
             )?;
         }
         Ok(())
     }
 
-    pub fn end_command(&mut self, cmd: &str, key: &str, exit_status: i32, pid: u32) -> Result<()> {
+    pub fn end_command(&mut self, cmd: &str, key: &str, exit_status: i32, hostpid: &str) -> Result<()> {
         if !key.is_empty() {
             writeln!(
                 self.file,
@@ -65,7 +65,7 @@ impl LogWriter {
                 time()?,
                 key,
                 exit_status,
-                pid,
+                hostpid,
                 cmd
             )?;
         }

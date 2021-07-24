@@ -28,7 +28,7 @@ struct ConnectionState {
     cancel: CancellationToken,
     cmd: Cmd,
     node_id: NodeIndex,
-    pid: Option<u32>,
+    hostpid: Option<String>,
 }
 
 pub struct State {
@@ -112,11 +112,11 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
 
     let timeout_status = 130;
 
-    match cstate.pid {
-        Some(pid) => {
+    match cstate.hostpid.as_ref() {
+        Some(hostpid) => {
             state
                 .status_updater
-                .send_finished(cstate.node_id, &cstate.cmd, pid, timeout_status)
+                .send_finished(cstate.node_id, &cstate.cmd, hostpid, timeout_status)
                 .await;
         }
         None => {
@@ -269,7 +269,7 @@ async fn start_handler(
                 cancel: token,
                 cmd: cmd.clone(),
                 node_id,
-                pid: None,
+                hostpid: None,
             },
         );
     }
@@ -302,9 +302,9 @@ async fn begun_handler(
             Some(cstate) => {
                 state
                     .status_updater
-                    .send_started(cstate.node_id, &cstate.cmd, request.pid)
+                    .send_started(cstate.node_id, &cstate.cmd, &request.hostpid)
                     .await;
-                cstate.pid = Some(request.pid);
+                cstate.hostpid = Some(request.hostpid);
             }
             None => {
                 return json_failed_resp_with_message(
@@ -351,11 +351,11 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_jso
         cstate
     };
 
-    match cstate.pid {
-        Some(pid) => {
+    match cstate.hostpid.as_ref() {
+        Some(hostpid) => {
             state
                 .status_updater
-                .send_finished(cstate.node_id, &cstate.cmd, pid, request.status)
+                .send_finished(cstate.node_id, &cstate.cmd, hostpid, request.status)
                 .await;
         }
         None => {
