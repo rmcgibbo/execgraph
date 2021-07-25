@@ -344,8 +344,8 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_jso
         };
 
         // print while holding lock
-        println!("{}", request.stdout);
-        eprintln!("{}", request.stderr);
+        print!("{}", request.stdout);
+        eprint!("{}", request.stderr);
 
         cstate.cancel.cancel();
         cstate

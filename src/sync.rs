@@ -259,27 +259,31 @@ impl ReadyTracker {
 impl StatusUpdater {
     /// When a task is started, notify the tracker by calling this.
     pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, hostpid: &str) {
-        self.s
+        let r= self.s
             .send(CompletedEvent::Started(StartedEvent {
                 // id: v,
                 cmd: cmd.clone(),
                 hostpid: hostpid.to_string(),
             }))
-            .await
-            .expect("cannot send to channel")
+            .await;
+        if r.is_err() {
+            log::debug!("send_started: cannot send to channel: {:#?}", r);
+        };
     }
 
     /// When a task is finished, notify the tracker by calling this.
     pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str, status: i32) {
-        self.s
+        let r = self.s
             .send(CompletedEvent::Finished(FinishedEvent {
                 id: v,
                 cmd: cmd.clone(),
                 hostpid: hostpid.to_string(),
                 exit_status: status,
             }))
-            .await
-            .expect("cannot send to channel");
+            .await;
+        if r.is_err() {
+            log::debug!("send_finished: cannot send to channel: {:#?}", r);
+        };
     }
 
     /// Retreive a snapshot of the state of the queue
