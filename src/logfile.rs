@@ -1,17 +1,23 @@
+use crate::execgraph::Key;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone)]
 pub struct Record {
     startline: Option<String>,
     endline: String,
 }
 
-pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Record)> {
+/// Load the (startline, endline) pairs from the log file where the exit status
+/// of the endline is 0. So this gives us the successful commands that were
+/// previously performed.
+pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (Key, Arc<Record>)> {
     let lines = io::BufReader::new(file).lines();
 
     let mut startlines = HashMap::new();
@@ -21,24 +27,24 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Reco
         let fields = line.splitn(5, '\t').collect::<Vec<_>>();
         if fields.len() == 5 {
             let _time = fields[0].parse::<u128>().ok()?;
-            let key = fields[1];
+            let key = Key::from_str_radix(fields[1], 16).ok()?;
             let exit_status = fields[2].parse::<i32>().ok()?;
             let _hostpid = fields[3];
             let _cmd = fields[4];
 
             match exit_status {
                 -1 => {
-                    startlines.insert(key.to_owned(), line);
+                    startlines.insert(key, line);
                     None
                 }
                 0 => {
-                    let start = startlines.remove(key);
+                    let start = startlines.remove(&key);
                     Some((
-                        key.to_owned(),
-                        Record {
+                        key,
+                        Arc::new(Record {
                             startline: start,
                             endline: line,
-                        },
+                        }),
                     ))
                 }
                 _ => None,
@@ -49,12 +55,12 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Reco
     })
 }
 
-pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<&String, &Record>) -> Result<()> {
+pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<Key, Arc<Record>>) -> Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(filename)?;
-    for &v in old_keys.values() {
+    for v in old_keys.values() {
         if v.startline.is_some() {
             writeln!(f, "{}", v.startline.as_ref().unwrap())?;
         }
@@ -77,12 +83,12 @@ impl LogWriter {
         Ok(LogWriter { file })
     }
 
-    pub fn begin_command(&mut self, cmd: &str, key: &str, hostpid: &str) -> Result<()> {
+    pub fn begin_command(&mut self, cmd: &str, key: &Key, hostpid: &str) -> Result<()> {
         let fake_exit_status = -1;
-        if !key.is_empty() {
+        if *key != 0 {
             writeln!(
                 self.file,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{:x}\t{}\t{}\t{}",
                 time()?,
                 key,
                 fake_exit_status,
@@ -96,14 +102,14 @@ impl LogWriter {
     pub fn end_command(
         &mut self,
         cmd: &str,
-        key: &str,
+        key: &u128,
         exit_status: i32,
         hostpid: &str,
     ) -> Result<()> {
-        if !key.is_empty() {
+        if *key != 0 {
             writeln!(
                 self.file,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{:x}\t{}\t{}\t{}",
                 time()?,
                 key,
                 exit_status,
