@@ -167,17 +167,6 @@ def test_twice(num_parallel, tmp_path):
     assert len(lines) == 3
 
 
-def test_scan_keys(num_parallel, tmp_path):
-    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
-
-    for i in range(10):
-        eg.add_task("", key=f"helloworld{i}")
-
-    assert eg.scan_keys("helloworld1") == [1]
-    assert eg.scan_keys("helloworld7") == [7]
-    assert eg.scan_keys("helloworld7 helloworld1") == [1, 7]
-
-
 def test_order(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 

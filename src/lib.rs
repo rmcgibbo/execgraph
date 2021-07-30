@@ -67,15 +67,6 @@ impl PyExecGraph {
         })
     }
 
-    /// Compute the indices of all nodes in the task graph for which that nodes `key`
-    /// is a substring of `s`.
-    ///
-    /// This is ancillary to the coree purpose of this class, but it is useful for
-    /// dependencies if you happen to structure your nodes/keys in a certain way.
-    fn scan_keys(&self, s: String) -> Vec<u32> {
-        self.g.scan_keys(&s)
-    }
-
     /// Get the number of tasks in the graph
     fn ntasks(&self) -> usize {
         self.g.ntasks()

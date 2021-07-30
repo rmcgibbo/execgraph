@@ -59,21 +59,6 @@ impl ExecGraph {
         self.deps.raw_nodes().len()
     }
 
-    pub fn scan_keys(&self, s: &str) -> Vec<u32> {
-        self.deps
-            .raw_nodes()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| {
-                if s.contains(&n.weight.key) {
-                    Some(i as u32)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     pub fn get_task(&self, id: u32) -> Option<Cmd> {
         self.deps.node_weight(NodeIndex::from(id)).cloned()
     }
