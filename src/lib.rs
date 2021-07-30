@@ -9,6 +9,7 @@ mod unsafecode;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
+use std::io::Write;
 use tokio::runtime::Runtime;
 
 use crate::execgraph::{Cmd, ExecGraph};
@@ -44,14 +45,16 @@ pub struct PyExecGraph {
 impl PyExecGraph {
     #[new]
     #[args(num_parallel = -1, failures_allowed = 1)]
-    fn new(
-        mut num_parallel: i32,
-        keyfile: String,
-        failures_allowed: u32,
-    ) -> PyResult<PyExecGraph> {
+    fn new(mut num_parallel: i32, keyfile: String, failures_allowed: u32) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
         }
+
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&keyfile)?;
+        writeln!(f)?;
 
         Ok(PyExecGraph {
             g: ExecGraph::new(keyfile),
@@ -187,14 +190,18 @@ impl PyExecGraph {
     ///     execution_order (List[int]): the ids of the tasks that finished (success
     ///         or failure) in order of when they finished.
     ///
-    #[args(target = "None",  remote_provisioner = "None", remote_provisioner_arg2 = "None")]
+    #[args(
+        target = "None",
+        remote_provisioner = "None",
+        remote_provisioner_arg2 = "None"
+    )]
     fn execute(
-        &mut self, py: Python,
+        &mut self,
+        py: Python,
         target: Option<u32>,
         remote_provisioner: Option<String>,
         remote_provisioner_arg2: Option<String>,
     ) -> PyResult<(u32, Vec<u32>)> {
-
         // Create a new process group so that at shutdown time, we can send a
         // SIGTERM to this process group annd kill of all child processes.
         nix::unistd::setpgid(nix::unistd::Pid::this(), nix::unistd::Pid::this())
@@ -203,7 +210,13 @@ impl PyExecGraph {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
                 self.g
-                    .execute(target, self.num_parallel, self.failures_allowed, remote_provisioner, remote_provisioner_arg2)
+                    .execute(
+                        target,
+                        self.num_parallel,
+                        self.failures_allowed,
+                        remote_provisioner,
+                        remote_provisioner_arg2,
+                    )
                     .await
             })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))

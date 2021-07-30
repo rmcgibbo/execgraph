@@ -10,7 +10,7 @@ use futures::future::join_all;
 use hyper::Server;
 use petgraph::prelude::*;
 use routerify::RouterService;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::net::SocketAddr;
 use std::os::unix::process::ExitStatusExt;
@@ -41,17 +41,17 @@ impl Cmd {
 pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     keyfile: String,
-    completed: Vec<NodeIndex>,
+    completed: HashSet<NodeIndex>,
+    copied_keys: HashSet<String>,
 }
 
 impl ExecGraph {
-    pub fn new(
-        keyfile: String,
-    ) -> ExecGraph {
+    pub fn new(keyfile: String) -> ExecGraph {
         ExecGraph {
             deps: Graph::new(),
             keyfile,
-            completed: vec![],
+            completed: HashSet::new(),
+            copied_keys: HashSet::new(),
         }
     }
 
@@ -110,7 +110,7 @@ impl ExecGraph {
         Ok(new_node.index() as u32)
     }
 
-    fn get_subgraph(&self, target: Option<u32>) -> Result<Graph<(Cmd, NodeIndex), ()>> {
+    fn get_subgraph(&mut self, target: Option<u32>) -> Result<Graph<(Cmd, NodeIndex), ()>> {
         // Get the subgraph containing all cmds in the transitive closure of target.
         // these are all the commands we need to resolve first. if target is none, then
         // just get the whole subraph (with an unnecessary copy unfortunately)
@@ -138,17 +138,22 @@ impl ExecGraph {
         };
 
         let previously_run_keys = match File::open(&self.keyfile) {
-            Ok(file) => load_keys_exit_status_0(file).collect::<HashSet<_>>(),
-            _ => HashSet::new(),
+            Ok(file) => load_keys_exit_status_0(file).collect::<HashMap<_, _>>(),
+            _ => HashMap::new(),
         };
+        let mut reused_old_keys = HashMap::new();
 
         // Now let's remove all edges from the dependency graph if the source has already finished
         // or if we've already exeuted the task in a previous call to execute
-        Ok(subgraph.filter_map(
+        let filtered_subgraph = subgraph.filter_map(
             |_n, w| {
-                if self.completed.contains(&w.1)
-                    || (!w.0.key.is_empty()) && previously_run_keys.contains(&w.0.key)
-                {
+                if self.completed.contains(&w.1) || self.copied_keys.contains(&w.0.key) {
+                    // if we already ran this command within this process, don't record it
+                    // in reused_old_keys. that's only for stuff that was run in a previous
+                    // session
+                    None
+                } else if (!w.0.key.is_empty()) && previously_run_keys.contains_key(&w.0.key) {
+                    reused_old_keys.insert(&w.0.key, previously_run_keys.get(&w.0.key).unwrap());
                     None
                 } else {
                     Some((w.0.clone(), w.1))
@@ -157,13 +162,27 @@ impl ExecGraph {
             |e, &w| {
                 let src = subgraph.edge_endpoints(e).unwrap().0;
                 let srckey = &subgraph.node_weight(src).unwrap().0.key;
-                if (!srckey.is_empty()) && previously_run_keys.contains(srckey) {
+                if (!srckey.is_empty()) && previously_run_keys.contains_key(srckey) {
                     None
                 } else {
                     Some(w)
                 }
             },
-        ))
+        );
+
+        // See test_copy_reused_keys_logfile.
+        // This is not elegant at all. The point is that when a job is run in one execgraph invocation and
+        // then requested in a new invocation but not rerun because we detected that it had already been
+        // run, we want to copy the entries in the logfile. this ensures that the last entries in the logfile
+        // since the final blank line describe the full set of jobs that the last invocation dependend on.
+        // this way, when reading the log file, it's possible to figure out what jobs are garbage and what
+        // jobs are still "in use".
+        crate::logfile::copy_reused_keys(&self.keyfile, &reused_old_keys)?;
+        for &key in reused_old_keys.keys() {
+            self.copied_keys.insert(key.clone());
+        }
+
+        Ok(filtered_subgraph)
     }
 
     pub async fn execute(
@@ -204,7 +223,7 @@ impl ExecGraph {
             let subgraph1 = subgraph.clone();
             let tasks_ready1 = tasks_ready.clone();
             let status_updater1 = status_updater.clone();
-            let provisioner = format!("{}", provisioner.clone().unwrap());
+            let provisioner = provisioner.clone().unwrap();
             let p2 = provisioner_arg2.clone();
             let token1 = token.clone();
             let token2 = token.clone();

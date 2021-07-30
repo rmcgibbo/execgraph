@@ -120,7 +120,7 @@ impl ReadyTracker {
             ready_r,
             StatusUpdater {
                 s: finished_s,
-                queuestate: queuestate.clone(),
+                queuestate
             },
         )
     }
@@ -259,7 +259,8 @@ impl ReadyTracker {
 impl StatusUpdater {
     /// When a task is started, notify the tracker by calling this.
     pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, hostpid: &str) {
-        let r= self.s
+        let r = self
+            .s
             .send(CompletedEvent::Started(StartedEvent {
                 // id: v,
                 cmd: cmd.clone(),
@@ -273,7 +274,8 @@ impl StatusUpdater {
 
     /// When a task is finished, notify the tracker by calling this.
     pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str, status: i32) {
-        let r = self.s
+        let r = self
+            .s
             .send(CompletedEvent::Finished(FinishedEvent {
                 id: v,
                 cmd: cmd.clone(),

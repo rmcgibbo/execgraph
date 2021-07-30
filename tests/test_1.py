@@ -164,7 +164,7 @@ def test_twice(num_parallel, tmp_path):
 
     with open(str(tmp_path / "foo")) as f:
         lines = f.readlines()
-    assert len(lines) == 2
+    assert len(lines) == 3
 
 
 def test_scan_keys(num_parallel, tmp_path):
@@ -203,9 +203,7 @@ def test_not_execute_twice(num_parallel, tmp_path):
 
 
 def test_simple_remote(num_parallel, tmp_path):
-    eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo")
-    )
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
 
     eg.add_task("echo foo; sleep 1; echo foo", key="task0")
     for i in range(1, 5):
@@ -263,9 +261,7 @@ def test_shutdown(tmp_path):
         print("wait", file=f)
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
-    eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo")
-    )
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
     eg.add_task("false", key="")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
     assert nfailed == 1
@@ -279,9 +275,7 @@ def test_status(tmp_path):
         print("curl $1/status > %s/resp.json" % tmp_path, file=f)
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
-    eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo")
-    )
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
     eg.add_task("false", key="foo")
     eg.add_task("false", key="bar")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
@@ -307,44 +301,84 @@ def test_queue(tmp_path):
         print(f"wait", file=f)
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
-    eg = _execgraph.ExecGraph(
-        0, str(tmp_path / "foo")
-    )
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
     eg.add_task("true", key="foo", queuename="gpu")
     eg.add_task("true", key="bar")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
         value = json.load(f)
-        value["data"]["queues"] = sorted(value["data"]["queues"], key=lambda x: str(x[0]))
+        value["data"]["queues"] = sorted(
+            value["data"]["queues"], key=lambda x: str(x[0])
+        )
         assert value == {
             "status": "success",
             "code": 200,
             "data": {
-                "queues": sorted([
+                "queues": sorted(
                     [
-                        None,
-                        {
-                            "num_ready": 1,
-                            "num_failed": 0,
-                            "num_success": 0,
-                            "num_inflight": 0,
-                        },
+                        [
+                            None,
+                            {
+                                "num_ready": 1,
+                                "num_failed": 0,
+                                "num_success": 0,
+                                "num_inflight": 0,
+                            },
+                        ],
+                        [
+                            "gpu",
+                            {
+                                "num_ready": 1,
+                                "num_failed": 0,
+                                "num_success": 0,
+                                "num_inflight": 0,
+                            },
+                        ],
                     ],
-                    [
-                        "gpu",
-                        {
-                            "num_ready": 1,
-                            "num_failed": 0,
-                            "num_success": 0,
-                            "num_inflight": 0,
-                        },
-                    ],
-                ], key=lambda x: str(x[0]))
+                    key=lambda x: str(x[0]),
+                )
             },
         }
 
     assert nfailed == 0
+
+
+def test_copy_reused_keys_logfile(tmp_path):
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg.add_task("echo 1", key="foo")
+    eg.execute()
+
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg.add_task("echo 1", key="foo")
+    eg.add_task("echo 2", key="bar")
+    eg.execute()
+
+    eg.add_task("echo 3", key="baz")
+    eg.execute()
+
+    with open(str(tmp_path / "foo")) as f:
+        #
+        # 1627614382812479141	foo	-1	xps13:22354	echo 1
+        # 1627614382815297952	foo	0	xps13:22354	echo 1
+        #
+        # 1627614382812479141	foo	-1	xps13:22354	echo 1
+        # 1627614382815297952	foo	0	xps13:22354	echo 1
+        # 1627614382817976207	bar	-1	xps13:22363	echo 2
+        # 1627614382820884414	bar	0	xps13:22363	echo 2
+        # 1627614382822833663	baz	-1	xps13:22372	echo 3
+        # 1627614382825519374	baz	0	xps13:22372	echo 3
+
+        assert "\n" == f.readline()
+        assert "foo\t-1" in f.readline()
+        assert "foo\t0" in f.readline()
+        assert "\n" == f.readline()
+        assert "foo\t-1" in f.readline()
+        assert "foo\t0" in f.readline()
+        assert "bar\t-1" in f.readline()
+        assert "bar\t0" in f.readline()
+        assert "baz\t-1" in f.readline()
+        assert "baz\t0" in f.readline()
 
 
 #
