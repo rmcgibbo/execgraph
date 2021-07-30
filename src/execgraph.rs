@@ -37,21 +37,26 @@ impl Cmd {
     }
 }
 
-#[derive(Debug)]
 pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     keyfile: String,
-    completed: HashSet<NodeIndex>,
-    copied_keys: HashSet<String>,
+    keyfile_prior_contents: HashMap<String, Arc<crate::logfile::Record>>,
+    completed: HashSet<String>,
 }
 
 impl ExecGraph {
     pub fn new(keyfile: String) -> ExecGraph {
+        // Load prior the successful tasks from keyfile.
+        let keyfile_prior_contents = match File::open(&keyfile) {
+            Ok(file) => load_keys_exit_status_0(file).collect::<HashMap<_, _>>(),
+            _ => HashMap::new(),
+        };
+
         ExecGraph {
             deps: Graph::new(),
             keyfile,
             completed: HashSet::new(),
-            copied_keys: HashSet::new(),
+            keyfile_prior_contents,
         }
     }
 
@@ -122,23 +127,19 @@ impl ExecGraph {
             None => self.deps.filter_map(|n, w| Some((w, n)), |_e, _w| Some(())),
         };
 
-        let previously_run_keys = match File::open(&self.keyfile) {
-            Ok(file) => load_keys_exit_status_0(file).collect::<HashMap<_, _>>(),
-            _ => HashMap::new(),
-        };
         let mut reused_old_keys = HashMap::new();
 
         // Now let's remove all edges from the dependency graph if the source has already finished
         // or if we've already exeuted the task in a previous call to execute
         let filtered_subgraph = subgraph.filter_map(
             |_n, w| {
-                if self.completed.contains(&w.1) || self.copied_keys.contains(&w.0.key) {
+                if self.completed.contains(&w.0.key) {
                     // if we already ran this command within this process, don't record it
                     // in reused_old_keys. that's only for stuff that was run in a previous
                     // session
                     None
-                } else if (!w.0.key.is_empty()) && previously_run_keys.contains_key(&w.0.key) {
-                    reused_old_keys.insert(&w.0.key, previously_run_keys.get(&w.0.key).unwrap());
+                } else if (!w.0.key.is_empty()) && self.keyfile_prior_contents.contains_key(&w.0.key) {
+                    reused_old_keys.insert(w.0.key.clone(), self.keyfile_prior_contents.get(&w.0.key).unwrap().clone());
                     None
                 } else {
                     Some((w.0.clone(), w.1))
@@ -147,7 +148,7 @@ impl ExecGraph {
             |e, &w| {
                 let src = subgraph.edge_endpoints(e).unwrap().0;
                 let srckey = &subgraph.node_weight(src).unwrap().0.key;
-                if (!srckey.is_empty()) && previously_run_keys.contains_key(srckey) {
+                if (!srckey.is_empty()) && self.keyfile_prior_contents.contains_key(srckey) {
                     None
                 } else {
                     Some(w)
@@ -163,8 +164,9 @@ impl ExecGraph {
         // this way, when reading the log file, it's possible to figure out what jobs are garbage and what
         // jobs are still "in use".
         crate::logfile::copy_reused_keys(&self.keyfile, &reused_old_keys)?;
-        for &key in reused_old_keys.keys() {
-            self.copied_keys.insert(key.clone());
+        for key in reused_old_keys.keys() {
+            self.keyfile_prior_contents.remove(key);
+            self.completed.insert(key.to_owned());
         }
 
         Ok(filtered_subgraph)
@@ -263,18 +265,20 @@ impl ExecGraph {
         let n_failed = servicer.n_failed;
         // get indices of the tasks we executed, mapped back from the subgraph node ids
         // to the node ids in the deps graph
-        let completed: Vec<NodeIndex> = servicer
+        let completed: Vec<u32> = servicer
             .finished_order
             .iter()
-            .map(|&n| (subgraph[n].1))
+            .map(|&n| (subgraph[n].1.index() as u32))
             .collect();
 
-        drop(servicer);
-        drop(subgraph);
-        self.completed.extend(&completed);
+        for n in servicer.finished_order.iter() {
+            self.completed.insert(subgraph[*n].0.key.clone());
+        }
+
+
         Ok((
             n_failed,
-            completed.iter().map(|n| n.index() as u32).collect(),
+            completed,
         ))
     }
 }

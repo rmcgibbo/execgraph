@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
+use std::sync::Arc;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -11,7 +12,7 @@ pub struct Record {
     endline: String,
 }
 
-pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Record)> {
+pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Arc<Record>)> {
     let lines = io::BufReader::new(file).lines();
 
     let mut startlines = HashMap::new();
@@ -35,11 +36,11 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Reco
                     let start = startlines.remove(key);
                     Some((
                         key.to_owned(),
-                        Record {
+                        Arc::new(Record {
                             startline: start,
                             endline: line,
                         },
-                    ))
+                    )))
                 }
                 _ => None,
             }
@@ -49,12 +50,12 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Reco
     })
 }
 
-pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<&String, &Record>) -> Result<()> {
+pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<String, Arc<Record>>) -> Result<()> {
     let mut f = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(filename)?;
-    for &v in old_keys.values() {
+    for v in old_keys.values() {
         if v.startline.is_some() {
             writeln!(f, "{}", v.startline.as_ref().unwrap())?;
         }
