@@ -120,7 +120,7 @@ impl ReadyTracker {
             ready_r,
             StatusUpdater {
                 s: finished_s,
-                queuestate,
+                queuestate
             },
         )
     }

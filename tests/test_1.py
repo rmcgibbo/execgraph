@@ -58,7 +58,7 @@ def test_1(num_parallel, tmp_path):
         # these are dependencies that are supposed to be completed
         # before we run u
         dependencies = [v for (_u, v) in g.edges(u)]
-        eg.add_task("true", 0, dependencies)
+        eg.add_task("true", "", dependencies)
 
     failed, execution_order = eg.execute()
     assert failed == 0
@@ -79,7 +79,7 @@ def test_2(seed, tmp_path):
         # these are dependencies that are supposed to be completed
         # before we run u
         dependencies = [v for (_u, v) in g.edges(u)]
-        eg.add_task("", 0, dependencies)
+        eg.add_task("", "", dependencies)
 
     failed, execution_order = eg.execute()
     assert len(execution_order) == g.number_of_nodes()
@@ -93,15 +93,15 @@ def test_2(seed, tmp_path):
 
 def test_3(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
-    eg.add_task("false", 0)
+    eg.add_task("false", "")
     nfailed, _ = eg.execute()
     assert nfailed == 1
 
 
 def test_4(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
-    eg.add_task("false", 0)
-    eg.add_task("true", 0, [0])
+    eg.add_task("false", "")
+    eg.add_task("true", "", [0])
     nfailed, order = eg.execute()
     assert nfailed == 1 and order == [0]
 
@@ -109,12 +109,12 @@ def test_4(num_parallel, tmp_path):
 def test_5(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
-    eg.add_task("true", 0, [])
+    eg.add_task("true", "", [])
     for i in range(1, 10):
-        eg.add_task("true", 0, [i - 1])
-    q = eg.add_task("false", 0, [i])
+        eg.add_task("true", "", [i - 1])
+    q = eg.add_task("false", "", [i])
     for i in range(20):
-        eg.add_task("true", 0, [q])
+        eg.add_task("true", "", [q])
 
     nfailed, order = eg.execute()
     assert nfailed == 1 and order == list(range(11))
@@ -132,26 +132,24 @@ def test_help():
 def test_key(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
-    eg.add_task("true qq", 101, [])
+    eg.add_task("true", "0", [])
     for i in range(1, 10):
-        eg.add_task(f"true {i}", i, [i - 1])
+        eg.add_task("true", str(i), [i - 1])
     assert len(eg.execute()[1]) == 10
     assert len(eg.execute()[1]) == 0
 
     eg2 = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
-    eg2.add_task("true qq", 101, [])
+    eg2.add_task("true", "0", [])
     for i in range(1, 11):
-        eg2.add_task(f"true {i}", i, [i - 1])
-
-    executed = eg2.execute()[1]
-    assert len(executed) == 1
+        eg2.add_task("true", str(i), [i - 1])
+    assert len(eg2.execute()[1]) == 1
 
 
 def test_inward(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
-    tasks = [eg.add_task("sleep 0.5 && false", 0) for i in range(5)]
-    eg.add_task("true", 0, tasks)
+    tasks = [eg.add_task("sleep 0.5 && false", "") for i in range(5)]
+    eg.add_task("true", "", tasks)
     eg.execute()
 
 
@@ -159,8 +157,7 @@ def test_twice(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     tasks = [
-        # same key each time
-        eg.add_task("true", 11, display="truedisplay")
+        eg.add_task("true", f"same_key_each_time", display="truedisplay")
         for i in range(5)
     ]
     eg.execute()
@@ -170,13 +167,24 @@ def test_twice(num_parallel, tmp_path):
     assert len(lines) == 3
 
 
+def test_scan_keys(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
+
+    for i in range(10):
+        eg.add_task("", key=f"helloworld{i}")
+
+    assert eg.scan_keys("helloworld1") == [1]
+    assert eg.scan_keys("helloworld7") == [7]
+    assert eg.scan_keys("helloworld7 helloworld1") == [1, 7]
+
+
 def test_order(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
     for i in range(10):
-        eg.add_task("", key=i)
+        eg.add_task("", key=f"helloworld{i}")
 
-    id11 = eg.add_task("true", key=42)
+    id11 = eg.add_task("true", key="foo")
     a, b = eg.execute(id11)
     assert a == 0
     assert b == [id11]
@@ -185,8 +193,8 @@ def test_order(num_parallel, tmp_path):
 def test_not_execute_twice(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
-    eg.add_task("true", key=42)
-    eg.add_task("false", key=43, dependencies=[0])
+    eg.add_task("true", key="task0")
+    eg.add_task("false", key="task1", dependencies=[0])
 
     nfailed1, order1 = eg.execute()
     assert nfailed1 == 1 and order1 == [0, 1]
@@ -197,9 +205,9 @@ def test_not_execute_twice(num_parallel, tmp_path):
 def test_simple_remote(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
 
-    eg.add_task("echo foo; sleep 1; echo foo", key=42)
+    eg.add_task("echo foo; sleep 1; echo foo", key="task0")
     for i in range(1, 5):
-        eg.add_task("echo foo; sleep 0.1; echo foo", key=i, dependencies=[i - 1])
+        eg.add_task("echo foo; sleep 0.1; echo foo", key="", dependencies=[i - 1])
 
     nfailed, _ = eg.execute(remote_provisioner="execgraph-remote")
     assert nfailed == 0
@@ -213,11 +221,11 @@ def test_poisoned(tmp_path):
         first.append(
             eg.add_task(
                 cmd,
-                key=0,
+                key="",
             )
         )
-    final = eg.add_task("true", key=0, dependencies=first)
-    final2 = eg.add_task("true", key=0, dependencies=[final])
+    final = eg.add_task("true", key="", dependencies=first)
+    final2 = eg.add_task("true", key="", dependencies=[final])
     nfailed, order = eg.execute()
     assert nfailed == 5
     assert len(order) == 10
@@ -226,7 +234,7 @@ def test_poisoned(tmp_path):
 def test_no_such_command(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
-    eg.add_task("skdfjsbfjdbsbjdfssdf", key=42)
+    eg.add_task("skdfjsbfjdbsbjdfssdf", key="task0")
 
     nfailed1, order1 = eg.execute()
     assert nfailed1 == 1
@@ -236,7 +244,7 @@ def test_no_such_command(num_parallel, tmp_path):
 def test_no_such_provisioner(num_parallel, tmp_path, provisioner):
     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
 
-    eg.add_task("skdfjsbfjdbsbjdfssdf", key=42)
+    eg.add_task("skdfjsbfjdbsbjdfssdf", key="task0")
 
     nfailed, order = eg.execute(remote_provisioner=provisioner)
     assert nfailed == 0
@@ -254,7 +262,7 @@ def test_shutdown(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
-    eg.add_task("false", key=0)
+    eg.add_task("false", key="")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
     assert nfailed == 1
 
@@ -268,8 +276,8 @@ def test_status(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
-    eg.add_task("false", key=42)
-    eg.add_task("false", key=43)
+    eg.add_task("false", key="foo")
+    eg.add_task("false", key="bar")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
@@ -294,8 +302,8 @@ def test_queue(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
-    eg.add_task("true", key=42, queuename="gpu")
-    eg.add_task("true", key=43)
+    eg.add_task("true", key="foo", queuename="gpu")
+    eg.add_task("true", key="bar")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
@@ -338,18 +346,15 @@ def test_queue(tmp_path):
 
 def test_copy_reused_keys_logfile(tmp_path):
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
-    eg.add_task("echo 1", key=42)
+    eg.add_task("echo 1", key="foo")
     eg.execute()
-
-    with open(str(tmp_path / "foo")) as f:
-        print(f.read())
 
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
-    eg.add_task("echo 1", key=42)
-    eg.add_task("echo 2", key=43)
+    eg.add_task("echo 1", key="foo")
+    eg.add_task("echo 2", key="bar")
     eg.execute()
 
-    eg.add_task("echo 3", key=44)
+    eg.add_task("echo 3", key="baz")
     eg.execute()
 
     with open(str(tmp_path / "foo")) as f:
@@ -365,15 +370,15 @@ def test_copy_reused_keys_logfile(tmp_path):
         # 1627614382825519374	baz	0	xps13:22372	echo 3
 
         assert "\n" == f.readline()
-        assert "2a\t-1" in f.readline()
-        assert "2a\t0" in f.readline()
+        assert "foo\t-1" in f.readline()
+        assert "foo\t0" in f.readline()
         assert "\n" == f.readline()
-        assert "2a\t-1" in f.readline()
-        assert "2a\t0" in f.readline()
-        assert "2b\t-1" in f.readline()
-        assert "2b\t0" in f.readline()
-        assert "2c\t-1" in f.readline()
-        assert "2c\t0" in f.readline()
+        assert "foo\t-1" in f.readline()
+        assert "foo\t0" in f.readline()
+        assert "bar\t-1" in f.readline()
+        assert "bar\t0" in f.readline()
+        assert "baz\t-1" in f.readline()
+        assert "baz\t0" in f.readline()
 
 
 #
