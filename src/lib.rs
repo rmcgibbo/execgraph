@@ -194,6 +194,11 @@ impl PyExecGraph {
         remote_provisioner: Option<String>,
         remote_provisioner_arg2: Option<String>,
     ) -> PyResult<(u32, Vec<u32>)> {
+
+        // Create a new process group so that at shutdown time, we can send a
+        // SIGTERM to this process group annd kill of all child processes.
+        nix::unistd::setpgid(nix::unistd::Pid::this(), nix::unistd::Pid::this())
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         py.allow_threads(move || {
             let rt = Runtime::new().unwrap();
             rt.block_on(async {
