@@ -214,7 +214,7 @@ impl ReadyTracker {
             self.n_success += 1;
             println!(
                 "[{}/{}] {}",
-                self.n_success,
+                self.n_success + self.count_offset,
                 total + self.count_offset,
                 e.cmd.display()
             );

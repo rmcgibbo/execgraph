@@ -138,8 +138,13 @@ impl ExecGraph {
                     // in reused_old_keys. that's only for stuff that was run in a previous
                     // session
                     None
-                } else if (!w.0.key.is_empty()) && self.keyfile_prior_contents.contains_key(&w.0.key) {
-                    reused_old_keys.insert(w.0.key.clone(), self.keyfile_prior_contents.get(&w.0.key).unwrap().clone());
+                } else if (!w.0.key.is_empty())
+                    && self.keyfile_prior_contents.contains_key(&w.0.key)
+                {
+                    reused_old_keys.insert(
+                        w.0.key.clone(),
+                        self.keyfile_prior_contents.get(&w.0.key).unwrap().clone(),
+                    );
                     None
                 } else {
                     Some((w.0.clone(), w.1))
@@ -185,9 +190,11 @@ impl ExecGraph {
             return Ok((0, vec![]));
         }
 
-        let count_offset = self.completed.len() as u32;
-        let (mut servicer, tasks_ready, status_updater) =
-            ReadyTracker::new(subgraph.clone(), count_offset, failures_allowed);
+        let (mut servicer, tasks_ready, status_updater) = ReadyTracker::new(
+            subgraph.clone(),
+            self.completed.len() as u32,
+            failures_allowed,
+        );
 
         // Run local processes
         let handles = (0..num_parallel)
@@ -275,11 +282,7 @@ impl ExecGraph {
             self.completed.insert(subgraph[*n].0.key.clone());
         }
 
-
-        Ok((
-            n_failed,
-            completed,
-        ))
+        Ok((n_failed, completed))
     }
 }
 
