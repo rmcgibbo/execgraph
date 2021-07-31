@@ -1,11 +1,12 @@
 use anyhow::Result;
-use std::collections::HashMap;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{self, BufRead, Write};
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    fs::{File, OpenOptions},
+    io::{self, BufRead, Write},
+    path::Path,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 pub struct Record {
     startline: String,

@@ -2,13 +2,16 @@ mod execgraph;
 mod graphtheory;
 pub mod httpinterface;
 mod logfile;
+mod parser;
 mod server;
 pub mod sync;
 mod unsafecode;
 
-use pyo3::exceptions::{PyIndexError, PyRuntimeError};
-use pyo3::prelude::*;
-use pyo3::types::PyTuple;
+use pyo3::{
+    exceptions::{PyIndexError, PyRuntimeError, PySyntaxError},
+    prelude::*,
+    types::{IntoPyDict, PyTuple},
+};
 use std::io::Write;
 use tokio::runtime::Runtime;
 
@@ -214,10 +217,179 @@ impl PyExecGraph {
         })
     }
 }
+#[pyfunction]
+fn parse_fstringish<'a>(
+    py: Python<'a>,
+    input: &str,
+    filename: &str,
+    line_offset: u32,
+) -> PyResult<(&'a PyAny, Vec<String>)> {
+    let value = crate::parser::parse_fstringish(input)
+        .map_err(|e| {
+            let spans = match e {
+                nom::Err::Error(nom::error::VerboseError {errors: spans}) => {spans}
+                nom::Err::Failure(nom::error::VerboseError {errors: spans}) => {spans}
+                nom::Err::Incomplete(_) => {panic!("Unknown error modality")},
+            };
+            let span = spans[0].0;
+
+            PySyntaxError::new_err((
+                "f-string: invalid syntax",
+                (
+                    filename.to_string(),
+                    line_offset + span.location_line(),
+                    span.get_utf8_column(),
+                    input
+                        .split("\n")
+                        .nth((span.location_line() - 1) as usize)
+                        .unwrap()
+                        .to_string(),
+                ),
+            ))
+        })?;
+
+    let ast = py.import("ast")?;
+    let ast_walk = ast.getattr("walk")?;
+    let ast_parse = ast.getattr("parse")?;
+    let ast_constant = ast.getattr("Constant")?;
+    let ast_formatted_value = ast.getattr("FormattedValue")?;
+
+    let body = value
+        .body
+        .iter()
+        .map(|s| match s {
+            crate::parser::JoinedStringPart::Constant(span) => {
+                let mut end_lineno = span.location_line();
+                let mut end_col_offset = span.get_utf8_column();
+                for chr in span.fragment().chars() {
+                    if chr == '\n' {
+                        end_lineno += 1;
+                        end_col_offset = 1;
+                    } else {
+                        end_col_offset += 1;
+                    }
+                }
+
+                let kwargs = vec![
+                    ("lineno", (span.location_line() + line_offset) as usize),
+                    ("end_lineno", (end_lineno + line_offset) as usize),
+                    ("col_offset", span.get_utf8_column() - 1),
+                    ("end_col_offset", end_col_offset - 1),
+                ]
+                .into_py_dict(py);
+                ast_constant.call((*span.fragment(),), Some(kwargs))
+            }
+            crate::parser::JoinedStringPart::Expression(span) => {
+                // parse the expression with ast.parse
+                let expr = ast_parse
+                    .call1((*span.fragment(), filename, "eval"))
+                    .map_err(|e| {
+                        let get_col_offset = || {
+                            e.pvalue(py)
+                                .getattr("args")?
+                                .get_item(1)?
+                                .get_item(2)?
+                                .extract::<usize>()
+                        };
+                        let col_offset = match get_col_offset() {
+                            Ok(o) => o,
+                            Err(e) => {
+                                return e;
+                            }
+                        };
+                        PySyntaxError::new_err((
+                            "f-string: invalid syntax",
+                            (
+                                filename.to_string(),
+                                line_offset + span.location_line(),
+                                span.get_utf8_column() + col_offset - 1,
+                                input
+                                    .split("\n")
+                                    .nth((span.location_line() - 1) as usize)
+                                    .unwrap()
+                                    .to_string(),
+                            ),
+                        ))
+                    })?
+                    .getattr("body")?;
+
+                // update the lineno and col_offset information for the body of the expression, since
+                // ast.parse doesn't know what line/col in the file we were on
+                for maybe_item in ast_walk.call1((expr,))?.iter()? {
+                    let item = maybe_item?;
+
+                    if let Ok(lineno) = item.getattr("lineno") {
+                        item.setattr(
+                            "lineno",
+                            span.location_line() - 1 + lineno.extract::<u32>()? + line_offset,
+                        )?;
+                    }
+                    if let Ok(end_lineno) = item.getattr("end_lineno") {
+                        item.setattr(
+                            "end_lineno",
+                            span.location_line() - 1 + end_lineno.extract::<u32>()? + line_offset,
+                        )?;
+                    }
+                    if let Ok(col_offset) = item.getattr("col_offset") {
+                        item.setattr(
+                            "col_offset",
+                            span.get_utf8_column() - 1 + col_offset.extract::<usize>()?,
+                        )?;
+                    }
+                    if let Ok(end_col_offset) = item.getattr("end_col_offset") {
+                        if span.fragment().find("\n").is_none() {
+                            item.setattr(
+                                "end_col_offset",
+                                span.get_utf8_column() - 1 + end_col_offset.extract::<usize>()?,
+                            )?;
+                        }
+                    }
+                }
+
+                let kwargs = vec![
+                    ("conversion", -1),
+                    ("lineno", line_offset as i32 + span.location_line() as i32),
+                    ("col_offset", span.get_utf8_column() as i32),
+                    (
+                        "end_lineno",
+                        line_offset as i32
+                            + input.matches("\n").count() as i32
+                            + span.location_line() as i32,
+                    ),
+                    (
+                        "end_col_offset",
+                        (span.fragment().len() + span.get_utf8_column()) as i32,
+                    ),
+                ]
+                .into_py_dict(py);
+                ast_formatted_value.call((expr,), Some(kwargs))
+            }
+        })
+        .collect::<PyResult<Vec<&PyAny>>>()?;
+
+    // these end_col_offset values are not quite right for multi-line strings, but it doesn't really matter.
+    let kwargs = vec![
+        ("lineno", 1 + line_offset),
+        (
+            "end_lineno",
+            1 + input.matches("\n").count() as u32 + line_offset,
+        ),
+        ("col_offset", 0),
+        ("end_col_offset", input.len() as u32),
+    ]
+    .into_py_dict(py);
+    let joinedstring = ast.getattr("JoinedStr")?.call((body,), Some(kwargs))?;
+    let expr = ast
+        .getattr("Expression")?
+        .call((joinedstring,), Some(kwargs))?;
+
+    Ok((expr, value.preamble_fragments().iter().map(|&s| s.to_string()).collect()))
+}
 
 #[pymodule]
 pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
     env_logger::init();
     m.add_class::<PyExecGraph>()?;
+    m.add_function(wrap_pyfunction!(parse_fstringish, m)?)?;
     Ok(())
 }

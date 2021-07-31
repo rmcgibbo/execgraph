@@ -12,7 +12,8 @@ from distutils.spawn import find_executable
 
 
 if os.path.exists("target/debug/libexecgraph.so"):
-    shutil.copy("target/debug/libexecgraph.so", "execgraph.so")
+    if not os.path.exists("execgraph.so"):
+        os.symlink("target/debug/libexecgraph.so", "execgraph.so")
     sys.path.insert(0, ".")
     os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"
     # print(os.environ["PATH"])
@@ -391,3 +392,60 @@ def test_copy_reused_keys_logfile(tmp_path):
 #     eg.add_task("false", key="")
 #     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 #     assert nfailed == 1
+
+
+def test_fstringish_1():
+    import ast
+    text = """
+
+foo---${bar + xx}
+
+${a}
+  ${qq}"""
+
+    expr, _ = _execgraph.parse_fstringish(text, "<unknown>", 0)
+
+    class v(ast.NodeVisitor):
+        def generic_visit(self, node):
+            if "lineno" in node._attributes and (hasattr(node, "value") and isinstance(node.value, str)) or (hasattr(node, "id") and isinstance(node.id, str)):
+                value = ""
+                for lineno in range(node.lineno-1, node.end_lineno):
+                    line = (text.splitlines() + ["\n"])[lineno] + "\n"
+                    if lineno == node.lineno-1 and lineno == node.end_lineno-1:
+                        value += line[node.col_offset:node.end_col_offset]
+                    elif lineno == node.lineno-1:
+                        value += line[node.col_offset:]
+                    elif lineno == node.end_lineno-1:
+                        value += line[:node.end_col_offset]
+                    else:
+                        value += line
+                assert value == (node.value if hasattr(node, "value") else node.id)
+
+            super().generic_visit(node)
+
+    v().visit(expr)
+
+
+def test_fstringish_2():
+    import ast
+    expr, _ = _execgraph.parse_fstringish("""a =   ${abc + qqq} ff""", "abc.py", 10)
+    for n in ast.walk(expr):
+        if hasattr(n, "lineno"):
+            assert n.lineno == 11
+
+    assert  eval(compile(expr, "abc.py", "eval"), {"abc": 0, "qqq": 1}) == "a =   1 ff"
+
+def test_fstringish_3():
+    try:
+        expr = _execgraph.parse_fstringish("""a
+b
+c
+${{}""", "abc.py", 0)
+    except SyntaxError as e:
+        assert e.args == ('f-string: invalid syntax', ('abc.py', 4, 1, '${{}'))
+
+
+def test_fstringish_4():
+    expr, preamble = _execgraph.parse_fstringish("[a=1, b, c] ${x}", "<unknown>", 0)
+    assert eval(compile(expr, "test.py", "eval"), {"x": "x"}) == " x"
+    assert preamble == ["a=1", "b", "c"]

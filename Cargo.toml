@@ -20,6 +20,8 @@ hyper = "*"
 libc = "*"
 log = "*"
 nix = "^0.22"
+nom = "^6"
+nom_locate = "^3"
 num_cpus = "*"
 petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}
 pyo3 = "^0.14"

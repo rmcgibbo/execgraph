@@ -1,10 +1,11 @@
-use crate::execgraph::Cmd;
-use crate::logfile::LogWriter;
+use crate::{execgraph::Cmd, logfile::LogWriter};
 use anyhow::Result;
 use async_channel::{unbounded, Receiver, Sender};
 use petgraph::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 use tokio_util::sync::CancellationToken;
 
 /// A wrapper for cancellation token which automatically cancels

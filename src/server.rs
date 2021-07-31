@@ -1,18 +1,17 @@
-use crate::execgraph::Cmd;
-use crate::httpinterface::*;
-use crate::sync::{Queuename, StatusUpdater};
+use crate::{
+    execgraph::Cmd,
+    httpinterface::*,
+    sync::{Queuename, StatusUpdater},
+};
 use anyhow::Result;
 use async_channel::{bounded, Receiver, Sender};
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
-use routerify::ext::RequestExt;
-use routerify::{Middleware, RequestInfo, Router};
+use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
 use routerify_json_response::{json_failed_resp_with_message, json_success_resp};
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
-use std::{net::SocketAddr, sync::Arc};
-use tokio::sync::Mutex;
-use tokio::time::timeout;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use tokio::{sync::Mutex, time::timeout};
 use tokio_util::sync::CancellationToken;
 
 static PING_INTERVAL_MSECS: u64 = 15_000;

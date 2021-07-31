@@ -1,23 +1,24 @@
-use crate::graphtheory::transitive_closure_dag;
-use crate::logfile::load_keys_exit_status_0;
-use crate::server::router;
-use crate::server::State as ServerState;
-use crate::sync::{ReadyTracker, StatusUpdater};
-use crate::unsafecode;
+use crate::{
+    graphtheory::transitive_closure_dag,
+    logfile::load_keys_exit_status_0,
+    server::{router, State as ServerState},
+    sync::{ReadyTracker, StatusUpdater},
+    unsafecode,
+};
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
 use futures::future::join_all;
 use hyper::Server;
 use petgraph::prelude::*;
 use routerify::RouterService;
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::net::SocketAddr;
-use std::os::unix::process::ExitStatusExt;
-use std::sync::Arc;
-use tokio::process::Command;
-use tokio::signal;
-use tokio::sync::oneshot;
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    net::SocketAddr,
+    os::unix::process::ExitStatusExt,
+    sync::Arc,
+};
+use tokio::{process::Command, signal, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]

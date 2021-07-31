@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Result};
-use petgraph::algo::toposort;
-use petgraph::graph::DiGraph;
-use petgraph::graph::NodeIndex;
+use petgraph::{
+    algo::toposort,
+    graph::{DiGraph, NodeIndex},
+};
 
 use std::collections::HashSet;
 
