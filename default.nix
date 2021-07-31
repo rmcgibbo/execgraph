@@ -34,7 +34,7 @@ in buildPythonPackage rec {
   cargoDeps = rustPlatform.fetchCargoTarball {
     inherit src;
     name = "${pname}-${version}";
-    sha256 = "sha256-3dISIOPNLDcgch99Famywngh7J3RPLiXgEL4knqqkaU=";
+    sha256 = "sha256-Nrrko2Iyc5e8X2gjr8Yb17lqpR5QMN2MFXEE8ATpi8g=";
     # sha256 = "0000000000000000000000000000000000000000000000000000";
   };
 

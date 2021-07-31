@@ -1,17 +1,26 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::File;
-use std::sync::Arc;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Record {
-    startline: Option<String>,
+    startline: String,
     endline: String,
 }
 
+/// Load the two lines from the log file associated with each task that was successfully
+/// completed.
+///
+/// # Arguments
+///
+/// * `file` - A file opened for reading, typically the keyfile.
+///
+/// Lines that are not in the proper format will be skipped, as will
+/// lines that have an end record and not a start record.
 pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Arc<Record>)> {
     let lines = io::BufReader::new(file).lines();
 
@@ -33,14 +42,14 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Arc<
                     None
                 }
                 0 => {
-                    let start = startlines.remove(key);
+                    let start = startlines.remove(key)?;
                     Some((
                         key.to_owned(),
                         Arc::new(Record {
                             startline: start,
                             endline: line,
-                        },
-                    )))
+                        }),
+                    ))
                 }
                 _ => None,
             }
@@ -50,15 +59,21 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Arc<
     })
 }
 
+/// After loading the log file and filtering the current commands by the set of commands
+/// previously run, call this to save the filtered commands back to the log file.
+///
+/// Doing this is a bit redundant, but it ensures that the records in the last section
+/// of the log file contain all of the commands required by the last invocation of the
+/// execgraph. This will give a garbage collector that wants to clean up the detritus of
+/// old / outdated commands enough information to know which commands are current.
 pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<String, Arc<Record>>) -> Result<()> {
-    let mut f = std::fs::OpenOptions::new()
+    let f = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(filename)?;
+    let mut f = std::io::BufWriter::new(f);
     for v in old_keys.values() {
-        if v.startline.is_some() {
-            writeln!(f, "{}", v.startline.as_ref().unwrap())?;
-        }
+        writeln!(f, "{}", v.startline)?;
         writeln!(f, "{}", v.endline)?;
     }
 
