@@ -435,6 +435,7 @@ def test_fstringish_2():
 
     assert  eval(compile(expr, "abc.py", "eval"), {"abc": 0, "qqq": 1}) == "a =   1 ff"
 
+
 def test_fstringish_3():
     try:
         expr = _execgraph.parse_fstringish("""a

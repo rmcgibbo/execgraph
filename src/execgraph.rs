@@ -69,6 +69,10 @@ impl ExecGraph {
         self.deps.node_weight(NodeIndex::from(id)).cloned()
     }
 
+    pub fn task_keys(&self) -> Vec<String> {
+        self.deps.raw_nodes().iter().map(|n| { n.weight.key.clone() }).collect()
+    }
+
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
         if !cmd.key.is_empty() {
             if let Some(existing) = self

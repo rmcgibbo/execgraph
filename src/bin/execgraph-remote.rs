@@ -1,6 +1,6 @@
 extern crate reqwest;
+use anyhow::Result;
 use log::{debug, warn};
-use std::result::Result;
 use hyper::StatusCode;
 use execgraph::httpinterface::*;
 use std::time::Duration;
@@ -22,6 +22,7 @@ async fn main() -> Result<(), RemoteError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("X-EXECGRAPH-USERNAME", reqwest::header::HeaderValue::from_str(&username()).unwrap());
     headers.insert("X-EXECGRAPH-HOSTNAME", reqwest::header::HeaderValue::from_str(&gethostname().to_string_lossy()).unwrap());
+    let start = std::time::Instant::now();
 
     let client = reqwest::Client::builder()
         .default_headers(headers)
@@ -29,7 +30,14 @@ async fn main() -> Result<(), RemoteError> {
         .build()?;
     let base = reqwest::Url::parse(&opt.url)?;
 
-    loop {
+    let still_accepting_tasks = || {
+        match opt.max_time_accepting_tasks {
+            None => true,
+            Some(t) => (std::time::Instant::now() - start) < t
+        }
+    };
+
+    while still_accepting_tasks() {
         match run_command(&base, &client, &opt.queue).await {
             Err(RemoteError::Connection(e))  => {
                 // break with no error message
@@ -199,8 +207,16 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
 #[derive(Debug, StructOpt)]
 #[structopt(name = "execgraph-remote")]
 struct Opt {
+    /// Url of controller
     url: String,
+
+    /// Work on tasks for a particular slurm queue. If not supplied,
+    /// work on 'general' tasks.
     queue: Option<String>,
+
+    /// Stop accepting new tasks after this amount of time, in seconds.
+    #[structopt(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
+    max_time_accepting_tasks: Option<std::time::Duration>
 }
 
 #[derive(Debug)]
@@ -233,11 +249,7 @@ struct StartResponseFull {
 }
 
 
-// #[derive(Deserialize)]
-// struct StatusReplyFull {
-//     #[serde(rename = "status")]
-//     _status: String,
-//     #[serde(rename = "code")]
-//     _code: u16,
-//     data: StatusReply,
-// }
+fn parse_seconds(s: &str) -> Result<std::time::Duration> {
+    let x = s.parse::<u64>()?;
+    Ok(std::time::Duration::new(x, 0))
+}

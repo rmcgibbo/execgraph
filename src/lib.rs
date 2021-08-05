@@ -92,6 +92,11 @@ impl PyExecGraph {
             })
     }
 
+    /// Get all of keys in the current network
+    fn task_keys(&self) -> Vec<String> {
+        self.g.task_keys()
+    }
+
     /// Add a task to the graph.
     ///
     /// Each task is identified by a couple pieces of information:
