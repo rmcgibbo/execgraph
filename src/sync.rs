@@ -221,7 +221,11 @@ impl ReadyTracker {
             );
         } else {
             self.n_failed += 1;
-            println!("\x1b[1;31mFAILED:\x1b[0m {}", e.cmd.display());
+            if e.cmd.key.is_empty() {
+                println!("\x1b[1;31mFAILED:\x1b[0m {}", e.cmd.display());
+            } else {
+                println!("\x1b[1;31mFAILED:\x1b[0m {}: {}", e.cmd.key, e.cmd.display());
+            }
         }
 
         for edge in self.g.edges_directed(e.id, Direction::Outgoing) {
