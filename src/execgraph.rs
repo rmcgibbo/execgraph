@@ -30,10 +30,10 @@ pub struct Cmd {
 }
 
 impl Cmd {
-    pub fn display(&self) -> &str {
+    pub fn display(&self) -> String {
         match &self.display {
-            Some(s) => s,
-            None => &self.cmdline,
+            Some(s) => s.to_string(),
+            None => self.cmdline.replace("\\\n", " ").replace("\t", "\\t"),
         }
     }
 }

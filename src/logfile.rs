@@ -104,7 +104,7 @@ impl LogWriter {
                 key,
                 fake_exit_status,
                 hostpid,
-                cmd
+                cmd.replace("\n", "\\n").replace("\t", "\\t")
             )?;
         }
         Ok(())
@@ -125,7 +125,7 @@ impl LogWriter {
                 key,
                 exit_status,
                 hostpid,
-                cmd
+                cmd.replace("\n", "\\n").replace("\t", "\\t")
             )?;
         }
         Ok(())
