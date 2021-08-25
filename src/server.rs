@@ -115,7 +115,7 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
         Some(hostpid) => {
             state
                 .status_updater
-                .send_finished(cstate.node_id, &cstate.cmd, hostpid, timeout_status)
+                .send_finished(cstate.node_id, &cstate.cmd, hostpid, timeout_status, "".to_owned(), "".to_owned())
                 .await;
         }
         None => {
@@ -342,10 +342,6 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_jso
             }
         };
 
-        // print while holding lock
-        print!("{}", request.stdout);
-        eprint!("{}", request.stderr);
-
         cstate.cancel.cancel();
         cstate
     };
@@ -354,7 +350,7 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_jso
         Some(hostpid) => {
             state
                 .status_updater
-                .send_finished(cstate.node_id, &cstate.cmd, hostpid, request.status)
+                .send_finished(cstate.node_id, &cstate.cmd, hostpid, request.status, request.stdout, request.stderr)
                 .await;
         }
         None => {

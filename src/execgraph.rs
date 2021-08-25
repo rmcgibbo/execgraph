@@ -18,6 +18,7 @@ use std::{
     os::unix::process::ExitStatusExt,
     sync::Arc,
 };
+use std::process::Stdio;
 use tokio::{process::Command, signal, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -302,7 +303,7 @@ async fn run_local_process_loop(
             .unwrap_or_else(|| panic!("failed to get node {:#?}", subgraph_node_id));
         let skip_execution_debugging_race_conditions = cmd.cmdline.is_empty();
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
-        let (hostpid, status) = if skip_execution_debugging_race_conditions {
+        let (hostpid, status, stdout, stderr) = if skip_execution_debugging_race_conditions {
             let pid = 0;
             let fake_status = 0;
             let hostpid = format!("{}:{}", hostname, pid);
@@ -310,11 +311,13 @@ async fn run_local_process_loop(
                 .send_started(subgraph_node_id, &cmd, &hostpid)
                 .await;
 
-            (hostpid, fake_status)
+            (hostpid, fake_status, "".to_owned(), "".to_owned())
         } else {
-            let mut child = Command::new("/bin/sh")
+            let child = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(&cmd.cmdline)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()
                 .expect("failed to execute /bin/sh");
             let pid = child
@@ -324,18 +327,19 @@ async fn run_local_process_loop(
             status_updater
                 .send_started(subgraph_node_id, &cmd, &hostpid)
                 .await;
-            let status_obj = child.wait().await.expect("sh wasn't running");
-            // status_obj.code().or(Some(status_obj.into_raw())).expect("foo")
-            let code = match status_obj.code() {
+            let output = child.wait_with_output().await.expect("sh wasn't running");
+            let code = match output.status.code() {
                 Some(code) => code,
-                None => status_obj.signal().expect("No exit code and no signal?"),
+                None => output.status.signal().expect("No exit code and no signal?"),
             };
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-            (hostpid, code)
+            (hostpid, code, stdout, stderr)
         };
 
         status_updater
-            .send_finished(subgraph_node_id, &cmd, &hostpid, status)
+            .send_finished(subgraph_node_id, &cmd, &hostpid, status, stdout, stderr)
             .await;
     }
 

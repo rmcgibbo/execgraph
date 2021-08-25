@@ -450,3 +450,11 @@ def test_fstringish_4():
     expr, preamble = _execgraph.parse_fstringish("[a=1, b, c] ${x}", "<unknown>", 0)
     assert eval(compile(expr, "test.py", "eval"), {"x": "x"}) == " x"
     assert preamble == ["a=1", "b", "c"]
+
+
+def test_stdout(tmp_path):
+    # this should only print 'foooo' once rather than 10 times
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    for i in range(10):
+        eg.add_task("echo foooo && sleep 1 && false", key=f"{i}")
+    eg.execute()

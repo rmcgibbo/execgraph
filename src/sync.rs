@@ -211,6 +211,13 @@ impl ReadyTracker {
             .n_pending -= 1;
         self.n_pending -= 1;
 
+        if !e.stdout.is_empty() {
+            print!("{}", e.stdout);
+        }
+        if !e.stderr.is_empty() {
+            eprint!("{}", e.stderr);
+        }
+
         if is_success {
             self.n_success += 1;
             println!(
@@ -278,7 +285,7 @@ impl StatusUpdater {
     }
 
     /// When a task is finished, notify the tracker by calling this.
-    pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str, status: i32) {
+    pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str, status: i32, stdout: String, stderr: String) {
         let r = self
             .s
             .send(CompletedEvent::Finished(FinishedEvent {
@@ -286,6 +293,8 @@ impl StatusUpdater {
                 cmd: cmd.clone(),
                 hostpid: hostpid.to_string(),
                 exit_status: status,
+                stdout,
+                stderr,
             }))
             .await;
         if r.is_err() {
@@ -310,6 +319,8 @@ struct FinishedEvent {
     cmd: Cmd,
     hostpid: String,
     exit_status: i32,
+    stdout: String,
+    stderr: String,
 }
 enum CompletedEvent {
     Started(StartedEvent),
