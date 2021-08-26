@@ -458,3 +458,11 @@ def test_stdout(tmp_path):
     for i in range(10):
         eg.add_task("echo foooo && sleep 1 && false", key=f"{i}")
     eg.execute()
+
+
+def test_preamble(tmp_path):
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg.add_task("true", key="1", preamble=_execgraph.test_make_capsule())
+    print("foo")
+    eg.execute()
+    print("bar")

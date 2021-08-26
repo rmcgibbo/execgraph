@@ -7,27 +7,67 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
+use derivative::Derivative;
 use futures::future::join_all;
 use hyper::Server;
 use petgraph::prelude::*;
+use pyo3::AsPyPointer;
 use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
     net::SocketAddr,
     os::unix::process::ExitStatusExt,
+    process::Stdio,
     sync::Arc,
 };
-use std::process::Stdio;
 use tokio::{process::Command, signal, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Derivative)]
+#[derivative(Debug, Clone, Default, PartialEq, Hash)]
 pub struct Cmd {
     pub cmdline: String,
     pub key: String,
     pub display: Option<String>,
     pub queuename: Option<String>,
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub preamble: Option<Preamble>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Preamble {
+    capsule: pyo3::PyObject,
+}
+
+impl Preamble {
+    pub fn new(capsule: pyo3::PyObject) -> Preamble {
+        Preamble { capsule }
+    }
+
+    fn call(&self) -> Result<i32> {
+        const CAPSULE_NAME: &'static [u8] = b"Execgraph::Preamble\0";
+        unsafe {
+            let pyobj = self.capsule.as_ptr();
+            let capsule_name_ptr: *const std::os::raw::c_char =
+                std::mem::transmute(CAPSULE_NAME.as_ptr());
+            if (pyo3::ffi::PyCapsule_CheckExact(pyobj) > 0)
+                && (pyo3::ffi::PyCapsule_IsValid(pyobj, capsule_name_ptr) > 0)
+            {
+                let ptr = pyo3::ffi::PyCapsule_GetPointer(pyobj, capsule_name_ptr);
+                let ctx = pyo3::ffi::PyCapsule_GetContext(pyobj);
+                assert!(!ptr.is_null()); // guarenteed by https://docs.python.org/3/c-api/capsule.html#c.PyCapsule_IsValid
+                let f = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    fn(*const std::ffi::c_void) -> i32,
+                >(ptr);
+                Ok(f(ctx))
+            } else {
+                Err(anyhow!("Not a capsule!"))
+            }
+        }
+    }
 }
 
 impl Cmd {
@@ -36,6 +76,24 @@ impl Cmd {
             Some(s) => s.to_string(),
             None => self.cmdline.replace("\\\n", " ").replace("\t", "\\t"),
         }
+    }
+
+    pub fn call_preamble(&self) {
+        match &self.preamble {
+            Some(preamble) => {
+                match preamble.call() {
+                    Ok(i) if i != 0 => {
+                        panic!("Preamble failed with error code {}", i);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        panic!("Invalid preamble in cmd `{}`: {}", self.display(), e);
+
+                    }
+                };
+            }
+            None => {}
+        };
     }
 }
 
@@ -71,7 +129,11 @@ impl ExecGraph {
     }
 
     pub fn task_keys(&self) -> Vec<String> {
-        self.deps.raw_nodes().iter().map(|n| { n.weight.key.clone() }).collect()
+        self.deps
+            .raw_nodes()
+            .iter()
+            .map(|n| n.weight.key.clone())
+            .collect()
     }
 
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
@@ -301,6 +363,8 @@ async fn run_local_process_loop(
         let (cmd, _) = subgraph
             .node_weight(subgraph_node_id)
             .unwrap_or_else(|| panic!("failed to get node {:#?}", subgraph_node_id));
+
+        cmd.call_preamble();
         let skip_execution_debugging_race_conditions = cmd.cmdline.is_empty();
         let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let (hostpid, status, stdout, stderr) = if skip_execution_debugging_race_conditions {

@@ -231,7 +231,11 @@ impl ReadyTracker {
             if e.cmd.key.is_empty() {
                 println!("\x1b[1;31mFAILED:\x1b[0m {}", e.cmd.display());
             } else {
-                println!("\x1b[1;31mFAILED:\x1b[0m {}: {}", e.cmd.key, e.cmd.display());
+                println!(
+                    "\x1b[1;31mFAILED:\x1b[0m {}: {}",
+                    e.cmd.key,
+                    e.cmd.display()
+                );
             }
         }
 
@@ -285,7 +289,15 @@ impl StatusUpdater {
     }
 
     /// When a task is finished, notify the tracker by calling this.
-    pub async fn send_finished(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str, status: i32, stdout: String, stderr: String) {
+    pub async fn send_finished(
+        &self,
+        v: NodeIndex,
+        cmd: &Cmd,
+        hostpid: &str,
+        status: i32,
+        stdout: String,
+        stderr: String,
+    ) {
         let r = self
             .s
             .send(CompletedEvent::Finished(FinishedEvent {

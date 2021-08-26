@@ -120,10 +120,18 @@ impl PyExecGraph {
     ///      we run the command. If not supplied, we'll just use the cmdline for these
     ///      purposes. But if the cmdline contains some boring wrapper scripts that you
     ///      want to hide from your users, this might make sense.
-    ///   5. Oh, also there's the concept of a "queue name". You can associate each
+    ///   5. Then there's the concept of a "queue name". You can associate each
     ///      job with a resource (arbitrary string), like "gpu", and then it will be
     ///      restricted and only run on remote runners that identify themselves as having
-    ////     that resource.
+    ///      that resource.
+    ///   6. Next is the 'preamble'. This is an optional PyCapsule that's supposed to
+    ///      contain a C function pointer inside and the name "Execgraph::Preamble". The
+    ///      function will be called (passing the capsule's `ctx` pointer as the only
+    ///      argument, and it's expected to return a 32-bit signed integer) immediately
+    ///      before the command is executed. This can be used if there is some kind of
+    ///      setup you need to do before the task executes that you don't want to do inside
+    ///      the task itself, for some reason.
+    ///
     ///
     /// Notes:
     ///   If key == "", then the task will never be skipped (i.e. it will always be
@@ -135,7 +143,12 @@ impl PyExecGraph {
     ///     dependencies (List[int], default=[]): dependencies for this task
     /// Returns:
     ///     taskid (int): integer id of this task
-    #[args(dependencies = "vec![]", display = "None", queuename = "None")]
+    #[args(
+        dependencies = "vec![]",
+        display = "None",
+        queuename = "None",
+        preamble = "None"
+    )]
     fn add_task(
         &mut self,
         cmdline: String,
@@ -143,12 +156,14 @@ impl PyExecGraph {
         dependencies: Vec<u32>,
         display: Option<String>,
         queuename: Option<String>,
+        preamble: Option<PyObject>,
     ) -> PyResult<u32> {
         let cmd = Cmd {
             cmdline,
             key,
             display,
             queuename,
+            preamble: preamble.map(crate::execgraph::Preamble::new),
         };
         self.g
             .add_task(cmd, dependencies)
@@ -229,29 +244,30 @@ fn parse_fstringish<'a>(
     filename: &str,
     line_offset: u32,
 ) -> PyResult<(&'a PyAny, Vec<String>)> {
-    let value = crate::parser::parse_fstringish(input)
-        .map_err(|e| {
-            let spans = match e {
-                nom::Err::Error(nom::error::VerboseError {errors: spans}) => {spans}
-                nom::Err::Failure(nom::error::VerboseError {errors: spans}) => {spans}
-                nom::Err::Incomplete(_) => {panic!("Unknown error modality")},
-            };
-            let span = spans[0].0;
+    let value = crate::parser::parse_fstringish(input).map_err(|e| {
+        let spans = match e {
+            nom::Err::Error(nom::error::VerboseError { errors: spans }) => spans,
+            nom::Err::Failure(nom::error::VerboseError { errors: spans }) => spans,
+            nom::Err::Incomplete(_) => {
+                panic!("Unknown error modality")
+            }
+        };
+        let span = spans[0].0;
 
-            PySyntaxError::new_err((
-                "f-string: invalid syntax",
-                (
-                    filename.to_string(),
-                    line_offset + span.location_line(),
-                    span.get_utf8_column(),
-                    input
-                        .split("\n")
-                        .nth((span.location_line() - 1) as usize)
-                        .unwrap()
-                        .to_string(),
-                ),
-            ))
-        })?;
+        PySyntaxError::new_err((
+            "f-string: invalid syntax",
+            (
+                filename.to_string(),
+                line_offset + span.location_line(),
+                span.get_utf8_column(),
+                input
+                    .split("\n")
+                    .nth((span.location_line() - 1) as usize)
+                    .unwrap()
+                    .to_string(),
+            ),
+        ))
+    })?;
 
     let ast = py.import("ast")?;
     let ast_walk = ast.getattr("walk")?;
@@ -388,7 +404,33 @@ fn parse_fstringish<'a>(
         .getattr("Expression")?
         .call((joinedstring,), Some(kwargs))?;
 
-    Ok((expr, value.preamble_fragments().iter().map(|&s| s.to_string()).collect()))
+    Ok((
+        expr,
+        value
+            .preamble_fragments()
+            .iter()
+            .map(|&s| s.to_string())
+            .collect(),
+    ))
+}
+
+const CAPSULE_NAME: &'static [u8] = b"Execgraph::Preamble\0";
+
+extern "C" fn test_callback(_ctx: *const std::ffi::c_void) -> i32 {
+    println!("Hello from test_callback");
+    return 0;
+}
+
+#[pyfunction]
+fn test_make_capsule<'a>(py: Python<'a>) -> PyResult<PyObject> {
+    let obj = unsafe {
+        let name: *const std::os::raw::c_char = std::mem::transmute(CAPSULE_NAME.as_ptr());
+        let capsule =
+            pyo3::ffi::PyCapsule_New(std::mem::transmute(test_callback as *const ()), name, None);
+        PyObject::from_owned_ptr(py, capsule)
+    };
+
+    Ok(obj)
 }
 
 #[pymodule]
@@ -396,5 +438,6 @@ pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
     env_logger::init();
     m.add_class::<PyExecGraph>()?;
     m.add_function(wrap_pyfunction!(parse_fstringish, m)?)?;
+    m.add_function(wrap_pyfunction!(test_make_capsule, m)?)?;
     Ok(())
 }

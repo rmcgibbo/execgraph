@@ -115,7 +115,14 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
         Some(hostpid) => {
             state
                 .status_updater
-                .send_finished(cstate.node_id, &cstate.cmd, hostpid, timeout_status, "".to_owned(), "".to_owned())
+                .send_finished(
+                    cstate.node_id,
+                    &cstate.cmd,
+                    hostpid,
+                    timeout_status,
+                    "".to_owned(),
+                    "".to_owned(),
+                )
                 .await;
         }
         None => {
@@ -257,6 +264,8 @@ async fn start_handler(
         .subgraph
         .node_weight(node_id)
         .unwrap_or_else(|| panic!("failed to get node {:#?}", node_id));
+
+    cmd.call_preamble();
     let cmdline = cmd.cmdline.clone();
 
     {
@@ -350,7 +359,14 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_jso
         Some(hostpid) => {
             state
                 .status_updater
-                .send_finished(cstate.node_id, &cstate.cmd, hostpid, request.status, request.stdout, request.stderr)
+                .send_finished(
+                    cstate.node_id,
+                    &cstate.cmd,
+                    hostpid,
+                    request.status,
+                    request.stdout,
+                    request.stderr,
+                )
                 .await;
         }
         None => {

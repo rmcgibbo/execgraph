@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "^1.0"
 async-channel = "1.6.1"
+derivative = "2.2.0"
 env_logger = "*"
 futures = "*"
 getrandom = "0.2"
