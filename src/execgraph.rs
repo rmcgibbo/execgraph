@@ -258,6 +258,7 @@ impl ExecGraph {
             return Ok((0, vec![]));
         }
 
+        let token = CancellationToken::new();
         let (mut servicer, tasks_ready, status_updater) = ReadyTracker::new(
             subgraph.clone(),
             self.completed.len() as u32,
@@ -267,10 +268,12 @@ impl ExecGraph {
         // Run local processes
         let handles = (0..num_parallel)
             .map(|_| {
+                let token = token.clone();
                 tokio::spawn(run_local_process_loop(
                     subgraph.clone(),
                     tasks_ready.get(&None).expect("No null queue").clone(),
                     status_updater.clone(),
+                    token,
                 ))
             })
             .collect::<Vec<tokio::task::JoinHandle<_>>>();
@@ -278,7 +281,6 @@ impl ExecGraph {
         //
         // Create the server that can manage farming off tasks to remote machines over http
         //
-        let token = CancellationToken::new();
         let (provisioner_exited_tx, provisioner_exited_rx) = oneshot::channel();
 
         if provisioner.is_some() {
@@ -325,8 +327,8 @@ impl ExecGraph {
         // tasks spawned above
         tokio::select! {
             _ = servicer.background_serve(&self.keyfile) => {
-                join_all(handles).await;
                 token.cancel();
+                join_all(handles).await;
             },
             _ = signal::ctrl_c() => {
                 token.cancel();
@@ -358,6 +360,7 @@ async fn run_local_process_loop(
     subgraph: Arc<DiGraph<(Cmd, NodeIndex), ()>>,
     tasks_ready: Receiver<NodeIndex>,
     status_updater: StatusUpdater,
+    token: CancellationToken,
 ) -> Result<()> {
     while let Ok(subgraph_node_id) = tasks_ready.recv().await {
         let (cmd, _) = subgraph
@@ -380,6 +383,7 @@ async fn run_local_process_loop(
             let child = Command::new("/bin/sh")
                 .arg("-c")
                 .arg(&cmd.cmdline)
+                .kill_on_drop(true)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -391,17 +395,28 @@ async fn run_local_process_loop(
             status_updater
                 .send_started(subgraph_node_id, &cmd, &hostpid)
                 .await;
-            let output = child.wait_with_output().await.expect("sh wasn't running");
+
+            // Like `let output = child.await.expect("sh wasn't running");`, except
+            // that we also wait for the cancellation token at the same time.
+            let output = tokio::select! {
+                _ = token.cancelled() => {
+                    // TODO: should sigint then sigkill it probably, but at
+                    // least we have kill-on-drop.
+                    return Err(anyhow!("cancelled"));
+                }
+                wait_with_output = child.wait_with_output() => {
+                    wait_with_output.expect("sh wasn't running")
+                }
+            };
+
             let code = match output.status.code() {
                 Some(code) => code,
                 None => output.status.signal().expect("No exit code and no signal?"),
             };
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
             (hostpid, code, stdout, stderr)
         };
-
         status_updater
             .send_finished(subgraph_node_id, &cmd, &hostpid, status, stdout, stderr)
             .await;

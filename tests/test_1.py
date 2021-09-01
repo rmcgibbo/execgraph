@@ -466,3 +466,19 @@ def test_preamble(tmp_path):
     print("foo")
     eg.execute()
     print("bar")
+
+
+def test_hang(tmp_path):
+    import time
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+
+    eg.add_task("false", key="-")
+    for i in range(1, 8):
+        eg.add_task("sleep 60", key=f"{i}")
+
+    start = time.time()
+    eg.execute()
+    end = time.time()
+
+    # this should be fast. it shouldn't take anywhere close to 60 seconds
+    assert end-start < 1.0
