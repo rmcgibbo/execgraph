@@ -470,6 +470,7 @@ def test_preamble(tmp_path):
 
 def test_hang(tmp_path):
     import time
+    from collections import Counter
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
 
     eg.add_task("false", key="-")
@@ -482,3 +483,8 @@ def test_hang(tmp_path):
 
     # this should be fast. it shouldn't take anywhere close to 60 seconds
     assert end-start < 1.0
+
+    with open(tmp_path / "foo") as f:
+        lines = f.readlines()
+    c = Counter([e.split("\t")[1] for e in lines[1:]])
+    assert all(v == 2 for v in c.values())

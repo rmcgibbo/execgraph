@@ -125,6 +125,20 @@ impl ReadyTracker {
             },
         )
     }
+    pub async fn drain(&mut self, keyfile: &str) -> Result<()> {
+        let mut writer = LogWriter::new(keyfile)?;
+        loop {
+            match self.completed.try_recv() {
+                Ok(CompletedEvent::Started(e)) => {
+                    writer.begin_command(&e.cmd.display(), &e.cmd.key, &e.hostpid)?;
+                }
+                Ok(CompletedEvent::Finished(e)) => {
+                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.exit_status, &e.hostpid)?;
+                },
+                Err(_) => { return Ok(()); }
+            }
+        }
+    }
 
     pub async fn background_serve(&mut self, keyfile: &str) -> Result<()> {
         // for each task, how many unmet first-order dependencies does it have?
@@ -320,6 +334,7 @@ impl StatusUpdater {
     }
 }
 
+#[derive(Debug)]
 struct StartedEvent {
     // id: NodeIndex,
     cmd: Cmd,

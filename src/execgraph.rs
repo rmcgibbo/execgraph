@@ -327,8 +327,17 @@ impl ExecGraph {
         // tasks spawned above
         tokio::select! {
             _ = servicer.background_serve(&self.keyfile) => {
+                // background_serve exits when an appropriate number of tasks have failed (or when everything
+                // succeeds, but that's easier to handle). then we trigger the cancellaton token, which
+                // triggers run_local_process_loop to exit. as run_local_process_loop threads exit, they kill
+                // and outstanding tasks and dump CompletedEvents into the servicer's channel so that we log
+                // the unsuccessful exit of those tasks. But since background_servicer has exited, there's
+                // nobody around necessarily to read those messages and forward them to the log file, so we
+                // specifically call drain() after joining the run_local_process_loop to forward the
+                // CompletedEvents to the log.
                 token.cancel();
                 join_all(handles).await;
+                servicer.drain(&self.keyfile).await.unwrap();
             },
             _ = signal::ctrl_c() => {
                 token.cancel();
@@ -402,6 +411,12 @@ async fn run_local_process_loop(
                 _ = token.cancelled() => {
                     // TODO: should sigint then sigkill it probably, but at
                     // least we have kill-on-drop.
+                    let timeout_status = 130;
+                    let stdout = "".to_string();
+                    let stderr = "".to_string();
+                    status_updater
+                        .send_finished(subgraph_node_id, &cmd, &hostpid, timeout_status, stdout, stderr)
+                    .await;
                     return Err(anyhow!("cancelled"));
                 }
                 wait_with_output = child.wait_with_output() => {
