@@ -289,6 +289,7 @@ impl ReadyTracker {
 impl StatusUpdater {
     /// When a task is started, notify the tracker by calling this.
     pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, hostpid: &str) {
+        cmd.call_preamble();
         let r = self
             .s
             .send(CompletedEvent::Started(StartedEvent {
@@ -312,6 +313,7 @@ impl StatusUpdater {
         stdout: String,
         stderr: String,
     ) {
+        cmd.call_postamble();
         let r = self
             .s
             .send(CompletedEvent::Finished(FinishedEvent {

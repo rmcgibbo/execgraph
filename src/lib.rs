@@ -6,6 +6,7 @@ mod parser;
 mod server;
 pub mod sync;
 mod unsafecode;
+use std::ffi::OsString;
 
 use pyo3::{
     exceptions::{PyIndexError, PyRuntimeError, PySyntaxError},
@@ -101,9 +102,7 @@ impl PyExecGraph {
     ///
     /// Each task is identified by a couple pieces of information:
     ///
-    ///   1. First, there's the shell command to execute. This is supplied
-    ///      as "cmdline". It is interpreted with "sh -c", which is why it's
-    ///      just a string, rather than a list of strings to directly execve
+    ///   1. First, there's the shell command to execute.
     ///   2. Second, there's "key". The idea is that this is a unique identifier
     ///      for the command -- it could be the hash of the cmdline, or the hash
     ///      of the cmdline and all of its inputs, or something like that. (We don't
@@ -124,21 +123,20 @@ impl PyExecGraph {
     ///      job with a resource (arbitrary string), like "gpu", and then it will be
     ///      restricted and only run on remote runners that identify themselves as having
     ///      that resource.
-    ///   6. Next is the 'preamble'. This is an optional PyCapsule that's supposed to
-    ///      contain a C function pointer inside and the name "Execgraph::Preamble". The
-    ///      function will be called (passing the capsule's `ctx` pointer as the only
+    ///   6. Next is the 'preamble' and 'postamble'. These are an optional PyCapsule that's
+    ///      supposed to contain a C function pointer inside and the name "Execgraph::Capsule".
+    ///      The functions will be called (passing the capsule's `ctx` pointer as the only
     ///      argument, and it's expected to return a 32-bit signed integer) immediately
-    ///      before the command is executed. This can be used if there is some kind of
-    ///      setup you need to do before the task executes that you don't want to do inside
-    ///      the task itself, for some reason.
-    ///
+    ///      before and after the command is executed. This can be used if there is some
+    ///      kind of setup or teardown you need to do before the task executes that you don't
+    ///      want to do inside the task itself.
     ///
     /// Notes:
     ///   If key == "", then the task will never be skipped (i.e. it will always be
     ///   considered out of date).
     ///
     /// Args:
-    ///     cmdline (str): command to execute
+    ///     cmdline (List[str]): command to execute
     ///     key (str): unique identifier
     ///     dependencies (List[int], default=[]): dependencies for this task
     /// Returns:
@@ -147,23 +145,29 @@ impl PyExecGraph {
         dependencies = "vec![]",
         display = "None",
         queuename = "None",
-        preamble = "None"
+        stdin = "vec![]",
+        preamble = "None",
+        postamble = "None",
     )]
     fn add_task(
         &mut self,
-        cmdline: String,
+        cmdline: Vec<OsString>,
         key: String,
         dependencies: Vec<u32>,
         display: Option<String>,
         queuename: Option<String>,
+        stdin: Vec<u8>,
         preamble: Option<PyObject>,
+        postamble: Option<PyObject>,
     ) -> PyResult<u32> {
         let cmd = Cmd {
             cmdline,
             key,
             display,
             queuename,
-            preamble: preamble.map(crate::execgraph::Preamble::new),
+            stdin,
+            preamble: preamble.map(crate::execgraph::Capsule::new),
+            postamble: postamble.map(crate::execgraph::Capsule::new),
         };
         self.g
             .add_task(cmd, dependencies)
@@ -414,7 +418,7 @@ fn parse_fstringish<'a>(
     ))
 }
 
-const CAPSULE_NAME: &'static [u8] = b"Execgraph::Preamble\0";
+const CAPSULE_NAME: &'static [u8] = b"Execgraph::Capsule\0";
 
 extern "C" fn test_callback(_ctx: *const std::ffi::c_void) -> i32 {
     println!("Hello from test_callback");

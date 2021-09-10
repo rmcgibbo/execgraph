@@ -5,6 +5,7 @@ use crate::{
     sync::{ReadyTracker, StatusUpdater},
     unsafecode,
 };
+use tokio::io::AsyncWriteExt;
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
 use derivative::Derivative;
@@ -15,6 +16,7 @@ use pyo3::AsPyPointer;
 use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     fs::File,
     net::SocketAddr,
     os::unix::process::ExitStatusExt,
@@ -27,27 +29,36 @@ use tokio_util::sync::CancellationToken;
 #[derive(Derivative)]
 #[derivative(Debug, Clone, Default, PartialEq, Hash)]
 pub struct Cmd {
-    pub cmdline: String,
+    pub cmdline: Vec<OsString>,
     pub key: String,
     pub display: Option<String>,
     pub queuename: Option<String>,
+
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
-    pub preamble: Option<Preamble>,
+    pub stdin: Vec<u8>,
+
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub preamble: Option<Capsule>,
+
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub postamble: Option<Capsule>,
 }
 
 #[derive(Debug, Clone)]
-pub struct Preamble {
+pub struct Capsule {
     capsule: pyo3::PyObject,
 }
 
-impl Preamble {
-    pub fn new(capsule: pyo3::PyObject) -> Preamble {
-        Preamble { capsule }
+impl Capsule {
+    pub fn new(capsule: pyo3::PyObject) -> Self {
+        Capsule { capsule }
     }
 
     fn call(&self) -> Result<i32> {
-        const CAPSULE_NAME: &'static [u8] = b"Execgraph::Preamble\0";
+        const CAPSULE_NAME: &'static [u8] = b"Execgraph::Capsule\0";
         unsafe {
             let pyobj = self.capsule.as_ptr();
             let capsule_name_ptr: *const std::os::raw::c_char =
@@ -74,7 +85,14 @@ impl Cmd {
     pub fn display(&self) -> String {
         match &self.display {
             Some(s) => s.to_string(),
-            None => self.cmdline.replace("\\\n", " ").replace("\t", "\\t"),
+            None => {
+                self.cmdline.iter()
+                    .map(|x| x.clone().into_string().unwrap())
+                    .collect::<Vec<String>>()
+                    .join(" ")
+                    .replace("\\\n", " ")
+                    .replace("\t", "\\t")
+            }
         }
     }
 
@@ -88,6 +106,24 @@ impl Cmd {
                     Ok(_) => {}
                     Err(e) => {
                         panic!("Invalid preamble in cmd `{}`: {}", self.display(), e);
+
+                    }
+                };
+            }
+            None => {}
+        };
+    }
+
+    pub fn call_postamble(&self) {
+        match &self.postamble {
+            Some(postamble) => {
+                match postamble.call() {
+                    Ok(i) if i != 0 => {
+                        panic!("Postamble failed with error code {}", i);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        panic!("Invalid postamble in cmd `{}`: {}", self.display(), e);
 
                     }
                 };
@@ -389,14 +425,33 @@ async fn run_local_process_loop(
 
             (hostpid, fake_status, "".to_owned(), "".to_owned())
         } else {
-            let child = Command::new("/bin/sh")
-                .arg("-c")
-                .arg(&cmd.cmdline)
+            let maybe_child = Command::new(&cmd.cmdline[0])
+                .args(&cmd.cmdline[1..])
                 .kill_on_drop(true)
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .spawn()
-                .expect("failed to execute /bin/sh");
+                .spawn();
+            let mut child = match maybe_child {
+                Ok(child) => child,
+                Err(_) => {
+                    log::error!("failed to execute {:#?}", &cmd.cmdline[0]);
+                    status_updater
+                        .send_started(subgraph_node_id, &cmd, "")
+                        .await;
+                    status_updater
+                        .send_finished(subgraph_node_id, &cmd, "", 127,
+                        "".to_owned(),
+                        format!("No such command: {:#?}", &cmd.cmdline[0]))
+                    .await;
+                    continue;
+                }
+            };
+
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(&cmd.stdin).await.unwrap();
+            drop(stdin);
+
             let pid = child
                 .id()
                 .expect("hasn't been polled yet, so this id should exist");

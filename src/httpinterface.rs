@@ -1,6 +1,7 @@
 use crate::sync::Queuename;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsString;
 
 #[derive(Serialize, Deserialize)]
 pub struct Ping {
@@ -28,7 +29,8 @@ pub struct StartRequest {
 #[derive(Serialize, Deserialize)]
 pub struct StartResponse {
     pub transaction_id: u32,
-    pub cmdline: String,
+    pub cmdline: Vec<OsString>,
+    pub stdin: Vec<u8>,
     pub ping_interval_msecs: u64,
 }
 

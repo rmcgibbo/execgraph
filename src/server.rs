@@ -266,7 +266,6 @@ async fn start_handler(
         .unwrap_or_else(|| panic!("failed to get node {:#?}", node_id));
 
     cmd.call_preamble();
-    let cmdline = cmd.cmdline.clone();
 
     {
         let mut lock = state.connections.lock().await;
@@ -284,7 +283,8 @@ async fn start_handler(
 
     json_success_resp(&StartResponse {
         transaction_id,
-        cmdline,
+        cmdline: cmd.cmdline.clone(),
+        stdin: cmd.stdin.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
     })
 }

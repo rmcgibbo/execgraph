@@ -5,6 +5,7 @@ use hyper::StatusCode;
 use execgraph::httpinterface::*;
 use std::time::Duration;
 use async_channel::bounded;
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use serde::Deserialize;
 use std::os::unix::process::ExitStatusExt;
@@ -134,13 +135,56 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
     });
 
     // Run the command and record the pid
-    let child = tokio::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(&start.data.cmdline)
+    let maybe_child = tokio::process::Command::new(&start.data.cmdline[0])
+        .args(&start.data.cmdline[1..])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to execute /bin/sh");
+        .spawn();
+
+    let mut child = match maybe_child {
+        Ok(child) => child,
+        Err(_) => {
+            // Tell the server that we've started the command
+            tokio::select! {
+                value = client.post(begun_route)
+                .json(&BegunRequest{
+                    transaction_id,
+                    hostpid: format!("{}:{}", gethostname().to_string_lossy(), -1),
+                })
+                .send() => {
+                    value?.error_for_status()?;
+                }
+                _ = token3.cancelled() => {
+                    return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+                }
+            };
+
+            // Tell the server that we've finished the command
+            tokio::select! {
+                value = client.post(end_route)
+                .json(&EndRequest{
+                    transaction_id,
+                    status: 127,
+                    stdout: "".to_owned(),
+                    stderr: format!("No such command: {:#?}", &start.data.cmdline[0]),
+                })
+                .send() => {
+                    value?.error_for_status()?;
+                }
+                _ = token3.cancelled() => {
+                    return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+                }
+            };
+
+            return Ok(());
+        }
+    };
+
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&start.data.stdin).await.unwrap();
+    drop(stdin);
+
     let pid = child
         .id()
         .expect("hasn't been polled yet, so this id should exist");
