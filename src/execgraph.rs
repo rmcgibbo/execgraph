@@ -316,45 +316,48 @@ impl ExecGraph {
         //
         let (provisioner_exited_tx, provisioner_exited_rx) = oneshot::channel();
 
-        if provisioner.is_some() {
-            let subgraph1 = subgraph.clone();
-            let tasks_ready1 = tasks_ready.clone();
-            let status_updater1 = status_updater.clone();
-            let provisioner = provisioner.clone().unwrap();
-            let p2 = provisioner_arg2.clone();
-            let token1 = token.clone();
-            let token2 = token.clone();
-            let token3 = token.clone();
-
-            tokio::spawn(async move {
-                let state = ServerState::new(subgraph1, tasks_ready1, status_updater1);
-                let router = router(state);
-                let service = RouterService::new(router).unwrap();
-                let addr = SocketAddr::from(([0, 0, 0, 0], 0));
-                let server = Server::bind(&addr).serve(service);
-                let bound_addr = server.local_addr();
-                let graceful = server.with_graceful_shutdown(token1.cancelled());
-                let (server_start_tx, server_start_rx) = oneshot::channel();
+        match provisioner {
+            Some(provisioner) => {
+                let subgraph1 = subgraph.clone();
+                let tasks_ready1 = tasks_ready.clone();
+                let status_updater1 = status_updater.clone();
+                let p2 = provisioner_arg2.clone();
+                let token1 = token.clone();
+                let token2 = token.clone();
+                let token3 = token.clone();
 
                 tokio::spawn(async move {
-                    server_start_rx.await.expect("failed to recv");
-                    drop(
-                        spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2).await,
-                    );
-                    token3.cancel();
-                    provisioner_exited_tx
-                        .send(())
-                        .expect("could not send to channel");
-                });
+                    let state = ServerState::new(subgraph1, tasks_ready1, status_updater1);
+                    let router = router(state);
+                    let service = RouterService::new(router).unwrap();
+                    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+                    let server = Server::bind(&addr).serve(service);
+                    let bound_addr = server.local_addr();
+                    let graceful = server.with_graceful_shutdown(token1.cancelled());
+                    let (server_start_tx, server_start_rx) = oneshot::channel();
 
-                server_start_tx.send(()).expect("failed to send");
-                if let Err(err) = graceful.await {
-                    log::error!("Server error: {}", err);
-                }
-            });
-        } else {
-            provisioner_exited_tx.send(()).expect("Could not send");
-        }
+                    tokio::spawn(async move {
+                        server_start_rx.await.expect("failed to recv");
+                        drop(
+                            spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2)
+                                .await,
+                        );
+                        token3.cancel();
+                        provisioner_exited_tx
+                            .send(())
+                            .expect("could not send to channel");
+                    });
+
+                    server_start_tx.send(()).expect("failed to send");
+                    if let Err(err) = graceful.await {
+                        log::error!("Server error: {}", err);
+                    }
+                });
+            }
+            None => {
+                provisioner_exited_tx.send(()).expect("Could not send");
+            }
+        };
 
         // run the background service that will send commands to the ready channel to be picked up by the
         // tasks spawned above

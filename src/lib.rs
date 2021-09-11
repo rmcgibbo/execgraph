@@ -6,8 +6,7 @@ mod parser;
 mod server;
 pub mod sync;
 mod unsafecode;
-use std::{ffi::OsString};
-use std::io::BufRead;
+use std::{ffi::OsString, io::BufRead};
 
 use pyo3::{
     exceptions::{PyIndexError, PyRuntimeError, PySyntaxError, PyValueError},
@@ -71,24 +70,31 @@ impl PyExecGraph {
         let key = match f.metadata()?.len() {
             // If we're at the start of the file, that means we just opened it.
             // So lets write the header.
-            0  => {
+            0 => {
                 let key = match newkeyfn {
                     Some(newkeyfn) => newkeyfn.call(py, (), None)?.extract(py)?,
-                    None => "default-key-value".to_owned()
+                    None => "default-key-value".to_owned(),
                 };
                 if !regex::Regex::new(r"^\w+").unwrap().is_match(&key) {
                     return Err(PyValueError::new_err(format!("Invalid key: {}", key)));
                 }
                 writeln!(f, "wrk v=2 key={}", key)?;
                 key
-            },
+            }
             _ => {
                 // If we're not at the start of the file, we need to read the header
                 // and check that it's what we expect
                 let r = std::io::BufReader::new(&f);
-                let line = r.lines().next().ok_or_else(|| PyValueError::new_err("Unable to read file"))??;
+                let line = r
+                    .lines()
+                    .next()
+                    .ok_or_else(|| PyValueError::new_err("Unable to read file"))??;
                 let parts: Vec<&str> = line.split(" ").collect();
-                if !(parts.len() == 3 && parts[0] == "wrk" && parts[1] == "v=2" && parts[2].starts_with("key=")) {
+                if !(parts.len() == 3
+                    && parts[0] == "wrk"
+                    && parts[1] == "v=2"
+                    && parts[2].starts_with("key="))
+                {
                     return Err(PyValueError::new_err(format!("Invalid header: {}", line)));
                 }
                 let key = parts[2].strip_prefix("key=").unwrap().to_string();
@@ -107,7 +113,7 @@ impl PyExecGraph {
             } else {
                 failures_allowed
             }),
-            key
+            key,
         })
     }
 

@@ -47,19 +47,23 @@ pub fn load_keys_exit_status_0(file: File) -> Result<HashMap<String, Arc<Record>
                     startlines.insert(key.to_owned(), line);
                 }
                 0 => {
-                    let start = startlines.remove(key).ok_or(anyhow!("Missing start record"))?;
-                    result.insert(key.to_owned(),
+                    let start = startlines
+                        .remove(key)
+                        .ok_or(anyhow!("Missing start record"))?;
+                    result.insert(
+                        key.to_owned(),
                         Arc::new(Record {
                             startline: start,
                             endline: line,
-                        }));
+                        }),
+                    );
                 }
-                _ => {},
+                _ => {}
             }
         } else {
             log::error!("Unrecognized line: {}", line);
         }
-    };
+    }
 
     Ok(result)
 }
@@ -72,9 +76,7 @@ pub fn load_keys_exit_status_0(file: File) -> Result<HashMap<String, Arc<Record>
 /// execgraph. This will give a garbage collector that wants to clean up the detritus of
 /// old / outdated commands enough information to know which commands are current.
 pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<String, Arc<Record>>) -> Result<()> {
-    let f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(filename)?;
+    let f = std::fs::OpenOptions::new().append(true).open(filename)?;
     let mut f = std::io::BufWriter::new(f);
     for v in old_keys.values() {
         writeln!(f, "{}", v.startline)?;
@@ -90,9 +92,7 @@ pub struct LogWriter {
 
 impl LogWriter {
     pub fn new<P: AsRef<Path>>(filename: P) -> Result<LogWriter> {
-        let file = OpenOptions::new()
-            .append(true)
-            .open(filename)?;
+        let file = OpenOptions::new().append(true).open(filename)?;
         Ok(LogWriter { file })
     }
 
