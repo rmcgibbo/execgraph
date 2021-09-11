@@ -138,19 +138,19 @@ pub struct ExecGraph {
 }
 
 impl ExecGraph {
-    pub fn new(keyfile: String) -> ExecGraph {
+    pub fn new(keyfile: String) -> Result<ExecGraph> {
         // Load prior the successful tasks from keyfile.
         let keyfile_prior_contents = match File::open(&keyfile) {
-            Ok(file) => load_keys_exit_status_0(file).collect::<HashMap<_, _>>(),
+            Ok(file) => load_keys_exit_status_0(file)?,
             _ => HashMap::new(),
         };
 
-        ExecGraph {
+        Ok(ExecGraph {
             deps: Graph::new(),
             keyfile,
             completed: HashSet::new(),
             keyfile_prior_contents,
-        }
+        })
     }
 
     pub fn ntasks(&self) -> usize {

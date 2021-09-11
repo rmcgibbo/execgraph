@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
@@ -22,42 +22,46 @@ pub struct Record {
 ///
 /// Lines that are not in the proper format will be skipped, as will
 /// lines that have an end record and not a start record.
-pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Arc<Record>)> {
+pub fn load_keys_exit_status_0(file: File) -> Result<HashMap<String, Arc<Record>>> {
     let lines = io::BufReader::new(file).lines();
 
     let mut startlines = HashMap::new();
+    let mut result: HashMap<String, Arc<Record>> = HashMap::new();
+    const N_HEADER_LINES: usize = 1;
 
-    lines.filter_map(move |line_| {
-        let line = line_.ok()?;
+    for line_or_error in lines.skip(N_HEADER_LINES) {
+        let line = line_or_error?;
+        if line == "" {
+            continue;
+        }
+
         let fields = line.splitn(5, '\t').collect::<Vec<_>>();
         if fields.len() == 5 {
-            let _time = fields[0].parse::<u128>().ok()?;
+            let _time = fields[0].parse::<u128>()?;
             let key = fields[1];
-            let exit_status = fields[2].parse::<i32>().ok()?;
+            let exit_status = fields[2].parse::<i32>()?;
             let _hostpid = fields[3];
             let _cmd = fields[4];
-
             match exit_status {
                 -1 => {
                     startlines.insert(key.to_owned(), line);
-                    None
                 }
                 0 => {
-                    let start = startlines.remove(key)?;
-                    Some((
-                        key.to_owned(),
+                    let start = startlines.remove(key).ok_or(anyhow!("Missing start record"))?;
+                    result.insert(key.to_owned(),
                         Arc::new(Record {
                             startline: start,
                             endline: line,
-                        }),
-                    ))
+                        }));
                 }
-                _ => None,
+                _ => {},
             }
         } else {
-            None
+            log::error!("Unrecognized line: {}", line);
         }
-    })
+    };
+
+    Ok(result)
 }
 
 /// After loading the log file and filtering the current commands by the set of commands
@@ -70,7 +74,6 @@ pub fn load_keys_exit_status_0(file: File) -> impl Iterator<Item = (String, Arc<
 pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<String, Arc<Record>>) -> Result<()> {
     let f = std::fs::OpenOptions::new()
         .append(true)
-        .create(true)
         .open(filename)?;
     let mut f = std::io::BufWriter::new(f);
     for v in old_keys.values() {
@@ -88,7 +91,6 @@ pub struct LogWriter {
 impl LogWriter {
     pub fn new<P: AsRef<Path>>(filename: P) -> Result<LogWriter> {
         let file = OpenOptions::new()
-            .create(true)
             .append(true)
             .open(filename)?;
         Ok(LogWriter { file })

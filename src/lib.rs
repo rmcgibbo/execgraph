@@ -100,7 +100,7 @@ impl PyExecGraph {
         f.flush()?;
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(keyfile),
+            g: ExecGraph::new(keyfile).map_err(|e| PyValueError::new_err(e.to_string()))?,
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
