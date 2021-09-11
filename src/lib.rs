@@ -6,10 +6,11 @@ mod parser;
 mod server;
 pub mod sync;
 mod unsafecode;
-use std::ffi::OsString;
+use std::{ffi::OsString};
+use std::io::BufRead;
 
 use pyo3::{
-    exceptions::{PyIndexError, PyRuntimeError, PySyntaxError},
+    exceptions::{PyIndexError, PyRuntimeError, PySyntaxError, PyValueError},
     prelude::*,
     types::{IntoPyDict, PyTuple},
 };
@@ -43,13 +44,20 @@ pub struct PyExecGraph {
     g: ExecGraph,
     num_parallel: u32,
     failures_allowed: u32,
+    key: String,
 }
 
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_parallel = -1, failures_allowed = 1)]
-    fn new(mut num_parallel: i32, keyfile: String, failures_allowed: u32) -> PyResult<PyExecGraph> {
+    #[args(num_parallel = -1, failures_allowed = 1, newkeyfn = "None")]
+    fn new(
+        py: Python,
+        mut num_parallel: i32,
+        keyfile: String,
+        failures_allowed: u32,
+        newkeyfn: Option<PyObject>,
+    ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
         }
@@ -57,8 +65,39 @@ impl PyExecGraph {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .read(true)
             .open(&keyfile)?;
+
+        let key = match f.metadata()?.len() {
+            // If we're at the start of the file, that means we just opened it.
+            // So lets write the header.
+            0  => {
+                let key = match newkeyfn {
+                    Some(newkeyfn) => newkeyfn.call(py, (), None)?.extract(py)?,
+                    None => "default-key-value".to_owned()
+                };
+                if !regex::Regex::new(r"^\w+").unwrap().is_match(&key) {
+                    return Err(PyValueError::new_err(format!("Invalid key: {}", key)));
+                }
+                writeln!(f, "wrk v=2 key={}", key)?;
+                key
+            },
+            _ => {
+                // If we're not at the start of the file, we need to read the header
+                // and check that it's what we expect
+                let r = std::io::BufReader::new(&f);
+                let line = r.lines().next().ok_or_else(|| PyValueError::new_err("Unable to read file"))??;
+                let parts: Vec<&str> = line.split(" ").collect();
+                if !(parts.len() == 3 && parts[0] == "wrk" && parts[1] == "v=2" && parts[2].starts_with("key=")) {
+                    return Err(PyValueError::new_err(format!("Invalid header: {}", line)));
+                }
+                let key = parts[2].strip_prefix("key=").unwrap().to_string();
+                key
+            }
+        };
+
         writeln!(f)?;
+        f.flush()?;
 
         Ok(PyExecGraph {
             g: ExecGraph::new(keyfile),
@@ -68,12 +107,17 @@ impl PyExecGraph {
             } else {
                 failures_allowed
             }),
+            key
         })
     }
 
     /// Get the number of tasks in the graph
     fn ntasks(&self) -> usize {
         self.g.ntasks()
+    }
+
+    fn key(&self) -> String {
+        return self.key.clone();
     }
 
     /// Get a particular task in the graph.
@@ -147,7 +191,7 @@ impl PyExecGraph {
         queuename = "None",
         stdin = "vec![]",
         preamble = "None",
-        postamble = "None",
+        postamble = "None"
     )]
     fn add_task(
         &mut self,

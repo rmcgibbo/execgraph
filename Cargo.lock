@@ -195,6 +195,7 @@ dependencies = [
  "petgraph",
  "pyo3",
  "pyo3-log",
+ "regex",
  "reqwest",
  "routerify",
  "routerify-json-response",

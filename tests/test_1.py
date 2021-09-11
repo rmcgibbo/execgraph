@@ -165,7 +165,7 @@ def test_twice(num_parallel, tmp_path):
 
     with open(str(tmp_path / "foo")) as f:
         lines = f.readlines()
-    assert len(lines) == 3
+    assert len(lines) == 4
 
 
 def test_order(num_parallel, tmp_path):
@@ -359,6 +359,7 @@ def test_copy_reused_keys_logfile(tmp_path):
         # 1627614382822833663	baz	-1	xps13:22372	echo 3
         # 1627614382825519374	baz	0	xps13:22372	echo 3
 
+        assert "wrk v=2 key=default-key-value\n" == f.readline()
         assert "\n" == f.readline()
         assert "foo\t-1" in f.readline()
         assert "foo\t0" in f.readline()
@@ -485,7 +486,7 @@ def test_hang(tmp_path):
     assert end-start < 1.0
 
     with open(tmp_path / "foo") as f:
-        lines = f.readlines()
+        lines = f.readlines()[1:]
     c = Counter([e.split("\t")[1] for e in lines[1:]])
     assert all(v == 2 for v in c.values())
 
@@ -497,3 +498,20 @@ def test_stdin(tmp_path):
 
     with open(tmp_path / "log.txt", "rb") as f:
         assert f.read() == b"stdin"
+
+
+
+def test_newkeyfn_0(tmp_path):
+    def fn():
+        return "\n"
+    with pytest.raises(ValueError):
+        eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"), newkeyfn=fn)
+
+
+def test_newkeyfn_1(tmp_path):
+    def fn():
+        return "foo"
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"), newkeyfn=fn)
+    assert eg.key() == "foo"
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    assert eg.key() == "foo"

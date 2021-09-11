@@ -1,7 +1,6 @@
 use crate::sync::Queuename;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::ffi::OsString;
+use std::{collections::HashMap, ffi::OsString};
 
 #[derive(Serialize, Deserialize)]
 pub struct Ping {

@@ -134,8 +134,10 @@ impl ReadyTracker {
                 }
                 Ok(CompletedEvent::Finished(e)) => {
                     writer.end_command(&e.cmd.display(), &e.cmd.key, e.exit_status, &e.hostpid)?;
-                },
-                Err(_) => { return Ok(()); }
+                }
+                Err(_) => {
+                    return Ok(());
+                }
             }
         }
     }

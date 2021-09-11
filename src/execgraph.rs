@@ -5,7 +5,6 @@ use crate::{
     sync::{ReadyTracker, StatusUpdater},
     unsafecode,
 };
-use tokio::io::AsyncWriteExt;
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
 use derivative::Derivative;
@@ -23,7 +22,7 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
-use tokio::{process::Command, signal, sync::oneshot};
+use tokio::{io::AsyncWriteExt, process::Command, signal, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Derivative)]
@@ -85,14 +84,14 @@ impl Cmd {
     pub fn display(&self) -> String {
         match &self.display {
             Some(s) => s.to_string(),
-            None => {
-                self.cmdline.iter()
-                    .map(|x| x.clone().into_string().unwrap())
-                    .collect::<Vec<String>>()
-                    .join(" ")
-                    .replace("\\\n", " ")
-                    .replace("\t", "\\t")
-            }
+            None => self
+                .cmdline
+                .iter()
+                .map(|x| x.clone().into_string().unwrap())
+                .collect::<Vec<String>>()
+                .join(" ")
+                .replace("\\\n", " ")
+                .replace("\t", "\\t"),
         }
     }
 
@@ -106,7 +105,6 @@ impl Cmd {
                     Ok(_) => {}
                     Err(e) => {
                         panic!("Invalid preamble in cmd `{}`: {}", self.display(), e);
-
                     }
                 };
             }
@@ -124,7 +122,6 @@ impl Cmd {
                     Ok(_) => {}
                     Err(e) => {
                         panic!("Invalid postamble in cmd `{}`: {}", self.display(), e);
-
                     }
                 };
             }
@@ -440,10 +437,15 @@ async fn run_local_process_loop(
                         .send_started(subgraph_node_id, &cmd, "")
                         .await;
                     status_updater
-                        .send_finished(subgraph_node_id, &cmd, "", 127,
-                        "".to_owned(),
-                        format!("No such command: {:#?}", &cmd.cmdline[0]))
-                    .await;
+                        .send_finished(
+                            subgraph_node_id,
+                            &cmd,
+                            "",
+                            127,
+                            "".to_owned(),
+                            format!("No such command: {:#?}", &cmd.cmdline[0]),
+                        )
+                        .await;
                     continue;
                 }
             };
