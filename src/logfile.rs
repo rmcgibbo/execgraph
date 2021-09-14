@@ -13,8 +13,10 @@ pub struct Record {
     endline: String,
 }
 
-/// Load the two lines from the log file associated with each task that was successfully
-/// completed.
+/// Load information related to successes and failures from the log file.
+/// For successes, load the two lines from the log file associated with
+///    each task that was successfully completed.
+/// For failures, load the number of times the task has been run.
 ///
 /// # Arguments
 ///
@@ -22,11 +24,14 @@ pub struct Record {
 ///
 /// Lines that are not in the proper format will be skipped, as will
 /// lines that have an end record and not a start record.
-pub fn load_keys_exit_status_0(file: File) -> Result<HashMap<String, Arc<Record>>> {
+pub fn load_keyfile_info(
+    file: File,
+) -> Result<(HashMap<String, Arc<Record>>, HashMap<String, u32>)> {
     let lines = io::BufReader::new(file).lines();
 
     let mut startlines = HashMap::new();
-    let mut result: HashMap<String, Arc<Record>> = HashMap::new();
+    let mut successes: HashMap<String, Arc<Record>> = HashMap::new();
+    let mut failcounts: HashMap<String, u32> = HashMap::new();
     const N_HEADER_LINES: usize = 1;
 
     for line_or_error in lines.skip(N_HEADER_LINES) {
@@ -50,7 +55,8 @@ pub fn load_keys_exit_status_0(file: File) -> Result<HashMap<String, Arc<Record>
                     let start = startlines
                         .remove(key)
                         .ok_or(anyhow!("Missing start record"))?;
-                    result.insert(
+
+                    successes.insert(
                         key.to_owned(),
                         Arc::new(Record {
                             startline: start,
@@ -58,14 +64,21 @@ pub fn load_keys_exit_status_0(file: File) -> Result<HashMap<String, Arc<Record>
                         }),
                     );
                 }
-                _ => {}
+                _ => match failcounts.get_mut(&key as &str) {
+                    Some(c) => {
+                        *c += 1;
+                    }
+                    None => {
+                        failcounts.insert(key.to_owned(), 1);
+                    }
+                },
             }
         } else {
             log::error!("Unrecognized line: {}", line);
         }
     }
 
-    Ok(result)
+    Ok((successes, failcounts))
 }
 
 /// After loading the log file and filtering the current commands by the set of commands

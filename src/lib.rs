@@ -122,8 +122,17 @@ impl PyExecGraph {
         self.g.ntasks()
     }
 
+    /// Get the number of times a given task (by key)
+    /// has failed in prior invocations, according to the
+    /// keyfile.
+    fn failcount(&self, key: &str) -> Option<u32> {
+        self.g.failcount(key)
+    }
+
+    /// Get the workflow-level key, created by the ``newkeyfn``
+    /// callback passed into the constructor
     fn key(&self) -> String {
-        return self.key.clone();
+        self.key.clone()
     }
 
     /// Get a particular task in the graph.

@@ -1,6 +1,6 @@
 use crate::{
     graphtheory::transitive_closure_dag,
-    logfile::load_keys_exit_status_0,
+    logfile::load_keyfile_info,
     server::{router, State as ServerState},
     sync::{ReadyTracker, StatusUpdater},
     unsafecode,
@@ -134,15 +134,16 @@ pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     keyfile: String,
     keyfile_prior_contents: HashMap<String, Arc<crate::logfile::Record>>,
+    keyfile_failcounts: HashMap<String, u32>,
     completed: HashSet<String>,
 }
 
 impl ExecGraph {
     pub fn new(keyfile: String) -> Result<ExecGraph> {
         // Load prior the successful tasks from keyfile.
-        let keyfile_prior_contents = match File::open(&keyfile) {
-            Ok(file) => load_keys_exit_status_0(file)?,
-            _ => HashMap::new(),
+        let (keyfile_prior_contents, keyfile_failcounts) = match File::open(&keyfile) {
+            Ok(file) => load_keyfile_info(file)?,
+            _ => panic!("sdf"),
         };
 
         Ok(ExecGraph {
@@ -150,11 +151,16 @@ impl ExecGraph {
             keyfile,
             completed: HashSet::new(),
             keyfile_prior_contents,
+            keyfile_failcounts,
         })
     }
 
     pub fn ntasks(&self) -> usize {
         self.deps.raw_nodes().len()
+    }
+
+    pub fn failcount(&self, key: &str) -> Option<u32> {
+        self.keyfile_failcounts.get(key).cloned()
     }
 
     pub fn get_task(&self, id: u32) -> Option<Cmd> {

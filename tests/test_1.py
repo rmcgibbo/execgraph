@@ -515,3 +515,13 @@ def test_newkeyfn_1(tmp_path):
     assert eg.key() == "foo"
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
     assert eg.key() == "foo"
+
+
+def test_failcounts(tmp_path):
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg.add_task(["false"], key="key")
+    eg.execute()
+
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    assert eg.failcount("key") == 1
+    assert eg.failcount("nothing") is None
