@@ -8,6 +8,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+const FAIL_COMMAND_PREFIX: &str = "wrk/";
+
 /// A wrapper for cancellation token which automatically cancels
 /// it on drop. It is created using `drop_guard` method on the `CancellationToken`.
 /// Will be in the next release of tokio-util after 0.6.7, but I don't want to depend
@@ -245,11 +247,15 @@ impl ReadyTracker {
         } else {
             self.n_failed += 1;
             if e.cmd.key.is_empty() {
-                println!("\x1b[1;31mFAILED:\x1b[0m {}", e.cmd.display());
+                println!("\x1b[1;31mFAILED:\x1b[0m {}{}",
+                FAIL_COMMAND_PREFIX,
+                e.cmd.display());
             } else {
                 println!(
-                    "\x1b[1;31mFAILED:\x1b[0m {}: {}",
+                    "\x1b[1;31mFAILED:\x1b[0m {}{}.{:x}: {}",
+                    FAIL_COMMAND_PREFIX,
                     e.cmd.key,
+                    e.cmd.runcount,
                     e.cmd.display()
                 );
             }
