@@ -139,6 +139,10 @@ def test_key(num_parallel, tmp_path):
     assert len(eg.execute()[1]) == 10
     assert len(eg.execute()[1]) == 0
 
+    with open(tmp_path / "foo") as f:
+        print(f.read())
+
+
     eg2 = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
     eg2.add_task(["true"], "0", [])
     for i in range(1, 11):
@@ -348,28 +352,27 @@ def test_copy_reused_keys_logfile(tmp_path):
     eg.execute()
 
     with open(str(tmp_path / "foo")) as f:
-        #
-        # 1627614382812479141	foo	-1	xps13:22354	echo 1
-        # 1627614382815297952	foo	0	xps13:22354	echo 1
-        #
-        # 1627614382812479141	foo	-1	xps13:22354	echo 1
-        # 1627614382815297952	foo	0	xps13:22354	echo 1
-        # 1627614382817976207	bar	-1	xps13:22363	echo 2
-        # 1627614382820884414	bar	0	xps13:22363	echo 2
-        # 1627614382822833663	baz	-1	xps13:22372	echo 3
-        # 1627614382825519374	baz	0	xps13:22372	echo 3
+        # 1631805260379320530	foo	0	-1	xps13:12257	sh -c echo 1
+        # 1631805260381448117	foo	0	0	xps13:12257	sh -c echo 1
+
+        # 1631805260379320530	foo	0	-1	xps13:12257	sh -c echo 1
+        # 1631805260381448117	foo	0	0	xps13:12257	sh -c echo 1
+        # 1631805260384269778	bar	0	-1	xps13:12266	sh -c echo 2
+        # 1631805260386021309	bar	0	0	xps13:12266	sh -c echo 2
+        # 1631805260388075933	baz	0	-1	xps13:12275	sh -c echo 3
+        # 1631805260389925481	baz	0	0	xps13:12275	sh -c echo 3
 
         assert "wrk v=2 key=default-key-value\n" == f.readline()
         assert "\n" == f.readline()
-        assert "foo\t-1" in f.readline()
-        assert "foo\t0" in f.readline()
+        assert "foo\t0\t-1" in f.readline()
+        assert "foo\t0\t0" in f.readline()
         assert "\n" == f.readline()
-        assert "foo\t-1" in f.readline()
-        assert "foo\t0" in f.readline()
-        assert "bar\t-1" in f.readline()
-        assert "bar\t0" in f.readline()
-        assert "baz\t-1" in f.readline()
-        assert "baz\t0" in f.readline()
+        assert "foo\t0\t-1" in f.readline()
+        assert "foo\t0\t0" in f.readline()
+        assert "bar\t0\t-1" in f.readline()
+        assert "bar\t0\t0" in f.readline()
+        assert "baz\t0\t-1" in f.readline()
+        assert "baz\t0\t0" in f.readline()
 
 
 #
@@ -517,11 +520,16 @@ def test_newkeyfn_1(tmp_path):
     assert eg.key() == "foo"
 
 
-def test_failcounts(tmp_path):
+def test_failcounts_1(tmp_path):
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
     eg.add_task(["false"], key="key")
     eg.execute()
 
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
-    assert eg.failcount("key") == 1
-    assert eg.failcount("nothing") is None
+    assert eg.keyfile_runcount("key") == 1
+    assert eg.keyfile_runcount("nothing") == 0
+    eg.add_task(["false"], key="key")
+    eg.execute()
+
+    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    assert eg.keyfile_runcount("key") == 2

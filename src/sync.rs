@@ -130,10 +130,10 @@ impl ReadyTracker {
         loop {
             match self.completed.try_recv() {
                 Ok(CompletedEvent::Started(e)) => {
-                    writer.begin_command(&e.cmd.display(), &e.cmd.key, &e.hostpid)?;
+                    writer.begin_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, &e.hostpid)?;
                 }
                 Ok(CompletedEvent::Finished(e)) => {
-                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.exit_status, &e.hostpid)?;
+                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, e.exit_status, &e.hostpid)?;
                 }
                 Err(_) => {
                     return Ok(());
@@ -190,11 +190,11 @@ impl ReadyTracker {
         loop {
             match self.completed.recv().await.unwrap() {
                 CompletedEvent::Started(e) => {
-                    writer.begin_command(&e.cmd.display(), &e.cmd.key, &e.hostpid)?;
+                    writer.begin_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, &e.hostpid)?;
                 }
                 CompletedEvent::Finished(e) => {
                     self.finished_order.push(e.id);
-                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.exit_status, &e.hostpid)?;
+                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, e.exit_status, &e.hostpid)?;
                     self._finished_bookkeeping(&mut statuses, &e).await?;
 
                     if self.n_failed >= self.failures_allowed || self.n_pending == 0 {

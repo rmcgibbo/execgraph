@@ -32,6 +32,7 @@ pub struct Cmd {
     pub key: String,
     pub display: Option<String>,
     pub queuename: Option<String>,
+    pub runcount: u32,
 
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
@@ -134,14 +135,14 @@ pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     keyfile: String,
     keyfile_prior_contents: HashMap<String, Arc<crate::logfile::Record>>,
-    keyfile_failcounts: HashMap<String, u32>,
+    keyfile_runcounts: HashMap<String, u32>,
     completed: HashSet<String>,
 }
 
 impl ExecGraph {
     pub fn new(keyfile: String) -> Result<ExecGraph> {
         // Load prior the successful tasks from keyfile.
-        let (keyfile_prior_contents, keyfile_failcounts) = match File::open(&keyfile) {
+        let (keyfile_prior_contents, keyfile_runcounts) = match File::open(&keyfile) {
             Ok(file) => load_keyfile_info(file)?,
             _ => panic!("sdf"),
         };
@@ -151,16 +152,20 @@ impl ExecGraph {
             keyfile,
             completed: HashSet::new(),
             keyfile_prior_contents,
-            keyfile_failcounts,
+            keyfile_runcounts,
         })
+    }
+
+    pub fn keyfile_runcount(&self, key: &str) -> u32 {
+        self.keyfile_runcounts
+            .get(key)
+            .map(|x| x+1)
+            .or(Some(0))
+            .unwrap()
     }
 
     pub fn ntasks(&self) -> usize {
         self.deps.raw_nodes().len()
-    }
-
-    pub fn failcount(&self, key: &str) -> Option<u32> {
-        self.keyfile_failcounts.get(key).cloned()
     }
 
     pub fn get_task(&self, id: u32) -> Option<Cmd> {
@@ -177,6 +182,7 @@ impl ExecGraph {
 
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
         if !cmd.key.is_empty() {
+            // WHY IS THIS O(N)?
             if let Some(existing) = self
                 .deps
                 .raw_nodes()

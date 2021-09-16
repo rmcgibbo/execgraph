@@ -122,11 +122,9 @@ impl PyExecGraph {
         self.g.ntasks()
     }
 
-    /// Get the number of times a given task (by key)
-    /// has failed in prior invocations, according to the
-    /// keyfile.
-    fn failcount(&self, key: &str) -> Option<u32> {
-        self.g.failcount(key)
+    // Runcount!
+    fn keyfile_runcount(&self, key: &str) -> u32 {
+        self.g.keyfile_runcount(key)
     }
 
     /// Get the workflow-level key, created by the ``newkeyfn``
@@ -219,12 +217,14 @@ impl PyExecGraph {
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
     ) -> PyResult<u32> {
+        let runcount = self.g.keyfile_runcount(&key as &str);
         let cmd = Cmd {
             cmdline,
             key,
             display,
             queuename,
             stdin,
+            runcount,
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
         };

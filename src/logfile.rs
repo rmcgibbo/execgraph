@@ -14,10 +14,10 @@ pub struct Record {
 }
 
 /// Load information related to successes and failures from the log file.
-/// For successes, load the two lines from the log file associated with
-///    each task that was successfully completed.
-/// For failures, load the number of times the task has been run.
 ///
+/// * For successes, load the two lines from the log file associated with
+///   each task that was successfully completed.
+/// * For failures, load the number of times the task has been run.
 /// # Arguments
 ///
 /// * `file` - A file opened for reading, typically the keyfile.
@@ -31,8 +31,9 @@ pub fn load_keyfile_info(
 
     let mut startlines = HashMap::new();
     let mut successes: HashMap<String, Arc<Record>> = HashMap::new();
-    let mut failcounts: HashMap<String, u32> = HashMap::new();
+    let mut runcounts: HashMap<String, u32> = HashMap::new();
     const N_HEADER_LINES: usize = 1;
+    const N_FIELDS: usize = 6;
 
     for line_or_error in lines.skip(N_HEADER_LINES) {
         let line = line_or_error?;
@@ -40,13 +41,14 @@ pub fn load_keyfile_info(
             continue;
         }
 
-        let fields = line.splitn(5, '\t').collect::<Vec<_>>();
-        if fields.len() == 5 {
+        let fields = line.splitn(N_FIELDS, '\t').collect::<Vec<_>>();
+        if fields.len() == N_FIELDS {
             let _time = fields[0].parse::<u128>()?;
             let key = fields[1];
-            let exit_status = fields[2].parse::<i32>()?;
-            let _hostpid = fields[3];
-            let _cmd = fields[4];
+            let runcount = fields[2].parse::<u32>()?;
+            let exit_status = fields[3].parse::<i32>()?;
+            let _hostpid = fields[4];
+            let _cmd = fields[5];
             match exit_status {
                 -1 => {
                     startlines.insert(key.to_owned(), line);
@@ -64,21 +66,16 @@ pub fn load_keyfile_info(
                         }),
                     );
                 }
-                _ => match failcounts.get_mut(&key as &str) {
-                    Some(c) => {
-                        *c += 1;
-                    }
-                    None => {
-                        failcounts.insert(key.to_owned(), 1);
-                    }
-                },
+                _ => {
+                    runcounts.insert(key.to_owned(), runcount);
+                }
             }
         } else {
-            log::error!("Unrecognized line: {}", line);
+            log::error!("Unrecognized line: '{}'", line);
         }
     }
 
-    Ok((successes, failcounts))
+    Ok((successes, runcounts))
 }
 
 /// After loading the log file and filtering the current commands by the set of commands
@@ -109,14 +106,15 @@ impl LogWriter {
         Ok(LogWriter { file })
     }
 
-    pub fn begin_command(&mut self, cmd: &str, key: &str, hostpid: &str) -> Result<()> {
+    pub fn begin_command(&mut self, cmd: &str, key: &str, runcount: u32, hostpid: &str) -> Result<()> {
         let fake_exit_status = -1;
         if !key.is_empty() {
             writeln!(
                 self.file,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 time()?,
                 key,
+                runcount,
                 fake_exit_status,
                 hostpid,
                 cmd.replace("\n", "\\n").replace("\t", "\\t")
@@ -129,15 +127,17 @@ impl LogWriter {
         &mut self,
         cmd: &str,
         key: &str,
+        runcount: u32,
         exit_status: i32,
         hostpid: &str,
     ) -> Result<()> {
         if !key.is_empty() {
             writeln!(
                 self.file,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 time()?,
                 key,
+                runcount,
                 exit_status,
                 hostpid,
                 cmd.replace("\n", "\\n").replace("\t", "\\t")
