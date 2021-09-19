@@ -1,9 +1,9 @@
 use crate::{
     execgraph::Cmd,
     httpinterface::*,
-    sync::{Queuename, StatusUpdater},
+    sync::{Queuename, QueueSnapshot, StatusUpdater},
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_channel::{bounded, Receiver, Sender};
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -133,12 +133,49 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
 
 // ------------------------------------------------------------------ //
 
-// GET /ready
+// GET /status
 async fn status_handler(
     req: Request<Body>,
 ) -> Result<Response<Body>, routerify_json_response::Error> {
-    let state = req.data::<Arc<State>>().unwrap();
-    let snapshot = state.status_updater.get_queuestate();
+    let state = req.data::<Arc<State>>().unwrap().clone();
+    let request = match get_json_body::<StatusRequest>(req).await {
+        Ok(request) => Some(request),
+        Err(_) => None
+    };
+
+    // if they sent in a request, they want us to wait for up to `timeout` seconds or until
+    // the number of pending tasks in a specific queue is greater than
+    async fn get_snapshot(request: &Option<StatusRequest>, state: Arc<State>) -> Result<HashMap<Queuename, QueueSnapshot>> {
+        if let Some(request) = request {
+            let deadline = std::time::Instant::now() + std::time::Duration::new(request.timeout, 0);
+            while std::time::Instant::now() < deadline {
+                let snapshot = state.status_updater.get_queuestate();
+                match snapshot.get(&request.queue) {
+                    Some(q) => {
+                        if q.n_pending > request.pending_greater_than {
+                            return Ok(snapshot);
+                        }
+                    },
+                    None => {
+                        return Err(anyhow!("No such queue: {:?}", request.queue));
+                    }
+                };
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+        };
+
+        Ok(state.status_updater.get_queuestate())
+    }
+
+    let snapshot = match get_snapshot(&request, state.clone()).await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            return json_failed_resp_with_message(
+                StatusCode::NOT_FOUND,
+                e.to_string(),
+            );
+        }
+    };
 
     let resp = snapshot
         .iter()

@@ -261,7 +261,7 @@ def test_shutdown(tmp_path):
     assert nfailed == 1
 
 
-def test_status(tmp_path):
+def test_status_1(tmp_path):
     assert find_executable("execgraph-remote") is not None
     with open(tmp_path / "multi-provisioner", "w") as f:
         print("#!/bin/sh", file=f)
@@ -279,6 +279,30 @@ def test_status(tmp_path):
             f.read()
             == '{"status":"success","code":200,"data":{"queues":[[null,{"num_ready":2,"num_failed":0,"num_success":0,"num_inflight":0}]]}}'
         )
+
+    assert nfailed == 0
+
+
+def test_status_2(tmp_path):
+    with open(tmp_path / "multi-provisioner", "w") as f:
+        print("""#!/bin/sh
+set -e -x
+curl -X GET \
+  -H "Content-type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"queue":null, "pending_greater_than": 10, "timeout": 10}' \
+  $1/status > %s/resp.json
+""" % tmp_path, file=f)
+
+
+    os.chmod(tmp_path / "multi-provisioner", 0o744)
+    eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
+    eg.add_task(["false"], key="foo")
+    eg.add_task(["false"], key="bar")
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+
+    with open(tmp_path / "resp.json") as f:
+        print(f.read())
 
     assert nfailed == 0
 

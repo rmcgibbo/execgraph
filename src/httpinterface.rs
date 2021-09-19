@@ -7,6 +7,13 @@ pub struct Ping {
     pub transaction_id: u32,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct StatusRequest {
+    pub queue: Option<String>,
+    pub pending_greater_than: u32,
+    pub timeout: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct StatusReply {
     #[serde(with = "vectorize")]
