@@ -528,7 +528,7 @@ async fn spawn_and_wait_for_provisioner(
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
         _ = token.cancelled() => {
-            unsafecode::sigint_then_kill(&mut child, std::time::Duration::from_millis(250)).await;
+            unsafecode::sigint_then_kill(&mut child, std::time::Duration::from_millis(1000)).await;
         },
 
         result = child.wait() => {
