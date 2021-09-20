@@ -384,14 +384,14 @@ impl ExecGraph {
                 // specifically call drain() after joining the run_local_process_loop to forward the
                 // CompletedEvents to the log.
                 token.cancel();
-                join_all(handles).await;
-                servicer.drain(&self.keyfile).await.unwrap();
             },
             _ = signal::ctrl_c() => {
                 token.cancel();
             },
             _ = token.cancelled() => {},
         };
+        join_all(handles).await;
+        servicer.drain(&self.keyfile).await.unwrap();
         provisioner_exited_rx
             .await
             .expect("failed to close provisioner");
@@ -466,7 +466,7 @@ async fn run_local_process_loop(
             };
 
             let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(&cmd.stdin).await.unwrap();
+            stdin.write_all(&cmd.stdin).await?;
             drop(stdin);
 
             let pid = child
