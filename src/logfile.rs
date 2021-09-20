@@ -106,7 +106,13 @@ impl LogWriter {
         Ok(LogWriter { file })
     }
 
-    pub fn begin_command(&mut self, cmd: &str, key: &str, runcount: u32, hostpid: &str) -> Result<()> {
+    pub fn begin_command(
+        &mut self,
+        cmd: &str,
+        key: &str,
+        runcount: u32,
+        hostpid: &str,
+    ) -> Result<()> {
         let fake_exit_status = -1;
         if !key.is_empty() {
             writeln!(

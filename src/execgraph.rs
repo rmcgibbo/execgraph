@@ -22,7 +22,7 @@ use std::{
     process::Stdio,
     sync::Arc,
 };
-use tokio::{io::AsyncWriteExt, process::Command, signal, sync::oneshot};
+use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Derivative)]
@@ -159,7 +159,7 @@ impl ExecGraph {
     pub fn keyfile_runcount(&self, key: &str) -> u32 {
         self.keyfile_runcounts
             .get(key)
-            .map(|x| x+1)
+            .map(|x| x + 1)
             .or(Some(0))
             .unwrap()
     }
@@ -372,26 +372,12 @@ impl ExecGraph {
         };
 
         // run the background service that will send commands to the ready channel to be picked up by the
-        // tasks spawned above
-        tokio::select! {
-            _ = servicer.background_serve(&self.keyfile) => {
-                // background_serve exits when an appropriate number of tasks have failed (or when everything
-                // succeeds, but that's easier to handle). then we trigger the cancellaton token, which
-                // triggers run_local_process_loop to exit. as run_local_process_loop threads exit, they kill
-                // and outstanding tasks and dump CompletedEvents into the servicer's channel so that we log
-                // the unsuccessful exit of those tasks. But since background_servicer has exited, there's
-                // nobody around necessarily to read those messages and forward them to the log file, so we
-                // specifically call drain() after joining the run_local_process_loop to forward the
-                // CompletedEvents to the log.
-                token.cancel();
-            },
-            _ = signal::ctrl_c() => {
-                token.cancel();
-            },
-            _ = token.cancelled() => {},
-        };
+        // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
+        servicer.background_serve(&self.keyfile).await.unwrap();
+        token.cancel();
         join_all(handles).await;
-        servicer.drain(&self.keyfile).await.unwrap();
+        servicer.drain(&self.keyfile).unwrap();
+
         provisioner_exited_rx
             .await
             .expect("failed to close provisioner");
@@ -481,14 +467,6 @@ async fn run_local_process_loop(
             // that we also wait for the cancellation token at the same time.
             let output = tokio::select! {
                 _ = token.cancelled() => {
-                    // TODO: should sigint then sigkill it probably, but at
-                    // least we have kill-on-drop.
-                    let timeout_status = 130;
-                    let stdout = "".to_string();
-                    let stderr = "".to_string();
-                    status_updater
-                        .send_finished(subgraph_node_id, &cmd, &hostpid, timeout_status, stdout, stderr)
-                    .await;
                     return Err(anyhow!("cancelled"));
                 }
                 wait_with_output = child.wait_with_output() => {

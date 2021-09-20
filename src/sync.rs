@@ -51,6 +51,7 @@ pub struct ReadyTracker {
     count_offset: u32,
     failures_allowed: u32,
     queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
+    inflight: HashSet<(NodeIndex, String)>  // NodeIndex for cmd and HostPid
 }
 
 #[derive(Clone)]
@@ -119,6 +120,7 @@ impl ReadyTracker {
                 count_offset,
                 failures_allowed,
                 queuestate: queuestate.clone(),
+                inflight: HashSet::new(),
             },
             ready_r,
             StatusUpdater {
@@ -127,21 +129,45 @@ impl ReadyTracker {
             },
         )
     }
-    pub async fn drain(&mut self, keyfile: &str) -> Result<()> {
+    pub fn drain(&mut self, keyfile: &str) -> Result<()> {
         let mut writer = LogWriter::new(keyfile)?;
         loop {
             match self.completed.try_recv() {
                 Ok(CompletedEvent::Started(e)) => {
-                    writer.begin_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, &e.hostpid)?;
+                    writer.begin_command(
+                        &e.cmd.display(),
+                        &e.cmd.key,
+                        e.cmd.runcount,
+                        &e.hostpid,
+                    )?;
                 }
                 Ok(CompletedEvent::Finished(e)) => {
-                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, e.exit_status, &e.hostpid)?;
+                    writer.end_command(
+                        &e.cmd.display(),
+                        &e.cmd.key,
+                        e.cmd.runcount,
+                        e.exit_status,
+                        &e.hostpid,
+                    )?;
                 }
                 Err(_) => {
-                    return Ok(());
+                    break;
                 }
             }
         }
+        for (k, hostpid) in self.inflight.iter() {
+            let timeout_status = 130;
+            let cmd = &self.g.node_weight(*k).unwrap().0;
+            writer.end_command(
+                &cmd.display(),
+                &cmd.key,
+                cmd.runcount,
+                timeout_status,
+                hostpid
+            )?;
+        }
+        self.inflight.clear();
+        return Ok(());
     }
 
     pub async fn background_serve(&mut self, keyfile: &str) -> Result<()> {
@@ -164,13 +190,13 @@ impl ReadyTracker {
         // trigger all of the tasks that have zero unmet dependencies
         for (k, v) in statuses.iter() {
             if v.n_unmet_deps == 0 {
-                self.n_pending += 1;
                 self.queuestate
                     .lock()
                     .unwrap()
                     .get_mut(&v.queuename)
                     .expect("No such Queuename")
                     .n_pending += 1;
+                self.n_pending += 1;
                 self.ready
                     .as_mut()
                     .expect("send channel was already dropped?")
@@ -190,24 +216,34 @@ impl ReadyTracker {
 
         let mut writer = LogWriter::new(keyfile)?;
         loop {
-            match self.completed.recv().await.unwrap() {
-                CompletedEvent::Started(e) => {
-                    writer.begin_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, &e.hostpid)?;
-                }
-                CompletedEvent::Finished(e) => {
-                    self.finished_order.push(e.id);
-                    writer.end_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, e.exit_status, &e.hostpid)?;
-                    self._finished_bookkeeping(&mut statuses, &e).await?;
+            tokio::select! {
+                event = self.completed.recv() => {
+                    match event.unwrap() {
+                        CompletedEvent::Started(e) => {
+                            writer.begin_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, &e.hostpid)?;
+                            assert!(self.inflight.insert((e.id, e.hostpid)));
+                        }
+                        CompletedEvent::Finished(e) => {
+                            self.finished_order.push(e.id);
+                            writer.end_command(&e.cmd.display(), &e.cmd.key, e.cmd.runcount, e.exit_status, &e.hostpid)?;
+                            self._finished_bookkeeping(&mut statuses, &e).await?;
+                            assert!(self.inflight.remove(&(e.id, e.hostpid)));
 
-                    if self.n_failed >= self.failures_allowed || self.n_pending == 0 {
-                        // drop the send side of the channel. this will cause the receive side
-                        // to start returning errors, which is exactly what we want and will
-                        // break the other threads out of the loop.
-                        self.ready = None;
-                        break;
+                            if self.n_failed >= self.failures_allowed || self.n_pending == 0 {
+                                // drop the send side of the channel. this will cause the receive side
+                                // to start returning errors, which is exactly what we want and will
+                                // break the other threads out of the loop.
+                                self.ready = None;
+                                break;
+                            }
+                        }
                     }
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    self.ready = None;
+                    break;
                 }
-            }
+            };
         }
 
         Ok(())
@@ -247,9 +283,11 @@ impl ReadyTracker {
         } else {
             self.n_failed += 1;
             if e.cmd.key.is_empty() {
-                println!("\x1b[1;31mFAILED:\x1b[0m {}{}",
-                FAIL_COMMAND_PREFIX,
-                e.cmd.display());
+                println!(
+                    "\x1b[1;31mFAILED:\x1b[0m {}{}",
+                    FAIL_COMMAND_PREFIX,
+                    e.cmd.display()
+                );
             } else {
                 println!(
                     "\x1b[1;31mFAILED:\x1b[0m {}{}.{:x}: {}",
@@ -268,13 +306,13 @@ impl ReadyTracker {
                 if !status.poisoned {
                     status.n_unmet_deps -= 1;
                     if status.n_unmet_deps == 0 {
-                        self.n_pending += 1;
                         self.queuestate
                             .lock()
                             .unwrap()
                             .get_mut(&status.queuename)
                             .expect("No such Queuename")
                             .n_pending += 1;
+                        self.n_pending += 1;
                         self.ready
                             .as_mut()
                             .expect("send channel was already dropped?")
@@ -296,12 +334,12 @@ impl ReadyTracker {
 
 impl StatusUpdater {
     /// When a task is started, notify the tracker by calling this.
-    pub async fn send_started(&self, _v: NodeIndex, cmd: &Cmd, hostpid: &str) {
+    pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str) {
         cmd.call_preamble();
         let r = self
             .s
             .send(CompletedEvent::Started(StartedEvent {
-                // id: v,
+                id: v,
                 cmd: cmd.clone(),
                 hostpid: hostpid.to_string(),
             }))
@@ -346,7 +384,7 @@ impl StatusUpdater {
 
 #[derive(Debug)]
 struct StartedEvent {
-    // id: NodeIndex,
+    id: NodeIndex,
     cmd: Cmd,
     hostpid: String,
 }

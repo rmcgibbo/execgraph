@@ -1,22 +1,25 @@
-import multiprocessing
-import shutil
-import sys
-import random
-import numpy as np
-import scipy.sparse
-import networkx as nx
-import pytest
-import os
 import json
+import multiprocessing
+import os
+import random
+import shutil
+import signal
+import sys
+import threading
+import time
+import subprocess
 from distutils.spawn import find_executable
 
+import networkx as nx
+import numpy as np
+import pytest
+import scipy.sparse
 
 if os.path.exists("target/debug/libexecgraph.so"):
     if not os.path.exists("execgraph.so"):
         os.symlink("target/debug/libexecgraph.so", "execgraph.so")
     sys.path.insert(0, ".")
     os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"
-    # print(os.environ["PATH"])
 
 import execgraph as _execgraph
 
@@ -399,29 +402,6 @@ def test_copy_reused_keys_logfile(tmp_path):
         assert "baz\t0\t0" in f.readline()
 
 
-#
-# Interactive test. Run  RUST_LOG=debug py.test tests/test_1.py::test_shutdown2 -s
-# and then ctrl-c it. Should see "sending sigint to provisioner" followed by
-# "sending SIGKILL to provisioner" after 250ms.
-#
-# def test_shutdown2(tmp_path):
-#     with open(tmp_path / "multi-provisioner", "w") as f:
-#         print("""#!/nix/store/ph6hpbx4pr31146wpb72yrk3f3yy0xcs-python3-3.9.4/bin/python
-# import time
-# import signal
-# signal.signal(signal.SIGINT, signal.SIG_IGN)  # remote this and no sigkill should be sent
-# for i in range(60):
-#     print(i)
-#     time.sleep(1)
-# """, file=f)
-
-#     os.chmod(tmp_path / "multi-provisioner", 0o744)
-#     eg = _execgraph.ExecGraph(0, str(tmp_path / "foo"))
-#     eg.add_task("false", key="")
-#     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
-#     assert nfailed == 1
-
-
 def test_fstringish_1():
     import ast
     text = """
@@ -557,3 +537,27 @@ def test_failcounts_1(tmp_path):
 
     eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
     assert eg.keyfile_runcount("key") == 2
+
+
+def test_sigint_1(tmp_path):
+    script = """
+import sys
+sys.path.insert(0, ".")
+import execgraph as _execgraph
+eg = _execgraph.ExecGraph(8, keyfile="%s/wrk_log")
+eg.add_task(["sleep", "2"], key="key")
+eg.execute()
+    """ % tmp_path
+    with open(tmp_path / "script", "w") as f:
+        f.write(script)
+
+    p = subprocess.Popen([sys.executable, tmp_path / "script"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    time.sleep(1)
+    p.send_signal(signal.SIGINT)
+    p.wait(timeout=1)
+
+    with open(tmp_path / "wrk_log") as f:
+        for i in range(2):
+            f.readline()
+        lines = f.readlines()
+    assert len(lines) == 2
