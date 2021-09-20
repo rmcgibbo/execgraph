@@ -495,6 +495,8 @@ def test_hang(tmp_path):
     with open(tmp_path / "foo") as f:
         lines = f.readlines()[1:]
     c = Counter([e.split("\t")[1] for e in lines[1:]])
+    # print("".join(lines))
+    # print(c)
     assert all(v == 2 for v in c.values())
 
 

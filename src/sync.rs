@@ -140,6 +140,7 @@ impl ReadyTracker {
                         e.cmd.runcount,
                         &e.hostpid,
                     )?;
+                    assert!(self.inflight.insert((e.id, e.hostpid)));
                 }
                 Ok(CompletedEvent::Finished(e)) => {
                     writer.end_command(
@@ -148,13 +149,15 @@ impl ReadyTracker {
                         e.cmd.runcount,
                         e.exit_status,
                         &e.hostpid,
-                    )?;
+                    ).unwrap();
+                    assert!(self.inflight.remove(&(e.id, e.hostpid)));
                 }
                 Err(_) => {
                     break;
                 }
             }
         }
+
         for (k, hostpid) in self.inflight.iter() {
             let timeout_status = 130;
             let cmd = &self.g.node_weight(*k).unwrap().0;
@@ -164,13 +167,13 @@ impl ReadyTracker {
                 cmd.runcount,
                 timeout_status,
                 hostpid
-            )?;
+            ).unwrap();
         }
         self.inflight.clear();
         return Ok(());
     }
 
-    pub async fn background_serve(&mut self, keyfile: &str) -> Result<()> {
+    pub async fn background_serve(&mut self, keyfile: &str, token: CancellationToken) -> Result<()> {
         // for each task, how many unmet first-order dependencies does it have?
         let mut statuses: HashMap<NodeIndex, TaskStatus> = self
             .g
@@ -239,6 +242,10 @@ impl ReadyTracker {
                         }
                     }
                 },
+                _ = token.cancelled() => {
+                    self.ready = None;
+                    break;
+                }
                 _ = tokio::signal::ctrl_c() => {
                     self.ready = None;
                     break;

@@ -65,6 +65,7 @@ in buildPythonPackage rec {
     scipy
     networkx
     curl
-  ] ;
+  ];
+  pytestFlagsArray = [ "-s" ];
   pythonImportsCheck = [ "execgraph" ];
 }

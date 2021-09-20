@@ -373,7 +373,7 @@ impl ExecGraph {
 
         // run the background service that will send commands to the ready channel to be picked up by the
         // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
-        servicer.background_serve(&self.keyfile).await.unwrap();
+        servicer.background_serve(&self.keyfile, token.clone()).await.unwrap();
         token.cancel();
         join_all(handles).await;
         servicer.drain(&self.keyfile).unwrap();
