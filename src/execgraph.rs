@@ -133,6 +133,7 @@ impl Cmd {
 
 pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
+    key_to_nodeid: HashMap<String, NodeIndex<u32>>,
     keyfile: String,
     keyfile_prior_contents: HashMap<String, Arc<crate::logfile::Record>>,
     keyfile_runcounts: HashMap<String, u32>,
@@ -149,6 +150,7 @@ impl ExecGraph {
 
         Ok(ExecGraph {
             deps: Graph::new(),
+            key_to_nodeid: HashMap::new(),
             keyfile,
             completed: HashSet::new(),
             keyfile_prior_contents,
@@ -182,25 +184,13 @@ impl ExecGraph {
 
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
         if !cmd.key.is_empty() {
-            // WHY IS THIS O(N)?
-            if let Some(existing) = self
-                .deps
-                .raw_nodes()
-                .iter()
-                .enumerate()
-                .filter_map(|(i, n)| {
-                    if n.weight.key == cmd.key {
-                        Some(i as u32)
-                    } else {
-                        None
-                    }
-                })
-                .next()
-            {
-                return Ok(existing);
+            match self.key_to_nodeid.get(&cmd.key) {
+                Some(index) => return Ok(index.index() as u32),
+                None => {}
             }
         }
 
+        let key = cmd.key.clone();
         let new_node = self.deps.add_node(cmd);
         for dep in dependencies.iter().map(|&i| NodeIndex::from(i)) {
             if dep == new_node || self.deps.node_weight(dep).is_none() {
@@ -210,6 +200,7 @@ impl ExecGraph {
             self.deps.add_edge(dep, new_node, ());
         }
 
+        self.key_to_nodeid.insert(key, new_node);
         Ok(new_node.index() as u32)
     }
 
@@ -373,7 +364,10 @@ impl ExecGraph {
 
         // run the background service that will send commands to the ready channel to be picked up by the
         // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
-        servicer.background_serve(&self.keyfile, token.clone()).await.unwrap();
+        servicer
+            .background_serve(&self.keyfile, token.clone())
+            .await
+            .unwrap();
         token.cancel();
         join_all(handles).await;
         servicer.drain(&self.keyfile).unwrap();
