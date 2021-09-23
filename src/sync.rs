@@ -10,26 +10,6 @@ use tokio_util::sync::CancellationToken;
 
 const FAIL_COMMAND_PREFIX: &str = "wrk/";
 
-/// A wrapper for cancellation token which automatically cancels
-/// it on drop. It is created using `drop_guard` method on the `CancellationToken`.
-/// Will be in the next release of tokio-util after 0.6.7, but I don't want to depend
-/// on the git snapshot for now so I'm just vendoring it
-#[derive(Debug)]
-pub struct DropGuard {
-    pub(super) inner: Option<CancellationToken>,
-}
-impl DropGuard {
-    pub fn new(token: CancellationToken) -> DropGuard {
-        DropGuard { inner: Some(token) }
-    }
-}
-impl Drop for DropGuard {
-    fn drop(&mut self) {
-        if let Some(inner) = &self.inner {
-            inner.cancel();
-        }
-    }
-}
 pub type Queuename = Option<String>;
 
 #[derive(Clone, Debug)]

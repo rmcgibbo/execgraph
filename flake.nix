@@ -18,7 +18,12 @@
     in
     {
       defaultPackage = pkgs.python3.pkgs.execgraph;
-      devShell = pkgs.mkShell {
+
+      devShell = pkgs.mkShell rec {
+        name = "execgraph";
+        shellHook = ''
+          export PS1="\n(${name}) \[\033[1;32m\][\[\e]0;\u@\h: \w\a\]\u@\h:\w]\[\033[0m\]\n$ "
+        '';
         buildInputs = with pkgs; with python39Packages; [
           cargo
           rustc

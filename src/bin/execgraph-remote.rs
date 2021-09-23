@@ -12,7 +12,6 @@ use std::os::unix::process::ExitStatusExt;
 use whoami::username;
 use gethostname::gethostname;
 use structopt::StructOpt;
-use execgraph::sync::DropGuard;
 
 
 #[tokio::main]
@@ -76,7 +75,7 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
     let token1 = token.clone();
     let token2 = token.clone();
     let token3 = token.clone();
-    let _drop_guard = DropGuard::new(token);
+    let _drop_guard = token.drop_guard();
     let (pongs_tx, pongs_rx) = bounded::<()>(1);
     // send a pong right at the beginning, because we just received a server message
     // from start(), so that's pretty good
