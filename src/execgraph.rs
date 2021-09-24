@@ -1,6 +1,6 @@
 use crate::{
     graphtheory::transitive_closure_dag,
-    logfile::load_keyfile_info,
+    logfile::LogfileSnapshot,
     server::{router, State as ServerState},
     sync::{ReadyTracker, StatusUpdater},
     unsafecode,
@@ -16,7 +16,6 @@ use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
-    fs::File,
     net::SocketAddr,
     os::unix::process::ExitStatusExt,
     process::Stdio,
@@ -134,32 +133,28 @@ impl Cmd {
 pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     key_to_nodeid: HashMap<String, NodeIndex<u32>>,
-    keyfile: String,
-    keyfile_prior_contents: HashMap<String, Arc<crate::logfile::Record>>,
-    keyfile_runcounts: HashMap<String, u32>,
+    logfile: String,
+    logfile_snapshot: LogfileSnapshot,
     completed: HashSet<String>,
 }
 
 impl ExecGraph {
-    pub fn new(keyfile: String) -> Result<ExecGraph> {
-        // Load prior the successful tasks from keyfile.
-        let (keyfile_prior_contents, keyfile_runcounts) = match File::open(&keyfile) {
-            Ok(file) => load_keyfile_info(file)?,
-            _ => panic!("sdf"),
-        };
+    pub fn new(logfile: String) -> Result<ExecGraph> {
+        // Load prior the successful tasks from logfile.
+        let logfile_snapshot = LogfileSnapshot::new(&logfile)?;
 
         Ok(ExecGraph {
             deps: Graph::new(),
             key_to_nodeid: HashMap::new(),
-            keyfile,
+            logfile: logfile,
+            logfile_snapshot,
             completed: HashSet::new(),
-            keyfile_prior_contents,
-            keyfile_runcounts,
         })
     }
 
-    pub fn keyfile_runcount(&self, key: &str) -> u32 {
-        self.keyfile_runcounts
+    pub fn logfile_runcount(&self, key: &str) -> u32 {
+        self.logfile_snapshot
+            .runcounts
             .get(key)
             .map(|x| x + 1)
             .or(Some(0))
@@ -204,7 +199,11 @@ impl ExecGraph {
         Ok(new_node.index() as u32)
     }
 
-    fn get_subgraph(&mut self, target: Option<u32>) -> Result<Graph<(Cmd, NodeIndex), ()>> {
+    fn get_subgraph(
+        &mut self,
+        target: Option<u32>,
+        rerun_failures: bool,
+    ) -> Result<Graph<(Cmd, NodeIndex), ()>> {
         // Get the subgraph containing all cmds in the transitive closure of target.
         // these are all the commands we need to resolve first. if target is none, then
         // just get the whole subraph (with an unnecessary copy unfortunately)
@@ -241,28 +240,19 @@ impl ExecGraph {
                     // if we already ran this command within this process, don't record it
                     // in reused_old_keys. that's only for stuff that was run in a previous
                     // session
-                    None
-                } else if (!w.0.key.is_empty())
-                    && self.keyfile_prior_contents.contains_key(&w.0.key)
-                {
+                    return None; // returning none excludes it from filtered_subgraph
+                }
+                if self.logfile_snapshot.has_success(&w.0.key) {
                     reused_old_keys.insert(
                         w.0.key.clone(),
-                        self.keyfile_prior_contents.get(&w.0.key).unwrap().clone(),
+                        self.logfile_snapshot.get_record(&w.0.key).unwrap(),
                     );
-                    None
-                } else {
-                    Some((w.0.clone(), w.1))
+                    return None;
                 }
+
+                return Some((w.0.clone(), w.1)); // returning some keeps it in filtered_subgraph
             },
-            |e, &w| {
-                let src = subgraph.edge_endpoints(e).unwrap().0;
-                let srckey = &subgraph.node_weight(src).unwrap().0.key;
-                if (!srckey.is_empty()) && self.keyfile_prior_contents.contains_key(srckey) {
-                    None
-                } else {
-                    Some(w)
-                }
-            },
+            |_e, &w| Some(w),
         );
 
         // See test_copy_reused_keys_logfile.
@@ -272,10 +262,38 @@ impl ExecGraph {
         // since the final blank line describe the full set of jobs that the last invocation dependend on.
         // this way, when reading the log file, it's possible to figure out what jobs are garbage and what
         // jobs are still "in use".
-        crate::logfile::copy_reused_keys(&self.keyfile, &reused_old_keys)?;
+        crate::logfile::copy_reused_keys(&self.logfile, &reused_old_keys)?;
         for key in reused_old_keys.keys() {
-            self.keyfile_prior_contents.remove(key);
+            self.logfile_snapshot.remove(key);
             self.completed.insert(key.to_owned());
+        }
+
+        if !rerun_failures {
+            let tc = transitive_closure_dag(&filtered_subgraph)?;
+            let failures = tc
+                .node_weights()
+                .filter_map(|n| match self.logfile_snapshot.has_failure(&n.0.key) {
+                    true => Some(n.1),
+                    false => None,
+                })
+                .collect::<HashSet<NodeIndex>>();
+
+            let filtered_subgraph2 = filtered_subgraph.filter_map(
+                |n, w| {
+                    if failures.contains(&w.1) {
+                        return None;
+                    }
+                    for e in tc.edges_directed(n, Direction::Incoming) {
+                        if failures.contains(&tc.node_weight(e.source()).unwrap().1) {
+                            return None;
+                        }
+                    }
+
+                    Some(w.clone())
+                },
+                |_e, &w| Some(w),
+            );
+            return Ok(filtered_subgraph2);
         }
 
         Ok(filtered_subgraph)
@@ -286,10 +304,11 @@ impl ExecGraph {
         target: Option<u32>,
         num_parallel: u32,
         failures_allowed: u32,
+        rerun_failures: bool,
         provisioner: Option<String>,
         provisioner_arg2: Option<String>,
     ) -> Result<(u32, Vec<u32>)> {
-        let subgraph = Arc::new(self.get_subgraph(target)?);
+        let subgraph = Arc::new(self.get_subgraph(target, rerun_failures)?);
         if subgraph.raw_nodes().is_empty() {
             return Ok((0, vec![]));
         }
@@ -365,12 +384,12 @@ impl ExecGraph {
         // run the background service that will send commands to the ready channel to be picked up by the
         // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
         servicer
-            .background_serve(&self.keyfile, token.clone())
+            .background_serve(&self.logfile, token.clone())
             .await
             .unwrap();
         token.cancel();
         join_all(handles).await;
-        servicer.drain(&self.keyfile).unwrap();
+        servicer.drain(&self.logfile).unwrap();
 
         provisioner_exited_rx
             .await

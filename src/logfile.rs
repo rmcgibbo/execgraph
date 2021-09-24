@@ -1,81 +1,112 @@
 use anyhow::{anyhow, Result};
+use bytelines::ByteLinesReader;
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{self, BufRead, Write},
+    io::{self, Write},
     path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 pub struct Record {
-    startline: String,
-    endline: String,
+    startline: Vec<u8>,
+    endline: Vec<u8>,
 }
 
-/// Load information related to successes and failures from the log file.
-///
-/// * For successes, load the two lines from the log file associated with
-///   each task that was successfully completed.
-/// * For failures, load the number of times the task has been run.
-/// # Arguments
-///
-/// * `file` - A file opened for reading, typically the keyfile.
-///
-/// Lines that are not in the proper format will be skipped, as will
-/// lines that have an end record and not a start record.
-pub fn load_keyfile_info(
-    file: File,
-) -> Result<(HashMap<String, Arc<Record>>, HashMap<String, u32>)> {
-    let lines = io::BufReader::new(file).lines();
+pub struct LogfileSnapshot {
+    pub last_record: HashMap<String, (i32, Arc<Record>)>,
+    pub runcounts: HashMap<String, u32>,
+}
 
-    let mut startlines = HashMap::new();
-    let mut successes: HashMap<String, Arc<Record>> = HashMap::new();
-    let mut runcounts: HashMap<String, u32> = HashMap::new();
-    const N_HEADER_LINES: usize = 1;
-    const N_FIELDS: usize = 6;
+impl LogfileSnapshot {
+    pub fn new(path: &str) -> Result<Self> {
+        let file = File::open(&path)?;
+        let reader = io::BufReader::new(file);
 
-    for line_or_error in lines.skip(N_HEADER_LINES) {
-        let line = line_or_error?;
-        if line == "" {
-            continue;
-        }
+        let mut startlines = HashMap::new();
+        let mut last_record: HashMap<String, _> = HashMap::new();
+        let mut runcounts: HashMap<String, u32> = HashMap::new();
+        const N_HEADER_LINES: usize = 1;
+        const N_FIELDS: usize = 6;
 
-        let fields = line.splitn(N_FIELDS, '\t').collect::<Vec<_>>();
-        if fields.len() == N_FIELDS {
-            let _time = fields[0].parse::<u128>()?;
-            let key = fields[1];
-            let runcount = fields[2].parse::<u32>()?;
-            let exit_status = fields[3].parse::<i32>()?;
+        for line in reader
+            .byte_lines()
+            .into_iter()
+            .skip(N_HEADER_LINES)
+            .filter_map(|x| x.ok())
+        {
+            if line.len() == 0 {
+                continue;
+            }
+
+            let fields: Vec<&[u8]> = line.split(|c| *c == b"\t"[0]).collect();
+            if fields.len() != N_FIELDS {
+                panic!("sdf")
+            }
+
+            let _time = std::str::from_utf8(fields[0])?.parse::<u128>()?;
+            let key = std::str::from_utf8(fields[1])?.to_owned();
+            let runcount = std::str::from_utf8(fields[2])?.parse::<u32>()?;
+            let exit_status = std::str::from_utf8(fields[3])?.parse::<i32>()?;
             let _hostpid = fields[4];
             let _cmd = fields[5];
+
             match exit_status {
                 -1 => {
-                    startlines.insert(key.to_owned(), line);
-                }
-                0 => {
-                    let start = startlines
-                        .remove(key)
-                        .ok_or(anyhow!("Missing start record"))?;
-
-                    successes.insert(
-                        key.to_owned(),
-                        Arc::new(Record {
-                            startline: start,
-                            endline: line,
-                        }),
-                    );
+                    startlines.insert(key, line);
                 }
                 _ => {
-                    runcounts.insert(key.to_owned(), runcount);
+                    let start = startlines
+                        .remove(&key)
+                        .ok_or(anyhow!("Missing start record"))?;
+                    if exit_status != 0 {
+                        runcounts.insert(key.to_owned(), runcount);
+                    }
+                    last_record.insert(
+                        key,
+                        (
+                            exit_status,
+                            Arc::new(Record {
+                                startline: start,
+                                endline: line,
+                            }),
+                        ),
+                    );
                 }
             }
-        } else {
-            log::error!("Unrecognized line: '{}'", line);
         }
+
+        Ok(LogfileSnapshot {
+            last_record,
+            runcounts,
+        })
     }
 
-    Ok((successes, runcounts))
+    pub fn has_success(&self, key: &str) -> bool {
+        !key.is_empty()
+            && self
+                .last_record
+                .get(key)
+                .map(|(status, _)| *status == 0)
+                .unwrap_or(false)
+    }
+
+    pub fn has_failure(&self, key: &str) -> bool {
+        !key.is_empty()
+            && self
+                .last_record
+                .get(key)
+                .map(|(status, _)| *status != 0)
+                .unwrap_or(false)
+    }
+
+    pub fn get_record(&self, key: &str) -> Option<Arc<Record>> {
+        self.last_record.get(key).map(|(_status, r)| r.clone())
+    }
+    pub fn remove(&mut self, key: &str) -> Option<Arc<Record>> {
+        self.last_record.remove(key).map(|(_status, r)| r)
+    }
 }
 
 /// After loading the log file and filtering the current commands by the set of commands
@@ -89,10 +120,12 @@ pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<String, Arc<Record>>)
     let f = std::fs::OpenOptions::new().append(true).open(filename)?;
     let mut f = std::io::BufWriter::new(f);
     for v in old_keys.values() {
-        writeln!(f, "{}", v.startline)?;
-        writeln!(f, "{}", v.endline)?;
+        f.write(&v.startline)?;
+        f.write(b"\n")?;
+        f.write(&v.endline)?;
+        f.write(b"\n")?;
     }
-
+    f.flush()?;
     Ok(())
 }
 

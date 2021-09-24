@@ -34,7 +34,7 @@ use crate::execgraph::{Cmd, ExecGraph};
 /// Args:
 ///    num_parallel (int): Maximum number of local parallel processes
 ///      to run. [default=2 more than the number of CPU cores].
-///    keyfile (str): The path to the log file.
+///    logfile (str): The path to the log file.
 ///    failures_allowed (int): keep going until N jobs fail (0 means infinity)
 ///      [default=1].
 ///
@@ -44,18 +44,20 @@ pub struct PyExecGraph {
     num_parallel: u32,
     failures_allowed: u32,
     key: String,
+    rerun_failures: bool,
 }
 
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_parallel = -1, failures_allowed = 1, newkeyfn = "None")]
+    #[args(num_parallel = -1, failures_allowed = 1, newkeyfn = "None", rerun_failures=true)]
     fn new(
         py: Python,
         mut num_parallel: i32,
-        keyfile: String,
+        logfile: String,
         failures_allowed: u32,
         newkeyfn: Option<PyObject>,
+        rerun_failures: bool,
     ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
@@ -65,7 +67,7 @@ impl PyExecGraph {
             .create(true)
             .append(true)
             .read(true)
-            .open(&keyfile)?;
+            .open(&logfile)?;
 
         let key = match f.metadata()?.len() {
             // If we're at the start of the file, that means we just opened it.
@@ -106,7 +108,7 @@ impl PyExecGraph {
         f.flush()?;
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(keyfile).map_err(|e| PyValueError::new_err(e.to_string()))?,
+            g: ExecGraph::new(logfile).map_err(|e| PyValueError::new_err(e.to_string()))?,
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -114,6 +116,7 @@ impl PyExecGraph {
                 failures_allowed
             }),
             key,
+            rerun_failures,
         })
     }
 
@@ -123,8 +126,8 @@ impl PyExecGraph {
     }
 
     // Runcount!
-    fn keyfile_runcount(&self, key: &str) -> u32 {
-        self.g.keyfile_runcount(key)
+    fn logfile_runcount(&self, key: &str) -> u32 {
+        self.g.logfile_runcount(key)
     }
 
     /// Get the workflow-level key, created by the ``newkeyfn``
@@ -217,7 +220,7 @@ impl PyExecGraph {
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
     ) -> PyResult<u32> {
-        let runcount = self.g.keyfile_runcount(&key as &str);
+        let runcount = self.g.logfile_runcount(&key as &str);
         let cmd = Cmd {
             cmdline,
             key,
@@ -291,6 +294,7 @@ impl PyExecGraph {
                         target,
                         self.num_parallel,
                         self.failures_allowed,
+                        self.rerun_failures,
                         remote_provisioner,
                         remote_provisioner_arg2,
                     )

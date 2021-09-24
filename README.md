@@ -18,7 +18,7 @@ class ExecGraph
   Args:
     num_parallel (int): Maximum number of parallel processes
       to run. [default=2 more than the number of CPU cores].
-    keyfile (str): The path to the log file.
+    logfile (str): The path to the log file.
     remote_provisioner (Optional[str]): Path to a remote provisioning script.
       If supplied, we call this script with the url of an emphemeral server
       as the first argument, and it can launch processes that can connect back

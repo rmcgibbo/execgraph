@@ -4,3 +4,4 @@ tests/__pycache__
 result
 _execgraph.so
 execgraph*.whl
+execgraph.so

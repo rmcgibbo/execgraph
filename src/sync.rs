@@ -109,8 +109,8 @@ impl ReadyTracker {
             },
         )
     }
-    pub fn drain(&mut self, keyfile: &str) -> Result<()> {
-        let mut writer = LogWriter::new(keyfile)?;
+    pub fn drain(&mut self, logfile: &str) -> Result<()> {
+        let mut writer = LogWriter::new(logfile)?;
         loop {
             match self.completed.try_recv() {
                 Ok(CompletedEvent::Started(e)) => {
@@ -159,7 +159,7 @@ impl ReadyTracker {
 
     pub async fn background_serve(
         &mut self,
-        keyfile: &str,
+        logfile: &str,
         token: CancellationToken,
     ) -> Result<()> {
         // for each task, how many unmet first-order dependencies does it have?
@@ -205,7 +205,7 @@ impl ReadyTracker {
         // or inside other stages of processing, because there are going to be
         // accounting bugs that way.
 
-        let mut writer = LogWriter::new(keyfile)?;
+        let mut writer = LogWriter::new(logfile)?;
         loop {
             tokio::select! {
                 event = self.completed.recv() => {

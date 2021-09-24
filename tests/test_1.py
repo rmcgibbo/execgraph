@@ -55,7 +55,7 @@ def test_1(num_parallel, tmp_path):
         g, {j: i for i, j in enumerate(nx.topological_sort(g.reverse()))}
     )
 
-    eg = _execgraph.ExecGraph(num_parallel=num_parallel, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(num_parallel=num_parallel, logfile=str(tmp_path / "foo"))
 
     for u in nx.topological_sort(g.reverse()):
         # print(u)
@@ -77,7 +77,7 @@ def test_1(num_parallel, tmp_path):
 def test_2(seed, tmp_path):
     g = random_ordered_dag(seed)
 
-    eg = _execgraph.ExecGraph(num_parallel=10, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(num_parallel=10, logfile=str(tmp_path / "foo"))
 
     for u in sorted(g.nodes()):
         # these are dependencies that are supposed to be completed
@@ -366,11 +366,11 @@ def test_queue(tmp_path):
 
 
 def test_copy_reused_keys_logfile(tmp_path):
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.execute()
 
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.add_task(["sh", "-c", "echo 2"], key="bar")
     eg.execute()
@@ -462,14 +462,14 @@ def test_fstringish_4():
 
 def test_stdout(tmp_path):
     # this should only print 'foooo' once rather than 10 times
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     for i in range(10):
         eg.add_task(["sh", "-c", "echo foooo && sleep 1 && false"], key=f"{i}")
     eg.execute()
 
 
 def test_preamble(tmp_path):
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     eg.add_task(["true"], key="1", preamble=_execgraph.test_make_capsule())
     print("foo")
     eg.execute()
@@ -479,7 +479,7 @@ def test_preamble(tmp_path):
 def test_hang(tmp_path):
     import time
     from collections import Counter
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
 
     eg.add_task(["false"], key="-")
     for i in range(1, 8):
@@ -501,7 +501,7 @@ def test_hang(tmp_path):
 
 
 def test_stdin(tmp_path):
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     eg.add_task(["sh", "-c", f"cat <&0 > {tmp_path}/log.txt"], key="0", stdin=b"stdin")
     eg.execute()
 
@@ -514,31 +514,31 @@ def test_newkeyfn_0(tmp_path):
     def fn():
         return "\n"
     with pytest.raises(ValueError):
-        eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"), newkeyfn=fn)
+        eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"), newkeyfn=fn)
 
 
 def test_newkeyfn_1(tmp_path):
     def fn():
         return "foo"
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"), newkeyfn=fn)
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"), newkeyfn=fn)
     assert eg.key() == "foo"
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     assert eg.key() == "foo"
 
 
 def test_failcounts_1(tmp_path):
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     eg.add_task(["false"], key="key")
     eg.execute()
 
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
-    assert eg.keyfile_runcount("key") == 1
-    assert eg.keyfile_runcount("nothing") == 0
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
+    assert eg.logfile_runcount("key") == 1
+    assert eg.logfile_runcount("nothing") == 0
     eg.add_task(["false"], key="key")
     eg.execute()
 
-    eg = _execgraph.ExecGraph(8, keyfile=str(tmp_path / "foo"))
-    assert eg.keyfile_runcount("key") == 2
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
+    assert eg.logfile_runcount("key") == 2
 
 
 def test_sigint_1(tmp_path):
@@ -546,7 +546,7 @@ def test_sigint_1(tmp_path):
 import sys
 sys.path.insert(0, ".")
 import execgraph as _execgraph
-eg = _execgraph.ExecGraph(8, keyfile="%s/wrk_log")
+eg = _execgraph.ExecGraph(8, logfile="%s/wrk_log")
 eg.add_task(["sleep", "2"], key="key")
 eg.execute()
     """ % tmp_path
@@ -563,3 +563,24 @@ eg.execute()
             f.readline()
         lines = f.readlines()
     assert len(lines) == 2
+
+
+@pytest.mark.parametrize("rerun_failures, expected", [
+    (True, 1),
+    (False, 0)
+])
+def test_rerun_failures_1(tmp_path, rerun_failures, expected):
+    def create():
+        eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"), rerun_failures=rerun_failures)
+        eg.add_task(["false", "1"], key="a")
+        eg.add_task(["false", "2"], key="b", dependencies=[0])
+        eg.add_task(["false", "3"], key="c", dependencies=[1])
+        eg.add_task(["false", "4"], key="d", dependencies=[2])
+        return eg
+
+    eg = create()
+    eg.execute()
+
+    eg = create()
+    n_failed, executed = eg.execute()
+    assert n_failed == expected

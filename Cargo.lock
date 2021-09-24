@@ -92,6 +92,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72feb31ffc86498dacdbd0fcebb56138e7177a8cc5cea4516031d15ae85a742e"
 
 [[package]]
+name = "bytelines"
+version = "2.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "791e4e40d13e1463dee537b254225c12c46ec7328f1817c6264873bc166f615f"
+
+[[package]]
 name = "bytes"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -180,6 +186,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "bytelines",
  "derivative",
  "env_logger",
  "futures",
