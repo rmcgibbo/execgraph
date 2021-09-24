@@ -234,7 +234,7 @@ impl ExecGraph {
 
         // Now let's remove all edges from the dependency graph if the source has already finished
         // or if we've already exeuted the task in a previous call to execute
-        let filtered_subgraph = subgraph.filter_map(
+        let mut filtered_subgraph = subgraph.filter_map(
             |_n, w| {
                 if self.completed.contains(&w.0.key) {
                     // if we already ran this command within this process, don't record it
@@ -242,7 +242,8 @@ impl ExecGraph {
                     // session
                     return None; // returning none excludes it from filtered_subgraph
                 }
-                if self.logfile_snapshot.has_success(&w.0.key) {
+                let has_success = self.logfile_snapshot.has_success(&w.0.key);
+                if has_success {
                     reused_old_keys.insert(
                         w.0.key.clone(),
                         self.logfile_snapshot.get_record(&w.0.key).unwrap(),
@@ -255,19 +256,6 @@ impl ExecGraph {
             |_e, &w| Some(w),
         );
 
-        // See test_copy_reused_keys_logfile.
-        // This is not elegant at all. The point is that when a job is run in one execgraph invocation and
-        // then requested in a new invocation but not rerun because we detected that it had already been
-        // run, we want to copy the entries in the logfile. this ensures that the last entries in the logfile
-        // since the final blank line describe the full set of jobs that the last invocation dependend on.
-        // this way, when reading the log file, it's possible to figure out what jobs are garbage and what
-        // jobs are still "in use".
-        crate::logfile::copy_reused_keys(&self.logfile, &reused_old_keys)?;
-        for key in reused_old_keys.keys() {
-            self.logfile_snapshot.remove(key);
-            self.completed.insert(key.to_owned());
-        }
-
         if !rerun_failures {
             let tc = transitive_closure_dag(&filtered_subgraph)?;
             let failures = tc
@@ -278,9 +266,13 @@ impl ExecGraph {
                 })
                 .collect::<HashSet<NodeIndex>>();
 
-            let filtered_subgraph2 = filtered_subgraph.filter_map(
+            filtered_subgraph = filtered_subgraph.filter_map(
                 |n, w| {
                     if failures.contains(&w.1) {
+                        reused_old_keys.insert(
+                            w.0.key.clone(),
+                            self.logfile_snapshot.get_record(&w.0.key).unwrap(),
+                        );
                         return None;
                     }
                     for e in tc.edges_directed(n, Direction::Incoming) {
@@ -293,7 +285,20 @@ impl ExecGraph {
                 },
                 |_e, &w| Some(w),
             );
-            return Ok(filtered_subgraph2);
+            //return Ok(filtered_subgraph2);
+        }
+
+        // See test_copy_reused_keys_logfile.
+        // This is not elegant at all. The point is that when a job is run in one execgraph invocation and
+        // then requested in a new invocation but not rerun because we detected that it had already been
+        // run, we want to copy the entries in the logfile. this ensures that the last entries in the logfile
+        // since the final blank line describe the full set of jobs that the last invocation dependend on.
+        // this way, when reading the log file, it's possible to figure out what jobs are garbage and what
+        // jobs are still "in use".
+        crate::logfile::copy_reused_keys(&self.logfile, &reused_old_keys)?;
+        for key in reused_old_keys.keys() {
+            self.logfile_snapshot.remove(key);
+            self.completed.insert(key.to_owned());
         }
 
         Ok(filtered_subgraph)

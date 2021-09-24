@@ -584,3 +584,6 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
     eg = create()
     n_failed, executed = eg.execute()
     assert n_failed == expected
+
+    with open(tmp_path / "foo") as f:
+        assert f.read().splitlines()[-1] != "\n"
