@@ -587,3 +587,21 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
 
     with open(tmp_path / "foo") as f:
         assert f.read().splitlines()[-1] != "\n"
+
+
+def test_runcount_1(tmp_path):
+    with open(tmp_path / "foo", "w") as f:
+        f.write("""wrk v=2 key=6d23e5cc091bc9485f0670df39e8
+
+1632505517442910374	touch-jor4z3j4ekp33eha6ctgfnlb	0	-1	xps13:31418	touch out
+1632505517454820941	touch-jor4z3j4ekp33eha6ctgfnlb	0	0	xps13:31418	touch out
+1632505517544147890	sh-u6hkf6jsroavonqsinwdjenc	1	-1	xps13:31446	/bin/sh
+1632505517555086020	sh-u6hkf6jsroavonqsinwdjenc	1	0	xps13:31446	/bin/sh
+1632505517555506115	sh-7g6fppsy2ddtn6j44wb4ihvl	0	-1	xps13:31455	/bin/sh
+1632505517565192629	sh-7g6fppsy2ddtn6j44wb4ihvl	0	1	xps13:31455	/bin/sh
+""")
+
+    eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
+    assert eg.logfile_runcount("sh-u6hkf6jsroavonqsinwdjenc") == 1
+    assert eg.logfile_runcount("touch-jor4z3j4ekp33eha6ctgfnlb") == 0
+    assert eg.logfile_runcount("sh-7g6fppsy2ddtn6j44wb4ihvl") == 1

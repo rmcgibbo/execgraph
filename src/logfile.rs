@@ -16,7 +16,7 @@ pub struct Record {
 
 pub struct LogfileSnapshot {
     pub last_record: HashMap<String, (i32, Arc<Record>)>,
-    pub runcounts: HashMap<String, u32>,
+    pub runcounts: HashMap<String, i32>,
 }
 
 impl LogfileSnapshot {
@@ -26,7 +26,7 @@ impl LogfileSnapshot {
 
         let mut startlines = HashMap::new();
         let mut last_record: HashMap<String, _> = HashMap::new();
-        let mut runcounts: HashMap<String, u32> = HashMap::new();
+        let mut runcounts: HashMap<String, i32> = HashMap::new();
         const N_HEADER_LINES: usize = 1;
         const N_FIELDS: usize = 6;
 
@@ -47,7 +47,7 @@ impl LogfileSnapshot {
 
             let _time = std::str::from_utf8(fields[0])?.parse::<u128>()?;
             let key = std::str::from_utf8(fields[1])?.to_owned();
-            let runcount = std::str::from_utf8(fields[2])?.parse::<u32>()?;
+            let runcount = std::str::from_utf8(fields[2])?.parse::<i32>()?;
             let exit_status = std::str::from_utf8(fields[3])?.parse::<i32>()?;
             let _hostpid = fields[4];
             let _cmd = fields[5];
@@ -60,9 +60,12 @@ impl LogfileSnapshot {
                     let start = startlines
                         .remove(&key)
                         .ok_or(anyhow!("Missing start record"))?;
-                    if exit_status != 0 {
-                        runcounts.insert(key.to_owned(), runcount);
-                    }
+
+                    runcounts.insert(
+                        key.to_owned(),
+                        runcount - ((exit_status == 0) as i32),
+                    );
+
                     last_record.insert(
                         key,
                         (

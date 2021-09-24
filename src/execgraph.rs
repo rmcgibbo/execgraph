@@ -152,7 +152,7 @@ impl ExecGraph {
         })
     }
 
-    pub fn logfile_runcount(&self, key: &str) -> u32 {
+    pub fn logfile_runcount(&self, key: &str) -> i32 {
         self.logfile_snapshot
             .runcounts
             .get(key)

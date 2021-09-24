@@ -13,7 +13,7 @@ use pyo3::{
     prelude::*,
     types::{IntoPyDict, PyTuple},
 };
-use std::io::Write;
+use std::{convert::TryInto, io::Write};
 use tokio::runtime::Runtime;
 
 use crate::execgraph::{Cmd, ExecGraph};
@@ -126,7 +126,7 @@ impl PyExecGraph {
     }
 
     // Runcount!
-    fn logfile_runcount(&self, key: &str) -> u32 {
+    fn logfile_runcount(&self, key: &str) -> i32 {
         self.g.logfile_runcount(key)
     }
 
@@ -227,7 +227,7 @@ impl PyExecGraph {
             display,
             queuename,
             stdin,
-            runcount,
+            runcount: runcount.try_into().unwrap(),
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
         };
