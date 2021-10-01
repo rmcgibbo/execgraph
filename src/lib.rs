@@ -4,7 +4,6 @@ pub mod httpinterface;
 mod logfile;
 mod server;
 pub mod sync;
-mod unsafecode;
 use std::{ffi::OsString, io::BufRead};
 
 use pyo3::{

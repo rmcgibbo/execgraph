@@ -3,7 +3,6 @@ use crate::{
     logfile::LogfileSnapshot,
     server::{router, State as ServerState},
     sync::{ReadyTracker, StatusUpdater},
-    unsafecode,
 };
 use anyhow::{anyhow, Result};
 use async_channel::Receiver;
@@ -365,10 +364,10 @@ impl ExecGraph {
 
                     tokio::spawn(async move {
                         server_start_rx.await.expect("failed to recv");
-                        drop(
-                            spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2)
-                                .await,
-                        );
+                        match spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2).await {
+                            Err(e) => {log::error!("{}", e)},
+                            Ok(_) => {},
+                        };
                         token3.cancel();
                         provisioner_exited_tx
                             .send(())
@@ -514,17 +513,32 @@ async fn spawn_and_wait_for_provisioner(
     bound_addr: SocketAddr,
     token: CancellationToken,
 ) -> Result<()> {
-    let mut cmd = Command::new(provisioner);
-    let mut rcmd = cmd.arg(format!("http://{}", bound_addr)).kill_on_drop(true);
-    if let Some(arg2) = arg2 {
-        rcmd = rcmd.arg(arg2);
-    }
+    let mut child = Command::new(provisioner)
+        .arg(format!("http://{}", bound_addr))
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let mut child_stdin = child.stdin.take().unwrap();
 
-    let mut child = rcmd.spawn()?;
+    let arg2_string = arg2.unwrap_or("".to_owned());
+    let arg2_bytes = arg2_string.as_bytes();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(arg2_bytes.len() as u64).to_be_bytes());
+    buf.extend_from_slice(arg2_bytes);
+    child_stdin.write_all(&buf).await?;
+    child_stdin.flush().await?;
+
+
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
         _ = token.cancelled() => {
-            unsafecode::sigint_then_kill(&mut child, std::time::Duration::from_millis(1000)).await;
+
+            drop(child_stdin); // drop stdin so that it knows to exit
+            let duration = std::time::Duration::from_millis(1000);
+            if tokio::time::timeout(duration, child.wait()).await.is_err() {
+                log::debug!("sending SIGKILL to provisioner");
+                child.kill().await.expect("kill failed");
+            }
         },
 
         result = child.wait() => {

@@ -264,6 +264,69 @@ def test_shutdown(tmp_path):
     assert nfailed == 1
 
 
+def test_shutdown_2(tmp_path):
+    with open(tmp_path / "provisioner", "w") as f:
+        print(f"""#!{sys.executable}
+import asyncio
+import sys
+import time
+import sys
+import struct
+import asyncio
+
+
+def make_cancellation_event(fileno: int) -> asyncio.Event:
+    cancellation_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+
+    def reader():
+        while True:
+            data = sys.stdin.buffer.read(4096)
+            if not data:
+                cancellation_event.set()
+                loop.remove_reader(fileno)
+                break
+
+    loop.add_reader(fileno, reader)
+    return cancellation_event
+
+
+async def main():
+    length_bytes = sys.stdin.buffer.read(8)
+    length, = struct.unpack('>Q', length_bytes)
+    y = sys.stdin.buffer.read(length)
+    assert y == b"foo bar"
+
+    cancellation_event = make_cancellation_event(sys.stdin.fileno())
+
+    done, pending = await asyncio.wait(
+        [
+            asyncio.create_task(cancellation_event.wait()),
+            asyncio.create_task(do_stuff()),
+        ],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    with open('{(tmp_path / 'finished')}', "w") as f:
+        f.write("1")
+
+async def do_stuff():
+    while True:
+        await asyncio.sleep(0.1)
+        print("Doing stuff...")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+""", file=f)
+    os.chmod(tmp_path / "provisioner", 0o744)
+
+    eg = _execgraph.ExecGraph(1, str(tmp_path / "foo"))
+    eg.add_task(["sleep", "1"], key="1")
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "provisioner"), remote_provisioner_arg2="foo bar")
+    with open(tmp_path / "finished") as f:
+        assert f.read() == "1"
+    assert nfailed == 0
+
 def test_status_1(tmp_path):
     assert find_executable("execgraph-remote") is not None
     with open(tmp_path / "multi-provisioner", "w") as f:
