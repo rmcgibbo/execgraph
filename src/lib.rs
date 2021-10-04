@@ -6,10 +6,11 @@ mod server;
 pub mod sync;
 use std::{ffi::OsString, io::BufRead};
 
+use lazy_static::lazy_static;
 use pyo3::{
     exceptions::{PyIndexError, PyRuntimeError, PyValueError},
     prelude::*,
-    types::{PyTuple},
+    types::PyTuple,
 };
 use std::{convert::TryInto, io::Write};
 use tokio::runtime::Runtime;
@@ -75,7 +76,12 @@ impl PyExecGraph {
                     Some(newkeyfn) => newkeyfn.call(py, (), None)?.extract(py)?,
                     None => "default-key-value".to_owned(),
                 };
-                if !regex::Regex::new(r"^\w+").unwrap().is_match(&key) {
+                lazy_static! {
+                    static ref WHITESPACE: regex::Regex =
+                        regex::Regex::new(r"^\w+").expect("Invalid regex?");
+                }
+
+                if !WHITESPACE.is_match(&key) {
                     return Err(PyValueError::new_err(format!("Invalid key: {}", key)));
                 }
                 writeln!(f, "wrk v=2 key={}", key)?;
@@ -89,15 +95,14 @@ impl PyExecGraph {
                     .lines()
                     .next()
                     .ok_or_else(|| PyValueError::new_err("Unable to read file"))??;
-                let parts: Vec<&str> = line.split(" ").collect();
-                if !(parts.len() == 3
-                    && parts[0] == "wrk"
-                    && parts[1] == "v=2"
-                    && parts[2].starts_with("key="))
-                {
+                let parts: Vec<&str> = line.split(' ').collect();
+                if !(parts.len() == 3 && parts[0] == "wrk" && parts[1] == "v=2") {
                     return Err(PyValueError::new_err(format!("Invalid header: {}", line)));
                 }
-                let key = parts[2].strip_prefix("key=").unwrap().to_string();
+                let key = parts[2]
+                    .strip_prefix("key=")
+                    .ok_or_else(|| PyValueError::new_err(format!("Invalid header: {}", line)))?
+                    .to_string();
                 key
             }
         };
@@ -218,14 +223,18 @@ impl PyExecGraph {
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
     ) -> PyResult<u32> {
-        let runcount = self.g.logfile_runcount(&key as &str);
+        let runcount = self
+            .g
+            .logfile_runcount(&key as &str)
+            .try_into()
+            .expect("Internal error. runcount is negative (?)");
         let cmd = Cmd {
             cmdline,
             key,
             display,
             queuename,
             stdin,
-            runcount: runcount.try_into().unwrap(),
+            runcount,
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
         };
@@ -285,7 +294,7 @@ impl PyExecGraph {
         nix::unistd::setpgid(nix::unistd::Pid::this(), nix::unistd::Pid::this())
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         py.allow_threads(move || {
-            let rt = Runtime::new().unwrap();
+            let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
                 self.g
                     .execute(
@@ -303,19 +312,18 @@ impl PyExecGraph {
     }
 }
 
-const CAPSULE_NAME: &'static [u8] = b"Execgraph::Capsule\0";
-
 extern "C" fn test_callback(_ctx: *const std::ffi::c_void) -> i32 {
     println!("Hello from test_callback");
-    return 0;
+    0
 }
 
 #[pyfunction]
-fn test_make_capsule<'a>(py: Python<'a>) -> PyResult<PyObject> {
+fn test_make_capsule(py: Python) -> PyResult<PyObject> {
+    const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
+    let name: *const std::os::raw::c_char = CAPSULE_NAME.as_ptr() as *const i8;
     let obj = unsafe {
-        let name: *const std::os::raw::c_char = std::mem::transmute(CAPSULE_NAME.as_ptr());
-        let capsule =
-            pyo3::ffi::PyCapsule_New(std::mem::transmute(test_callback as *const ()), name, None);
+        let cb = test_callback as *const () as *mut std::ffi::c_void;
+        let capsule = pyo3::ffi::PyCapsule_New(cb, name, None);
         PyObject::from_owned_ptr(py, capsule)
     };
 

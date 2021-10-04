@@ -154,7 +154,8 @@ impl ReadyTracker {
                 .unwrap();
         }
         self.inflight.clear();
-        return Ok(());
+
+        Ok(())
     }
 
     pub async fn background_serve(

@@ -3,22 +3,22 @@ use crate::{
     httpinterface::*,
     sync::{QueueSnapshot, Queuename, StatusUpdater},
 };
-use anyhow::{anyhow, Result};
 use async_channel::{bounded, Receiver, Sender};
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
-use routerify_json_response::{json_failed_resp_with_message, json_success_resp};
+use routerify_json_response::json_success_resp;
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{sync::Mutex, time::timeout};
 use tokio_util::sync::CancellationToken;
+type RouteError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 static PING_INTERVAL_MSECS: u64 = 15_000;
 
 pub fn get_random_u32() -> u32 {
     let mut buf = [0u8; 4];
-    getrandom::getrandom(&mut buf).unwrap();
+    getrandom::getrandom(&mut buf).expect("getrandom() failed.");
     u32::from_be_bytes(buf)
 }
 
@@ -52,32 +52,84 @@ impl State {
     }
 }
 
-// Define an error handler function which will accept the `routerify::Error`
-// and the request information and generates an appropriate response.
-async fn error_handler(err: routerify::RouteError, _: RequestInfo) -> Response<Body> {
-    log::warn!("{}", err);
-    Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .body(Body::from(format!("Something went wrong: {}", err)))
-        .unwrap()
+#[derive(Debug)]
+struct JsonResponseErr {
+    code: StatusCode,
+    message: String,
+}
+impl std::fmt::Display for JsonResponseErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#?}", self)
+    }
 }
 
-// async fn get_json_body<T: DeserializeOwned>(req: &mut Request<Body>) -> Result<T> {
-//     let body = hyper::body::to_bytes(req.body_mut()).await?;
-//     serde_json::from_slice(&body.to_vec().as_slice()).map_err(|err| err.into())
-// }
-async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T> {
-    let bytes = hyper::body::to_bytes(req.into_body()).await?;
-    serde_json::from_slice(&bytes.to_vec().as_slice()).map_err(|err| err.into())
+impl From<hyper::Error> for JsonResponseErr {
+    fn from(err: hyper::Error) -> JsonResponseErr {
+        println!("hyper error");
+        JsonResponseErr {
+            code: StatusCode::UNPROCESSABLE_ENTITY,
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for JsonResponseErr {
+    fn from(err: serde_json::Error) -> JsonResponseErr {
+        println!("Serde error!");
+        JsonResponseErr {
+            code: StatusCode::BAD_REQUEST,
+            message: err.to_string(),
+        }
+    }
+}
+
+impl std::error::Error for JsonResponseErr {}
+
+fn json_response_err<T: std::string::ToString>(code: StatusCode, message: T) -> RouteError {
+    Box::new(JsonResponseErr {
+        code,
+        message: message.to_string(),
+    })
+}
+
+// Get the "state" from inside one of the request handlers.
+fn get_state(req: &Request<Body>) -> Arc<State> {
+    req.data::<Arc<State>>()
+        .expect("Unable to access router state")
+        .clone()
+}
+
+// Define an error handler function which will accept the `routerify::Error`
+// and the request information and generates an appropriate response.
+async fn error_handler(err: RouteError, _: RequestInfo) -> Response<Body> {
+    log::warn!("{}", err);
+
+    let e2 = err.downcast_ref::<JsonResponseErr>();
+    match e2 {
+        Some(e) => routerify_json_response::json_failed_resp_with_message(e.code, &e.message)
+            .expect("failed to construct error"),
+        _ => routerify_json_response::json_failed_resp_with_message(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", err),
+        )
+        .expect("Failed to build error"),
+    }
+}
+
+async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T, JsonResponseErr> {
+    let bytes = hyper::body::to_bytes(req.into_body())
+        .await
+        .map_err(|e| -> JsonResponseErr { e.into() })?;
+    serde_json::from_slice(&bytes.to_vec().as_slice()).map_err(|e| e.into())
 }
 
 async fn middleware_after(
     res: Response<Body>,
     req_info: RequestInfo,
-) -> Result<Response<Body>, routerify_json_response::Error> {
+) -> Result<Response<Body>, RouteError> {
     let (started, remote_addr) = req_info
         .context::<(tokio::time::Instant, SocketAddr)>()
-        .unwrap();
+        .expect("Unable to access request context");
     let duration = started.elapsed();
     log::debug!(
         "{} {} {} {}us {}",
@@ -90,12 +142,14 @@ async fn middleware_after(
     Ok(res)
 }
 
-async fn middleware_before(
-    req: Request<Body>,
-) -> Result<Request<Body>, routerify_json_response::Error> {
+async fn middleware_before(req: Request<Body>) -> Result<Request<Body>, RouteError> {
     req.set_context((tokio::time::Instant::now(), req.remote_addr()));
     Ok(req)
 }
+
+/////////////////////////////////////////////////
+//     HANDLERS                                 //
+/////////////////////////////////////////////////
 
 async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
     let cstate = {
@@ -134,21 +188,16 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
 // ------------------------------------------------------------------ //
 
 // GET /status
-async fn status_handler(
-    req: Request<Body>,
-) -> Result<Response<Body>, routerify_json_response::Error> {
-    let state = req.data::<Arc<State>>().unwrap().clone();
-    let request = match get_json_body::<StatusRequest>(req).await {
-        Ok(request) => Some(request),
-        Err(_) => None,
-    };
+async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
+    let state = get_state(&req);
+    let request = get_json_body::<StatusRequest>(req).await.ok();
 
     // if they sent in a request, they want us to wait for up to `timeout` seconds or until
     // the number of pending tasks in a specific queue is greater than
     async fn get_snapshot(
         request: &Option<StatusRequest>,
         state: Arc<State>,
-    ) -> Result<HashMap<Queuename, QueueSnapshot>> {
+    ) -> Result<HashMap<Queuename, QueueSnapshot>, RouteError> {
         if let Some(request) = request {
             let deadline = std::time::Instant::now() + std::time::Duration::new(request.timeout, 0);
             while std::time::Instant::now() < deadline {
@@ -160,7 +209,7 @@ async fn status_handler(
                         }
                     }
                     None => {
-                        return Err(anyhow!("No such queue: {:?}", request.queue));
+                        return Err(json_response_err(StatusCode::NOT_FOUND, "No such queue"));
                     }
                 };
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -170,13 +219,7 @@ async fn status_handler(
         Ok(state.status_updater.get_queuestate())
     }
 
-    let snapshot = match get_snapshot(&request, state.clone()).await {
-        Ok(snapshot) => snapshot,
-        Err(e) => {
-            return json_failed_resp_with_message(StatusCode::NOT_FOUND, e.to_string());
-        }
-    };
-
+    let snapshot = get_snapshot(&request, state.clone()).await?;
     let resp = snapshot
         .iter()
         .map(|(name, queue)| {
@@ -207,65 +250,40 @@ async fn status_handler(
 }
 
 // POST /ping
-async fn ping_handler(
-    req: Request<Body>,
-) -> Result<Response<Body>, routerify_json_response::Error> {
-    let state = req.data::<Arc<State>>().unwrap().clone();
-    let request = match get_json_body::<Ping>(req).await {
-        Ok(request) => request,
-        Err(e) => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{}", e),
-            );
-        }
-    };
+async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
+    let state = get_state(&req);
+    let request = get_json_body::<Ping>(req).await?;
 
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let resp = match state.connections.lock().await.get(&request.transaction_id) {
-        Some(cstate) => {
-            cstate.pings.send(()).await?;
-            Ok(Response::builder().status(200).body("".into()).unwrap())
-        }
-        None => json_failed_resp_with_message(StatusCode::NOT_FOUND, "No active transaction"),
-    };
 
-    resp
+    let guard = state.connections.lock().await;
+    let cstate = guard
+        .get(&request.transaction_id)
+        .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
+    cstate.pings.send(()).await?;
+    Ok(Response::builder().status(200).body("".into()).unwrap())
 }
 
 // GET /start
-async fn start_handler(
-    req: Request<Body>,
-) -> Result<Response<Body>, routerify_json_response::Error> {
-    let state = req.data::<Arc<State>>().unwrap().clone();
-    let request = match get_json_body::<StartRequest>(req).await {
-        Ok(request) => request,
-        Err(e) => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Malformed request: {}", e),
-            );
-        }
-    };
+async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
+    let state = get_state(&req);
+    let request = get_json_body::<StartRequest>(req).await?;
+
     let transaction_id = get_random_u32();
-    let node_id = match state.tasks_ready.get(&request.queuename) {
-        Some(channel) => match channel.try_recv() {
-            Ok(node_id) => node_id,
-            Err(e) => {
-                return json_failed_resp_with_message(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("Channel closed?: {}", e),
-                );
-            }
-        },
-        None => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("No such Queuename: {:?}", request.queuename),
-            );
-        }
-    };
+
+    let channel = state.tasks_ready.get(&request.queuename).ok_or_else(|| {
+        json_response_err(
+            StatusCode::NOT_FOUND,
+            format!("No such queue: {:?}", request.queuename),
+        )
+    })?;
+    let node_id = channel.try_recv().map_err(|e| {
+        json_response_err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Channel closed: {:?}", e),
+        )
+    })?;
 
     let (ping_tx, ping_rx) = bounded::<()>(1);
     let token = CancellationToken::new();
@@ -327,97 +345,58 @@ async fn start_handler(
 }
 
 // POST /begun
-async fn begun_handler(
-    req: Request<Body>,
-) -> Result<Response<Body>, routerify_json_response::Error> {
-    let state = req.data::<Arc<State>>().unwrap().clone();
-    let request = match get_json_body::<BegunRequest>(req).await {
-        Ok(request) => request,
-        Err(e) => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{}", e),
-            );
-        }
-    };
+async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
+    let state = get_state(&req);
+    let request = get_json_body::<BegunRequest>(req).await?;
 
     {
         let mut lock = state.connections.lock().await;
-        match lock.get_mut(&request.transaction_id) {
-            Some(cstate) => {
-                state
-                    .status_updater
-                    .send_started(cstate.node_id, &cstate.cmd, &request.hostpid)
-                    .await;
-                cstate.hostpid = Some(request.hostpid);
-            }
-            None => {
-                return json_failed_resp_with_message(
-                    StatusCode::NOT_FOUND,
-                    "No active transaction",
-                );
-            }
-        }
+        let cstate = lock
+            .get_mut(&request.transaction_id)
+            .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
+        state
+            .status_updater
+            .send_started(cstate.node_id, &cstate.cmd, &request.hostpid)
+            .await;
+        cstate.hostpid = Some(request.hostpid);
     }
 
     Ok(Response::builder().status(200).body("".into()).unwrap())
 }
 
 // POST /end
-async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_json_response::Error> {
-    let state = req.data::<Arc<State>>().unwrap().clone();
-    let request = match get_json_body::<EndRequest>(req).await {
-        Ok(request) => request,
-        Err(e) => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{}", e),
-            );
-        }
-    };
+async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
+    let state = get_state(&req);
+    let request = get_json_body::<EndRequest>(req).await?;
 
     let cstate = {
         let mut lock = state.connections.lock().await;
-        let cstate = match lock.remove(&request.transaction_id) {
-            Some(cs) => cs,
-            None => {
-                return json_failed_resp_with_message(
-                    StatusCode::NOT_FOUND,
-                    "No active transaction",
-                );
-            }
-        };
-
+        let cstate = lock
+            .remove(&request.transaction_id)
+            .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
         cstate.cancel.cancel();
         cstate
     };
 
-    match cstate.hostpid.as_ref() {
-        Some(hostpid) => {
-            state
-                .status_updater
-                .send_finished(
-                    cstate.node_id,
-                    &cstate.cmd,
-                    hostpid,
-                    request.status,
-                    request.stdout,
-                    request.stderr,
-                )
-                .await;
-        }
-        None => {
-            return json_failed_resp_with_message(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Protocol out of order",
-            );
-        }
-    };
+    let hostpid = cstate.hostpid.as_ref().ok_or_else(|| {
+        json_response_err(StatusCode::UNPROCESSABLE_ENTITY, "Protocol out of order")
+    })?;
+    state
+        .status_updater
+        .send_finished(
+            cstate.node_id,
+            &cstate.cmd,
+            hostpid,
+            request.status,
+            request.stdout,
+            request.stderr,
+        )
+        .await;
 
     Ok(Response::builder().status(200).body("".into()).unwrap())
 }
 
-pub fn router(state: State) -> Router<Body, routerify_json_response::Error> {
+pub fn router(state: State) -> Router<Body, RouteError> {
     Router::builder()
         // Attach the handlers.
         .data(Arc::new(state))

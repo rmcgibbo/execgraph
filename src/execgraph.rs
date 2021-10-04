@@ -56,11 +56,11 @@ impl Capsule {
     }
 
     fn call(&self) -> Result<i32> {
-        const CAPSULE_NAME: &'static [u8] = b"Execgraph::Capsule\0";
+        const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
+        let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
+
         unsafe {
             let pyobj = self.capsule.as_ptr();
-            let capsule_name_ptr: *const std::os::raw::c_char =
-                std::mem::transmute(CAPSULE_NAME.as_ptr());
             if (pyo3::ffi::PyCapsule_CheckExact(pyobj) > 0)
                 && (pyo3::ffi::PyCapsule_IsValid(pyobj, capsule_name_ptr) > 0)
             {
@@ -86,7 +86,7 @@ impl Cmd {
             None => self
                 .cmdline
                 .iter()
-                .map(|x| x.clone().into_string().unwrap())
+                .map(|x| x.clone().into_string().expect("cmdline must be utf-8"))
                 .collect::<Vec<String>>()
                 .join(" ")
                 .replace("\\\n", " ")
@@ -145,7 +145,7 @@ impl ExecGraph {
         Ok(ExecGraph {
             deps: Graph::new(),
             key_to_nodeid: HashMap::new(),
-            logfile: logfile,
+            logfile,
             logfile_snapshot,
             completed: HashSet::new(),
         })
@@ -156,8 +156,7 @@ impl ExecGraph {
             .runcounts
             .get(key)
             .map(|x| x + 1)
-            .or(Some(0))
-            .unwrap()
+            .unwrap_or(0)
     }
 
     pub fn ntasks(&self) -> usize {
@@ -178,9 +177,8 @@ impl ExecGraph {
 
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
         if !cmd.key.is_empty() {
-            match self.key_to_nodeid.get(&cmd.key) {
-                Some(index) => return Ok(index.index() as u32),
-                None => {}
+            if let Some(index) = self.key_to_nodeid.get(&cmd.key) {
+                return Ok(index.index() as u32);
             }
         }
 
@@ -245,12 +243,14 @@ impl ExecGraph {
                 if has_success {
                     reused_old_keys.insert(
                         w.0.key.clone(),
-                        self.logfile_snapshot.get_record(&w.0.key).unwrap(),
+                        self.logfile_snapshot.get_record(&w.0.key).expect(
+                            "Key must be present because we just checked for it two lines above",
+                        ),
                     );
                     return None;
                 }
 
-                return Some((w.0.clone(), w.1)); // returning some keeps it in filtered_subgraph
+                Some((w.0.clone(), w.1)) // returning some keeps it in filtered_subgraph
             },
             |_e, &w| Some(w),
         );
@@ -268,14 +268,18 @@ impl ExecGraph {
             filtered_subgraph = filtered_subgraph.filter_map(
                 |n, w| {
                     if failures.contains(&w.1) {
-                        reused_old_keys.insert(
-                            w.0.key.clone(),
-                            self.logfile_snapshot.get_record(&w.0.key).unwrap(),
-                        );
+                        let v = self
+                            .logfile_snapshot
+                            .get_record(&w.0.key)
+                            .expect("key must be present because of how the `failures` set was built");
+                        reused_old_keys.insert(w.0.key.clone(), v);
                         return None;
                     }
                     for e in tc.edges_directed(n, Direction::Incoming) {
-                        if failures.contains(&tc.node_weight(e.source()).unwrap().1) {
+                        let w = tc
+                            .node_weight(e.source())
+                            .expect("key must be present because edge is in graph");
+                        if failures.contains(&w.1) {
                             return None;
                         }
                     }
@@ -355,7 +359,7 @@ impl ExecGraph {
                 tokio::spawn(async move {
                     let state = ServerState::new(subgraph1, tasks_ready1, status_updater1);
                     let router = router(state);
-                    let service = RouterService::new(router).unwrap();
+                    let service = RouterService::new(router).expect("Failed to constuct Router");
                     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                     let server = Server::bind(&addr).serve(service);
                     let bound_addr = server.local_addr();
@@ -364,10 +368,12 @@ impl ExecGraph {
 
                     tokio::spawn(async move {
                         server_start_rx.await.expect("failed to recv");
-                        match spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2).await {
-                            Err(e) => {log::error!("{}", e)},
-                            Ok(_) => {},
-                        };
+                        if let Err(e) =
+                            spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2)
+                                .await
+                        {
+                            log::error!("Provisioner failed: {}", e);
+                        }
                         token3.cancel();
                         provisioner_exited_tx
                             .send(())
@@ -390,10 +396,12 @@ impl ExecGraph {
         servicer
             .background_serve(&self.logfile, token.clone())
             .await
-            .unwrap();
+            .expect("background_serve failed");
         token.cancel();
         join_all(handles).await;
-        servicer.drain(&self.logfile).unwrap();
+        servicer
+            .drain(&self.logfile)
+            .expect("failed to drain queue");
 
         provisioner_exited_rx
             .await
@@ -468,13 +476,16 @@ async fn run_local_process_loop(
                 }
             };
 
-            let mut stdin = child.stdin.take().unwrap();
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("failed to extract stdin from child process"))?;
             stdin.write_all(&cmd.stdin).await?;
             drop(stdin);
 
-            let pid = child
-                .id()
-                .expect("hasn't been polled yet, so this id should exist");
+            let pid = child.id().ok_or_else(|| {
+                anyhow!("child hasn't been waited for yet, so its pid should exist")
+            })?;
             let hostpid = format!("{}:{}", hostname, pid);
             status_updater
                 .send_started(subgraph_node_id, &cmd, &hostpid)
@@ -518,16 +529,18 @@ async fn spawn_and_wait_for_provisioner(
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .spawn()?;
-    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to take stdin from child process"))?;
 
-    let arg2_string = arg2.unwrap_or("".to_owned());
+    let arg2_string = arg2.unwrap_or_else(|| "".to_owned());
     let arg2_bytes = arg2_string.as_bytes();
     let mut buf = Vec::new();
     buf.extend_from_slice(&(arg2_bytes.len() as u64).to_be_bytes());
     buf.extend_from_slice(arg2_bytes);
     child_stdin.write_all(&buf).await?;
     child_stdin.flush().await?;
-
 
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
