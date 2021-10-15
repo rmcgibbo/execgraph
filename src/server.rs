@@ -191,7 +191,8 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
     let request = get_json_body::<StatusRequest>(req).await.ok();
 
     // if they sent in a request, they want us to wait for up to `timeout` seconds or until
-    // the number of pending tasks in a specific queue is greater than
+    // the number of pending tasks in a specific queue is greater than. Or maybe they sent in
+    // no request data, and in that case we just give the response back immediately.
     async fn get_snapshot(
         request: &Option<StatusRequest>,
         state: Arc<State>,
