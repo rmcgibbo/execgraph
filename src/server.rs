@@ -65,7 +65,6 @@ impl std::fmt::Display for JsonResponseErr {
 
 impl From<hyper::Error> for JsonResponseErr {
     fn from(err: hyper::Error) -> JsonResponseErr {
-        println!("hyper error");
         JsonResponseErr {
             code: StatusCode::UNPROCESSABLE_ENTITY,
             message: err.to_string(),
@@ -75,7 +74,6 @@ impl From<hyper::Error> for JsonResponseErr {
 
 impl From<serde_json::Error> for JsonResponseErr {
     fn from(err: serde_json::Error) -> JsonResponseErr {
-        println!("Serde error!");
         JsonResponseErr {
             code: StatusCode::BAD_REQUEST,
             message: err.to_string(),
