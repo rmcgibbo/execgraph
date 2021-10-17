@@ -4,7 +4,6 @@ use crate::{
     sync::{QueueSnapshot, Queuename, StatusUpdater},
 };
 use anyhow::{anyhow, Result};
-use async_channel::{bounded, Receiver, Sender};
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
@@ -23,24 +22,24 @@ pub fn get_random_u32() -> u32 {
 }
 
 struct ConnectionState {
-    pings: Sender<()>,
+    pings: async_channel::Sender<()>,
     cancel: CancellationToken,
     cmd: Cmd,
     node_id: NodeIndex,
     hostpid: Option<String>,
 }
 
-pub struct State {
+pub struct State<'a> {
     connections: Mutex<HashMap<u32, ConnectionState>>,
-    subgraph: Arc<DiGraph<(Cmd, NodeIndex), ()>>,
-    tasks_ready: HashMap<Queuename, Receiver<NodeIndex>>,
+    subgraph: Arc<DiGraph<&'a Cmd, ()>>,
+    tasks_ready: HashMap<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>,
     status_updater: StatusUpdater,
 }
 
-impl State {
+impl<'a> State<'a> {
     pub fn new(
-        subgraph: Arc<DiGraph<(Cmd, NodeIndex), ()>>,
-        tasks_ready: HashMap<Queuename, Receiver<NodeIndex>>,
+        subgraph: Arc<DiGraph<&'a Cmd, ()>>,
+        tasks_ready: HashMap<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>,
         status_updater: StatusUpdater,
     ) -> State {
         State {
@@ -97,7 +96,7 @@ async fn middleware_before(
     Ok(req)
 }
 
-async fn ping_timeout_handler(transaction_id: u32, state: Arc<State>) {
+async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
     let cstate = {
         let mut lock = state.connections.lock().await;
         let cstate = match lock.remove(&transaction_id) {
@@ -147,7 +146,7 @@ async fn status_handler(
     // the number of pending tasks in a specific queue is greater than
     async fn get_snapshot(
         request: &Option<StatusRequest>,
-        state: Arc<State>,
+        state: Arc<State<'_>>,
     ) -> Result<HashMap<Queuename, QueueSnapshot>> {
         if let Some(request) = request {
             let deadline = std::time::Instant::now() + std::time::Duration::new(request.timeout, 0);
@@ -249,7 +248,7 @@ async fn start_handler(
         }
     };
     let transaction_id = get_random_u32();
-    let node_id = match state.tasks_ready.get(&request.queuename) {
+    let (node_id, _priority) = match state.tasks_ready.get(&request.queuename) {
         Some(channel) => match channel.try_recv() {
             Ok(node_id) => node_id,
             Err(e) => {
@@ -267,7 +266,7 @@ async fn start_handler(
         }
     };
 
-    let (ping_tx, ping_rx) = bounded::<()>(1);
+    let (ping_tx, ping_rx) = async_channel::bounded::<()>(1);
     let token = CancellationToken::new();
     let token1 = token.clone();
     let state1 = state.clone();
@@ -297,10 +296,7 @@ async fn start_handler(
         }
     });
 
-    let (cmd, _) = state
-        .subgraph
-        .node_weight(node_id)
-        .unwrap_or_else(|| panic!("failed to get node {:#?}", node_id));
+    let cmd = state.subgraph[node_id];
 
     cmd.call_preamble();
 
@@ -417,7 +413,10 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, routerify_jso
     Ok(Response::builder().status(200).body("".into()).unwrap())
 }
 
-pub fn router(state: State) -> Router<Body, routerify_json_response::Error> {
+pub fn router(state: State<'static>) -> Router<Body, routerify_json_response::Error> {
+    //let x = Arc::new(std::sync::Mutex::new(state));
+    //let x = Arc::new(Rc::new(Arc::new(std::sync::Mutex::new(RefCell::new(state)))));
+    //std::mem::transmute::<R<'b>, R<'static>>(r)
     Router::builder()
         // Attach the handlers.
         .data(Arc::new(state))

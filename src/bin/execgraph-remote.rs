@@ -1,18 +1,16 @@
 extern crate reqwest;
 use anyhow::Result;
-use log::{debug, warn};
-use hyper::StatusCode;
-use execgraph::httpinterface::*;
-use std::time::Duration;
 use async_channel::bounded;
+use execgraph::httpinterface::*;
+use gethostname::gethostname;
+use hyper::StatusCode;
+use log::{debug, warn};
+use serde::Deserialize;
+use std::{os::unix::process::ExitStatusExt, time::Duration};
+use structopt::StructOpt;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
-use serde::Deserialize;
-use std::os::unix::process::ExitStatusExt;
 use whoami::username;
-use gethostname::gethostname;
-use structopt::StructOpt;
-
 
 #[tokio::main]
 async fn main() -> Result<(), RemoteError> {
@@ -20,8 +18,14 @@ async fn main() -> Result<(), RemoteError> {
 
     let opt = Opt::from_args();
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("X-EXECGRAPH-USERNAME", reqwest::header::HeaderValue::from_str(&username()).unwrap());
-    headers.insert("X-EXECGRAPH-HOSTNAME", reqwest::header::HeaderValue::from_str(&gethostname().to_string_lossy()).unwrap());
+    headers.insert(
+        "X-EXECGRAPH-USERNAME",
+        reqwest::header::HeaderValue::from_str(&username()).unwrap(),
+    );
+    headers.insert(
+        "X-EXECGRAPH-HOSTNAME",
+        reqwest::header::HeaderValue::from_str(&gethostname().to_string_lossy()).unwrap(),
+    );
     let start = std::time::Instant::now();
 
     let client = reqwest::Client::builder()
@@ -30,36 +34,38 @@ async fn main() -> Result<(), RemoteError> {
         .build()?;
     let base = reqwest::Url::parse(&opt.url)?;
 
-    let still_accepting_tasks = || {
-        match opt.max_time_accepting_tasks {
-            None => true,
-            Some(t) => (std::time::Instant::now() - start) < t
-        }
+    let still_accepting_tasks = || match opt.max_time_accepting_tasks {
+        None => true,
+        Some(t) => (std::time::Instant::now() - start) < t,
     };
 
     while still_accepting_tasks() {
         match run_command(&base, &client, &opt.queue).await {
-            Err(RemoteError::Connection(e))  => {
+            Err(RemoteError::Connection(e)) => {
                 // break with no error message
                 debug!("{:#?}", e);
                 break;
             }
-            result => {result?},
+            result => result?,
         };
     }
 
     Ok(())
 }
 
-async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Option<String>) -> Result<(), RemoteError> {
+async fn run_command(
+    base: &reqwest::Url,
+    client: &reqwest::Client,
+    queue: &Option<String>,
+) -> Result<(), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
     let end_route = base.join("end")?;
 
     let start = client
-        .get( start_route)
-        .json(&StartRequest{
+        .get(start_route)
+        .json(&StartRequest {
             queuename: queue.clone(),
         })
         .send()
@@ -85,7 +91,8 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
     // a channel
     let client1 = client.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + ping_interval, ping_interval);
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + ping_interval, ping_interval);
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -188,7 +195,6 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
         .id()
         .expect("hasn't been polled yet, so this id should exist");
 
-
     // Tell the server that we've started the command
     tokio::select! {
         value = client.post(begun_route)
@@ -222,7 +228,6 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
         }
     };
 
-
     // let foo = client.post(base.join("status")?).send().await?.text().await?;
     // println!("{}", foo);
 
@@ -246,7 +251,6 @@ async fn run_command(base: &reqwest::Url, client: &reqwest::Client, queue: &Opti
     Ok(())
 }
 
-
 #[derive(Debug, StructOpt)]
 #[structopt(name = "execgraph-remote")]
 struct Opt {
@@ -259,16 +263,15 @@ struct Opt {
 
     /// Stop accepting new tasks after this amount of time, in seconds.
     #[structopt(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
-    max_time_accepting_tasks: Option<std::time::Duration>
+    max_time_accepting_tasks: Option<std::time::Duration>,
 }
 
 #[derive(Debug)]
 enum RemoteError {
     PingTimeout(String),
     Connection(reqwest::Error),
-    Parse(url::ParseError)
+    Parse(url::ParseError),
 }
-
 
 impl From<url::ParseError> for RemoteError {
     fn from(err: url::ParseError) -> RemoteError {
@@ -290,7 +293,6 @@ struct StartResponseFull {
     _code: u16,
     data: StartResponse,
 }
-
 
 fn parse_seconds(s: &str) -> Result<std::time::Duration> {
     let x = s.parse::<u64>()?;

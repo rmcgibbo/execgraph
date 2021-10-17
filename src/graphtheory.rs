@@ -50,23 +50,36 @@ pub fn descendants_at_distance<N, V>(
 /// for all v, w in V there is an edge (v, w) in E+ if and only if there
 /// is a non-null path from v to w in G.
 /// https://github.com/networkx/networkx/blob/cabf22e98d06d6c34ff88515f339b515695a7455/networkx/algorithms/dag.py#L581
-pub fn transitive_closure_dag<N: Clone + Default, V>(
-    graph: &DiGraph<N, V>,
-) -> Result<DiGraph<N, ()>> {
+pub fn transitive_closure_dag<N: Clone, V>(graph: &DiGraph<N, V>) -> Result<DiGraph<N, ()>> {
     let mut tc = graph.map(|_, w| w.clone(), |_, _| ());
     let toposort =
         toposort(&graph, None).map_err(|e| anyhow!("Graph contains a cycle: {:?}", e))?;
 
-    for &v in toposort.iter().rev() {
-        tc.extend_with_edges(descendants_at_distance(&tc, v, 2).iter().map(|&u| (v, u)));
+    for &u in toposort.iter().rev() {
+        for v in descendants_at_distance(&tc, u, 2) {
+            tc.add_edge(u, v, ());
+        }
     }
 
     Ok(tc)
 }
 
+pub fn blevel_dag<N, V>(graph: &DiGraph<N, V>) -> Result<Vec<u32>> {
+    let toposort =
+        toposort(&graph, None).map_err(|e| anyhow!("Graph contains a cycle: {:?}", e))?;
+
+    let mut blevel = vec![0u32; graph.node_count()];
+    for &v in toposort.iter().rev() {
+        let downstream = graph.neighbors_directed(v, petgraph::Direction::Outgoing);
+        blevel[v.index()] = downstream.map(|x| 1 + blevel[x.index()]).max().unwrap_or(0);
+    }
+
+    Ok(blevel)
+}
+
 #[cfg(test)]
 mod test {
-    use crate::graphtheory::transitive_closure_dag;
+    use crate::graphtheory::{blevel_dag, transitive_closure_dag};
     use petgraph::graph::DiGraph;
 
     fn sorted_tc_dag_edges<N: Copy + Default, E>(g: DiGraph<N, E>) -> Vec<(usize, usize)> {
@@ -94,5 +107,26 @@ mod test {
         g.extend_with_edges(&[(0, 1), (1, 2), (1, 3)]);
         let tc = sorted_tc_dag_edges(g);
         assert_eq!(tc, vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3)]);
+    }
+
+    #[test]
+    fn test_blevel_dag_1() {
+        let mut g: DiGraph<i32, ()> = DiGraph::new();
+        g.extend_with_edges(&[(0, 1), (1, 2), (2, 3)]);
+        assert_eq!(blevel_dag(&g).unwrap(), [3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn test_blevel_dag_2() {
+        let mut g: DiGraph<i32, ()> = DiGraph::new();
+        g.extend_with_edges(&[(0, 1), (1, 2), (2, 3), (2, 4)]);
+        assert_eq!(blevel_dag(&g).unwrap(), [3, 2, 1, 0, 0]);
+    }
+
+    #[test]
+    fn test_blevel_dag_3() {
+        let mut g: DiGraph<i32, ()> = DiGraph::new();
+        g.extend_with_edges(&[(0, 1), (1, 2), (2, 3), (2, 4), (0, 4)]);
+        assert_eq!(blevel_dag(&g).unwrap(), [3, 2, 1, 0, 0]);
     }
 }

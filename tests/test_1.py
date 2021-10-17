@@ -62,10 +62,11 @@ def test_1(num_parallel, tmp_path):
         # these are dependencies that are supposed to be completed
         # before we run u
         dependencies = [v for (_u, v) in g.edges(u)]
-        eg.add_task(["true"], "", dependencies)
+        eg.add_task(["true"], f"{u}", dependencies)
 
     failed, execution_order = eg.execute()
     assert failed == 0
+    execution_order = [int(x) for x in execution_order]
 
     # verify that the dependencies were executed before
     for edge in g.edges:
@@ -83,11 +84,12 @@ def test_2(seed, tmp_path):
         # these are dependencies that are supposed to be completed
         # before we run u
         dependencies = [v for (_u, v) in g.edges(u)]
-        eg.add_task([], "", dependencies)
+        eg.add_task([], f"{u}", dependencies)
 
     failed, execution_order = eg.execute()
     assert len(execution_order) == g.number_of_nodes()
     assert failed == 0
+    execution_order = [int(x) for x in execution_order]
 
     # Verify that the execution actually happened in topological order
     for edge in g.edges:
@@ -104,24 +106,24 @@ def test_3(num_parallel, tmp_path):
 
 def test_4(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
-    eg.add_task(["false"], "")
-    eg.add_task(["true"], "", [0])
+    eg.add_task(["false"], "0")
+    eg.add_task(["true"], "1", [0])
     nfailed, order = eg.execute()
-    assert nfailed == 1 and order == [0]
+    assert nfailed == 1 and order == ["0"]
 
 
 def test_5(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, str(tmp_path / "foo"))
 
-    eg.add_task(["true"], "", [])
+    eg.add_task(["true"], "0", [])
     for i in range(1, 10):
-        eg.add_task(["true"], "", [i - 1])
-    q = eg.add_task(["false"], "", [i])
+        eg.add_task(["true"], f"{i}", [i - 1])
+    q = eg.add_task(["false"], "10", [i])
     for i in range(20):
-        eg.add_task(["true"], "", [q])
+        eg.add_task(["true"], f"set2:{i}", [q])
 
     nfailed, order = eg.execute()
-    assert nfailed == 1 and order == list(range(11))
+    assert nfailed == 1 and order == [str(x) for x in range(11)]
 
 
 def test_help():
@@ -184,7 +186,7 @@ def test_order(num_parallel, tmp_path):
     id11 = eg.add_task(["true"], key="foo")
     a, b = eg.execute(id11)
     assert a == 0
-    assert b == [id11]
+    assert b == ["foo"]
 
 
 def test_not_execute_twice(num_parallel, tmp_path):
@@ -194,7 +196,7 @@ def test_not_execute_twice(num_parallel, tmp_path):
     eg.add_task(["false"], key="task1", dependencies=[0])
 
     nfailed1, order1 = eg.execute()
-    assert nfailed1 == 1 and order1 == [0, 1]
+    assert nfailed1 == 1 and order1 == ["task0", "task1"]
     nfailed2, order2 = eg.execute()
     assert nfailed2 == 0 and order2 == []
 
@@ -476,9 +478,7 @@ def test_stdout(tmp_path):
 def test_preamble(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=str(tmp_path / "foo"))
     eg.add_task(["true"], key="1", preamble=_execgraph.test_make_capsule())
-    print("foo")
     eg.execute()
-    print("bar")
 
 
 def test_hang(tmp_path):
@@ -610,3 +610,41 @@ def test_runcount_1(tmp_path):
     assert eg.logfile_runcount("sh-u6hkf6jsroavonqsinwdjenc") == 1
     assert eg.logfile_runcount("touch-jor4z3j4ekp33eha6ctgfnlb") == 0
     assert eg.logfile_runcount("sh-7g6fppsy2ddtn6j44wb4ihvl") == 1
+
+
+def test_priority(tmp_path):
+    def single_source_longest_dag_path_length(graph, s):
+        assert(graph.in_degree(s) == 0)
+        dist = dict.fromkeys(graph.nodes, -float('inf'))
+        dist[s] = 0
+        topo_order = nx.topological_sort(graph)
+        for n in topo_order:
+            for s in graph.successors(n):
+                if dist[s] < dist[n] + graph.edges[n,s]['weight']:
+                    dist[s] = dist[n] + graph.edges[n,s]['weight']
+        return dist
+
+    def is_sorted(x):
+        return sorted(x, reverse=True) == x
+
+    g = nx.DiGraph()
+    eg = _execgraph.ExecGraph(1, logfile=str(tmp_path / "foo"))
+    for i in range(10):
+        key = f"{i}-0"
+        id = eg.add_task(["true"], key)
+        g.add_node(key)
+        for j in range(1, i+1):
+            newkey = f"{i}-{j}"
+            id = eg.add_task(["true"], newkey, dependencies=[id])
+            g.add_edge(key, newkey, weight=1)
+            key = newkey
+
+
+    keys = [eg.get_task(i)[1] for i in range(id+1)]
+    # print(keys)
+    g.add_edges_from([(k, "collector", {"weight": 1}) for k in keys])
+
+    lengths = (single_source_longest_dag_path_length(g.reverse(), "collector"))
+    nfailed, order = eg.execute()
+
+    assert is_sorted([lengths[key] for key in order])

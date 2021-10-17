@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "^1.0"
 async-channel = "1.6.1"
+async-priority-channel = { git = "https://github.com/rmcgibbo/async-priority-channel" }
 bytelines = "2.2"
 derivative = "2.2.0"
 env_logger = "*"
@@ -38,6 +39,7 @@ tokio-util = {version = "0.6.7"}
 structopt = { version = "0.3", default-features = false }
 url = "*"
 whoami = "*"
+
 
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror

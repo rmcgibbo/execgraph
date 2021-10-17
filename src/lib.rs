@@ -9,7 +9,7 @@ use std::{ffi::OsString, io::BufRead};
 use pyo3::{
     exceptions::{PyIndexError, PyRuntimeError, PyValueError},
     prelude::*,
-    types::{PyTuple},
+    types::PyTuple,
 };
 use std::{convert::TryInto, io::Write};
 use tokio::runtime::Runtime;
@@ -89,7 +89,7 @@ impl PyExecGraph {
                     .lines()
                     .next()
                     .ok_or_else(|| PyValueError::new_err("Unable to read file"))??;
-                let parts: Vec<&str> = line.split(" ").collect();
+                let parts: Vec<&str> = line.split(' ').collect();
                 if !(parts.len() == 3
                     && parts[0] == "wrk"
                     && parts[1] == "v=2"
@@ -226,6 +226,7 @@ impl PyExecGraph {
             queuename,
             stdin,
             runcount: runcount.try_into().unwrap(),
+            priority: 0,
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
         };
@@ -279,7 +280,7 @@ impl PyExecGraph {
         target: Option<u32>,
         remote_provisioner: Option<String>,
         remote_provisioner_arg2: Option<String>,
-    ) -> PyResult<(u32, Vec<u32>)> {
+    ) -> PyResult<(u32, Vec<String>)> {
         // Create a new process group so that at shutdown time, we can send a
         // SIGTERM to this process group annd kill of all child processes.
         nix::unistd::setpgid(nix::unistd::Pid::this(), nix::unistd::Pid::this())
@@ -303,19 +304,22 @@ impl PyExecGraph {
     }
 }
 
-const CAPSULE_NAME: &'static [u8] = b"Execgraph::Capsule\0";
+const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
 
 extern "C" fn test_callback(_ctx: *const std::ffi::c_void) -> i32 {
     println!("Hello from test_callback");
-    return 0;
+    0
 }
 
 #[pyfunction]
-fn test_make_capsule<'a>(py: Python<'a>) -> PyResult<PyObject> {
+fn test_make_capsule(py: Python) -> PyResult<PyObject> {
     let obj = unsafe {
-        let name: *const std::os::raw::c_char = std::mem::transmute(CAPSULE_NAME.as_ptr());
-        let capsule =
-            pyo3::ffi::PyCapsule_New(std::mem::transmute(test_callback as *const ()), name, None);
+        let name: *const std::os::raw::c_char = CAPSULE_NAME.as_ptr() as *const i8;
+        let capsule = pyo3::ffi::PyCapsule_New(
+            test_callback as *const () as *mut std::ffi::c_void,
+            name,
+            None,
+        );
         PyObject::from_owned_ptr(py, capsule)
     };
 

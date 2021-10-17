@@ -36,7 +36,7 @@ impl LogfileSnapshot {
             .skip(N_HEADER_LINES)
             .filter_map(|x| x.ok())
         {
-            if line.len() == 0 {
+            if line.is_empty() {
                 continue;
             }
 
@@ -59,12 +59,9 @@ impl LogfileSnapshot {
                 _ => {
                     let start = startlines
                         .remove(&key)
-                        .ok_or(anyhow!("Missing start record"))?;
+                        .ok_or_else(|| anyhow!("Missing start record"))?;
 
-                    runcounts.insert(
-                        key.to_owned(),
-                        runcount - ((exit_status == 0) as i32),
-                    );
+                    runcounts.insert(key.to_owned(), runcount - ((exit_status == 0) as i32));
 
                     last_record.insert(
                         key,
@@ -123,10 +120,10 @@ pub fn copy_reused_keys(filename: &str, old_keys: &HashMap<String, Arc<Record>>)
     let f = std::fs::OpenOptions::new().append(true).open(filename)?;
     let mut f = std::io::BufWriter::new(f);
     for v in old_keys.values() {
-        f.write(&v.startline)?;
-        f.write(b"\n")?;
-        f.write(&v.endline)?;
-        f.write(b"\n")?;
+        f.write_all(&v.startline)?;
+        f.write_all(b"\n")?;
+        f.write_all(&v.endline)?;
+        f.write_all(b"\n")?;
     }
     f.flush()?;
     Ok(())
