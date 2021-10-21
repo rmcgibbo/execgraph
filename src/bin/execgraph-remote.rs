@@ -20,11 +20,21 @@ async fn main() -> Result<(), RemoteError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "X-EXECGRAPH-USERNAME",
-        reqwest::header::HeaderValue::from_str(&username()).unwrap(),
+        reqwest::header::HeaderValue::from_bytes(&username().as_bytes())?,
     );
     headers.insert(
         "X-EXECGRAPH-HOSTNAME",
-        reqwest::header::HeaderValue::from_str(&gethostname().to_string_lossy()).unwrap(),
+        reqwest::header::HeaderValue::from_bytes(
+            &gethostname()
+                .to_str()
+                .ok_or_else(|| {
+                    RemoteError::InvalidHostname(format!(
+                        "hostname is not unicode-representable: {}",
+                        gethostname().to_string_lossy()
+                    ))
+                })?
+                .as_bytes(),
+        )?,
     );
     let start = std::time::Instant::now();
 
@@ -85,7 +95,10 @@ async fn run_command(
     let (pongs_tx, pongs_rx) = bounded::<()>(1);
     // send a pong right at the beginning, because we just received a server message
     // from start(), so that's pretty good
-    pongs_tx.send(()).await.unwrap();
+    pongs_tx
+        .send(())
+        .await
+        .expect("This send cannot fail because the channel was just created");
 
     // Start a background task tha pings the server and puts the pongs into
     // a channel
@@ -187,8 +200,14 @@ async fn run_command(
         }
     };
 
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(&start.data.stdin).await.unwrap();
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("Failed to extract stdin from subprocess");
+    stdin
+        .write_all(&start.data.stdin)
+        .await
+        .expect("Unable to write to stdin of subprocess");
     drop(stdin);
 
     let pid = child
@@ -271,6 +290,8 @@ enum RemoteError {
     PingTimeout(String),
     Connection(reqwest::Error),
     Parse(url::ParseError),
+    InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
+    InvalidHostname(String),
 }
 
 impl From<url::ParseError> for RemoteError {
@@ -282,6 +303,12 @@ impl From<url::ParseError> for RemoteError {
 impl From<reqwest::Error> for RemoteError {
     fn from(err: reqwest::Error) -> RemoteError {
         RemoteError::Connection(err)
+    }
+}
+
+impl From<reqwest::header::InvalidHeaderValue> for RemoteError {
+    fn from(err: reqwest::header::InvalidHeaderValue) -> RemoteError {
+        RemoteError::InvalidHeaderValue(err)
     }
 }
 

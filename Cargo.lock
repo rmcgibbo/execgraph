@@ -178,6 +178,7 @@ dependencies = [
  "gethostname",
  "getrandom",
  "hyper",
+ "lazy_static",
  "libc",
  "log",
  "nix",

@@ -57,9 +57,10 @@ impl Capsule {
 
     fn call(&self) -> Result<i32> {
         const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
+        let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
+
         unsafe {
             let pyobj = self.capsule.as_ptr();
-            let capsule_name_ptr: *const std::os::raw::c_char = CAPSULE_NAME.as_ptr() as *const i8;
             if (pyo3::ffi::PyCapsule_CheckExact(pyobj) > 0)
                 && (pyo3::ffi::PyCapsule_IsValid(pyobj, capsule_name_ptr) > 0)
             {
@@ -85,7 +86,7 @@ impl Cmd {
             None => self
                 .cmdline
                 .iter()
-                .map(|x| x.clone().into_string().unwrap())
+                .map(|x| x.clone().into_string().expect("cmdline must be utf-8"))
                 .collect::<Vec<String>>()
                 .join(" ")
                 .replace("\\\n", " ")
@@ -155,8 +156,7 @@ impl ExecGraph {
             .runcounts
             .get(key)
             .map(|x| x + 1)
-            .or(Some(0))
-            .unwrap()
+            .unwrap_or(0)
     }
 
     pub fn ntasks(&self) -> usize {
@@ -250,7 +250,9 @@ impl ExecGraph {
                 if has_success {
                     reused_old_keys.insert(
                         w.key.clone(),
-                        self.logfile_snapshot.get_record(&w.key).unwrap(),
+                        self.logfile_snapshot.get_record(&w.key).expect(
+                            "Key must be present because we just checked for it two lines above",
+                        ),
                     );
                     return None;
                 }
@@ -275,7 +277,9 @@ impl ExecGraph {
                     if failures.contains(&n) {
                         reused_old_keys.insert(
                             w.key.clone(),
-                            self.logfile_snapshot.get_record(&w.key).unwrap(),
+                            self.logfile_snapshot.get_record(&w.key).expect(
+                                "key must be present because of how the `failures` set was built",
+                            ),
                         );
                         return None;
                     }
@@ -365,7 +369,7 @@ impl ExecGraph {
                 tokio::spawn(async move {
                     let state = ServerState::new(subgraph, tasks_ready, status_updater);
                     let router = router(state);
-                    let service = RouterService::new(router).unwrap();
+                    let service = RouterService::new(router).expect("Failed to constuct Router");
                     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                     let server = Server::bind(&addr).serve(service);
                     let bound_addr = server.local_addr();
@@ -378,9 +382,8 @@ impl ExecGraph {
                             spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2)
                                 .await
                         {
-                            log::error!("{}", e)
+                            log::error!("Provisioner failed: {}", e);
                         }
-
                         token3.cancel();
                         provisioner_exited_tx
                             .send(())
@@ -403,10 +406,10 @@ impl ExecGraph {
         servicer
             .background_serve(&logfile, token.clone())
             .await
-            .unwrap();
+            .expect("background_serve failed");
         token.cancel();
         join_all(handles).await;
-        servicer.drain(&logfile).unwrap();
+        servicer.drain(&logfile).expect("failed to drain queue");
 
         provisioner_exited_rx
             .await
@@ -478,13 +481,16 @@ async fn run_local_process_loop(
                 }
             };
 
-            let mut stdin = child.stdin.take().unwrap();
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("failed to extract stdin from child process"))?;
             stdin.write_all(&cmd.stdin).await?;
             drop(stdin);
 
-            let pid = child
-                .id()
-                .expect("hasn't been polled yet, so this id should exist");
+            let pid = child.id().ok_or_else(|| {
+                anyhow!("child hasn't been waited for yet, so its pid should exist")
+            })?;
             let hostpid = format!("{}:{}", hostname, pid);
             status_updater
                 .send_started(subgraph_node_id, &cmd, &hostpid)
@@ -528,7 +534,10 @@ async fn spawn_and_wait_for_provisioner(
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .spawn()?;
-    let mut child_stdin = child.stdin.take().unwrap();
+    let mut child_stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to take stdin from child process"))?;
 
     let arg2_string = arg2.unwrap_or_else(|| "".to_owned());
     let arg2_bytes = arg2_string.as_bytes();
