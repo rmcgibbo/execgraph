@@ -30,7 +30,6 @@
           clippy
           maturin
           cargo-udeps
-          cargo-readme
           cargo-tarpaulin
 
           rustfmt
