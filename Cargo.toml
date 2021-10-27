@@ -27,7 +27,6 @@ nix = "^0.22"
 num_cpus = "*"
 petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}
 pyo3 = "^0.14"
-pyo3-log = "*"
 regex = "*"
 reqwest = { version = "0.11", features = ["json"],  default-features = false }
 routerify = "*"
@@ -41,6 +40,10 @@ structopt = { version = "0.3", default-features = false }
 url = "*"
 whoami = "*"
 
+[profile.release]
+debug = 1
+incremental = true
+lto = "off"
 
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror

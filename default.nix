@@ -45,6 +45,10 @@ in buildPythonPackage rec {
     maturinBuildHook
   ];
 
+  RUST_BACKTRACE = "full";
+  CARGO_INCREMENTAL = "0";
+  CARGO_PROFILE_RELEASE_LTO = "thin";
+
   preBuild = ''
     cargo build -j $NIX_BUILD_CORES \
       --frozen \

@@ -1,6 +1,6 @@
 {
   description = "Parallel execution of shell commands with DAG dependencies";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-21.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.py-utils.url = "github:rmcgibbo/python-flake-utils";
   inputs.utils.url = "github:numtide/flake-utils";
 
@@ -29,6 +29,9 @@
           rustc
           clippy
           maturin
+          cargo-udeps
+          cargo-readme
+          cargo-tarpaulin
 
           rustfmt
           black
