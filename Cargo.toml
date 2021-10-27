@@ -9,41 +9,41 @@ resolver = "2"
 name = "execgraph"
 crate-type = ["cdylib", "rlib"]
 
-[dependencies]
-anyhow = "^1.0"
-async-channel = "1.6.1"
-async-priority-channel = { git = "https://github.com/rmcgibbo/async-priority-channel" }
-bytelines = "2.2"
-derivative = "2.2.0"
-env_logger = "*"
-futures = "*"
-getrandom = "0.2"
-gethostname = "*"
-hyper = "*"
-lazy_static = "*"
-libc = "*"
-log = "*"
-nix = "^0.22"
-num_cpus = "*"
-petgraph = {version = "^0.6", features = ["graphmap"], default-features = false}
-pyo3 = "^0.14"
-regex = "*"
-reqwest = { version = "0.11", features = ["json"],  default-features = false }
-routerify = "*"
-routerify-json-response = "2"
-serde = {version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-# drop_guard is not yet in the released version of tokio-util (need version after 0.6.7)
-tokio = {version = "^1", features=["full"]}
-tokio-util = {version = "0.6.7"}
-structopt = { version = "0.3", default-features = false }
-url = "*"
-whoami = "*"
-
 [profile.release]
 debug = 1
 incremental = true
 lto = "off"
+
+[dependencies]
+advisory-lock = "^0.3"
+anyhow = "^1.0"
+async-channel = "1.6.1"
+async-priority-channel = "0.1"
+bincode = "^1"
+crc32fast = "^1"
+derivative = "2.2.0"
+env_logger = "^0.9"
+futures = "^0.3"
+gethostname = "^0.2"
+hyper = "^0.14"
+log = "^0.4"
+nix = "^0.22"
+num_cpus = "^1"
+petgraph = { version = "^0.6", features = ["graphmap"], default-features = false }
+pyo3 = "^0.14"
+pythonize = "^0.14"
+rand = "^0.8"
+reqwest = { version = "0.11", features = ["json"],  default-features = false }
+routerify = "^2"
+routerify-json-response = "^2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "^1", features = ["full"] }
+tokio-util = {version = "0.6.8"}
+structopt = { version = "0.3", default-features = false }
+thiserror = "^1"
+url = "^2"
+whoami = "^1"
 
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror

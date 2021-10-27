@@ -1,3 +1,5 @@
+#![cfg(feature = "extension-module")]
+
 extern crate reqwest;
 use anyhow::Result;
 use async_channel::bounded;
@@ -20,12 +22,12 @@ async fn main() -> Result<(), RemoteError> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "X-EXECGRAPH-USERNAME",
-        reqwest::header::HeaderValue::from_bytes(&username().as_bytes())?,
+        reqwest::header::HeaderValue::from_bytes(username().as_bytes())?,
     );
     headers.insert(
         "X-EXECGRAPH-HOSTNAME",
         reqwest::header::HeaderValue::from_bytes(
-            &gethostname()
+            gethostname()
                 .to_str()
                 .ok_or_else(|| {
                     RemoteError::InvalidHostname(format!(
@@ -169,7 +171,8 @@ async fn run_command(
                 value = client.post(begun_route)
                 .json(&BegunRequest{
                     transaction_id,
-                    hostpid: format!("{}:{}", gethostname().to_string_lossy(), -1),
+                    host: gethostname().to_string_lossy().to_string(),
+                    pid: 0,
                 })
                 .send() => {
                     value?.error_for_status()?;
@@ -219,7 +222,8 @@ async fn run_command(
         value = client.post(begun_route)
         .json(&BegunRequest{
             transaction_id,
-            hostpid: format!("{}:{}", gethostname().to_string_lossy(), pid),
+            host: gethostname().to_string_lossy().to_string(),
+            pid,
         })
         .send() => {
             value?.error_for_status()?;

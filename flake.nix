@@ -36,6 +36,13 @@
           black
           isort
           mypy
+
+          # for py.test
+          pytest
+          networkx
+          numpy
+          scipy
+          curl
         ];
       };
     });

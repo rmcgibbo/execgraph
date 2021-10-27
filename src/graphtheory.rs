@@ -89,7 +89,7 @@ mod test {
             .iter()
             .map(|e| (e.source().index(), e.target().index()))
             .collect::<Vec<(usize, usize)>>();
-        tc.sort();
+        tc.sort_unstable();
         tc
     }
 

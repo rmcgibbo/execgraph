@@ -1,5 +1,6 @@
-use crate::{execgraph::Cmd, logfile::LogWriter};
+use crate::{execgraph::Cmd, logfile2};
 use anyhow::Result;
+use logfile2::{LogEntry, LogFile};
 use petgraph::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -35,6 +36,7 @@ pub struct ReadyTracker<'a> {
     pub n_failed: u32,
 
     g: Arc<Graph<&'a Cmd, (), Directed>>,
+    logfile: &'a mut LogFile,
     ready: Option<HashMap<Queuename, async_priority_channel::Sender<NodeIndex, u32>>>,
     completed: async_channel::Receiver<CompletedEvent>,
     n_success: u32,
@@ -42,7 +44,7 @@ pub struct ReadyTracker<'a> {
     count_offset: u32,
     failures_allowed: u32,
     queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
-    inflight: HashSet<(NodeIndex, String)>, // NodeIndex for cmd and HostPid
+    inflight: HashSet<NodeIndex>,
 }
 
 #[derive(Clone)]
@@ -60,10 +62,11 @@ struct TaskStatus {
 impl<'a> ReadyTracker<'a> {
     pub fn new(
         g: Arc<DiGraph<&'a Cmd, ()>>,
+        logfile: &'a mut LogFile,
         count_offset: u32,
         failures_allowed: u32,
     ) -> (
-        ReadyTracker,
+        ReadyTracker<'a>,
         HashMap<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>,
         StatusUpdater,
     ) {
@@ -114,6 +117,7 @@ impl<'a> ReadyTracker<'a> {
                 failures_allowed,
                 queuestate: queuestate.clone(),
                 inflight: HashSet::new(),
+                logfile,
             },
             ready_r,
             StatusUpdater {
@@ -122,27 +126,20 @@ impl<'a> ReadyTracker<'a> {
             },
         )
     }
-    pub fn drain(&mut self, logfile: &str) -> Result<()> {
-        let mut writer = LogWriter::new(logfile)?;
+    pub fn drain(&mut self) -> Result<()> {
         loop {
             match self.completed.try_recv() {
                 Ok(CompletedEvent::Started(e)) => {
                     let cmd = self.g[e.id];
-                    writer.begin_command(&cmd.display(), &cmd.key, cmd.runcount, &e.hostpid)?;
-                    assert!(self.inflight.insert((e.id, e.hostpid)));
+                    self.logfile
+                        .write(LogEntry::new_started(&cmd.key, "host", 0))?;
+                    assert!(self.inflight.insert(e.id));
                 }
                 Ok(CompletedEvent::Finished(e)) => {
                     let cmd = self.g[e.id];
-                    writer
-                        .end_command(
-                            &cmd.display(),
-                            &cmd.key,
-                            cmd.runcount,
-                            e.exit_status,
-                            &e.hostpid,
-                        )
-                        .unwrap();
-                    assert!(self.inflight.remove(&(e.id, e.hostpid)));
+                    self.logfile
+                        .write(LogEntry::new_finished(&cmd.key, e.status))?;
+                    assert!(self.inflight.remove(&e.id));
                 }
                 Err(_) => {
                     break;
@@ -150,29 +147,18 @@ impl<'a> ReadyTracker<'a> {
             }
         }
 
-        for (k, hostpid) in self.inflight.iter() {
+        for k in self.inflight.iter() {
             let timeout_status = 130;
             let cmd = self.g[*k];
-            writer
-                .end_command(
-                    &cmd.display(),
-                    &cmd.key,
-                    cmd.runcount,
-                    timeout_status,
-                    hostpid,
-                )
-                .unwrap();
+            self.logfile
+                .write(LogEntry::new_finished(&cmd.key, timeout_status))?;
         }
         self.inflight.clear();
 
         Ok(())
     }
 
-    pub async fn background_serve(
-        &mut self,
-        logfile: &str,
-        token: CancellationToken,
-    ) -> Result<()> {
+    pub async fn background_serve(&mut self, token: CancellationToken) -> Result<()> {
         // for each task, how many unmet first-order dependencies does it have?
         let mut statuses: HashMap<NodeIndex, TaskStatus> = self
             .g
@@ -208,22 +194,28 @@ impl<'a> ReadyTracker<'a> {
         // or inside other stages of processing, because there are going to be
         // accounting bugs that way.
 
-        let mut writer = LogWriter::new(logfile)?;
         loop {
             tokio::select! {
                 event = self.completed.recv() => {
-                    match event.unwrap() {
+                    match event.expect("No event received?") {
                         CompletedEvent::Started(e) => {
                             let cmd = self.g[e.id];
-                            writer.begin_command(&cmd.display(), &cmd.key, cmd.runcount, &e.hostpid)?;
-                            assert!(self.inflight.insert((e.id, e.hostpid)));
+                            self.logfile.write(LogEntry::new_started(
+                                &cmd.key,
+                                &e.host,
+                                e.pid,
+                            ))?;
+                            assert!(self.inflight.insert(e.id));
                         }
                         CompletedEvent::Finished(e) => {
                             let cmd = self.g[e.id];
                             self.finished_order.push(e.id);
-                            writer.end_command(&cmd.display(), &cmd.key, cmd.runcount, e.exit_status, &e.hostpid)?;
+                            self.logfile.write(LogEntry::new_finished(
+                                &cmd.key,
+                                e.status,
+                            ))?;
                             self._finished_bookkeeping(&mut statuses, &e).await?;
-                            assert!(self.inflight.remove(&(e.id, e.hostpid)));
+                            assert!(self.inflight.remove(&e.id));
 
                             if self.n_failed >= self.failures_allowed || self.n_pending == 0 {
                                 // drop the send side of the channel. this will cause the receive side
@@ -254,15 +246,15 @@ impl<'a> ReadyTracker<'a> {
         statuses: &mut HashMap<NodeIndex, TaskStatus>,
         e: &FinishedEvent,
     ) -> Result<()> {
-        let is_success = e.exit_status == 0;
+        let is_success = e.status == 0;
         let total = statuses.len() as u32;
         let cmd = self.g[e.id];
 
         self.queuestate
             .lock()
-            .unwrap()
-            .get_mut(&statuses.get(&e.id).unwrap().queuename)
-            .unwrap()
+            .expect("Something must have panicked while holding this lock?")
+            .get_mut(&statuses.get(&e.id).expect("No such  task?").queuename)
+            .expect("No such queue")
             .n_pending -= 1;
         self.n_pending -= 1;
 
@@ -336,12 +328,18 @@ impl<'a> ReadyTracker<'a> {
         queuename: &Queuename,
         ready: Vec<(NodeIndex, u32)>,
     ) -> Result<()> {
-        let mut queuestate_lock = self.queuestate.lock().unwrap();
+        let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
         let queuestate = queuestate_lock
             .get_mut(queuename)
             .expect("No such Queuename");
         queuestate.n_pending = u32checked_add!(queuestate.n_pending, ready.len());
         self.n_pending = u32checked_add!(self.n_pending, ready.len());
+
+        for (index, _) in ready.iter() {
+            let cmd = self.g[*index];
+            self.logfile
+                .write(LogEntry::new_ready(&cmd.key, cmd.runcount, &cmd.display()))?;
+        }
 
         self.ready
             .as_mut()
@@ -357,13 +355,14 @@ impl<'a> ReadyTracker<'a> {
 
 impl StatusUpdater {
     /// When a task is started, notify the tracker by calling this.
-    pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, hostpid: &str) {
+    pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, host: &str, pid: u32) {
         cmd.call_preamble();
         let r = self
             .s
             .send(CompletedEvent::Started(StartedEvent {
                 id: v,
-                hostpid: hostpid.to_string(),
+                host: host.to_string(),
+                pid,
             }))
             .await;
         if r.is_err() {
@@ -376,7 +375,6 @@ impl StatusUpdater {
         &self,
         v: NodeIndex,
         cmd: &Cmd,
-        hostpid: &str,
         status: i32,
         stdout: String,
         stderr: String,
@@ -386,8 +384,7 @@ impl StatusUpdater {
             .s
             .send(CompletedEvent::Finished(FinishedEvent {
                 id: v,
-                hostpid: hostpid.to_string(),
-                exit_status: status,
+                status,
                 stdout,
                 stderr,
             }))
@@ -399,20 +396,23 @@ impl StatusUpdater {
 
     /// Retreive a snapshot of the state of the queue
     pub fn get_queuestate(&self) -> HashMap<Queuename, QueueSnapshot> {
-        self.queuestate.lock().unwrap().clone()
+        self.queuestate
+            .lock()
+            .expect("Something must have panicked while holding this lock")
+            .clone()
     }
 }
 
 #[derive(Debug)]
 struct StartedEvent {
     id: NodeIndex,
-    hostpid: String,
+    host: String,
+    pid: u32,
 }
 #[derive(Debug)]
 struct FinishedEvent {
     id: NodeIndex,
-    hostpid: String,
-    exit_status: i32,
+    status: i32,
     stdout: String,
     stderr: String,
 }

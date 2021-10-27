@@ -16,18 +16,11 @@ type RouteError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 static PING_INTERVAL_MSECS: u64 = 15_000;
 
-pub fn get_random_u32() -> u32 {
-    let mut buf = [0u8; 4];
-    getrandom::getrandom(&mut buf).expect("getrandom() failed.");
-    u32::from_be_bytes(buf)
-}
-
 struct ConnectionState {
     pings: async_channel::Sender<()>,
     cancel: CancellationToken,
     cmd: Cmd,
     node_id: NodeIndex,
-    hostpid: Option<String>,
 }
 
 pub struct State<'a> {
@@ -118,7 +111,7 @@ async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T, Jso
     let bytes = hyper::body::to_bytes(req.into_body())
         .await
         .map_err(|e| -> JsonResponseErr { e.into() })?;
-    serde_json::from_slice(&bytes.to_vec().as_slice()).map_err(|e| e.into())
+    serde_json::from_slice(bytes.to_vec().as_slice()).map_err(|e| e.into())
 }
 
 async fn middleware_after(
@@ -158,25 +151,16 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
     };
 
     let timeout_status = 130;
-
-    match cstate.hostpid.as_ref() {
-        Some(hostpid) => {
-            state
-                .status_updater
-                .send_finished(
-                    cstate.node_id,
-                    &cstate.cmd,
-                    hostpid,
-                    timeout_status,
-                    "".to_owned(),
-                    "".to_owned(),
-                )
-                .await;
-        }
-        None => {
-            log::warn!("Protocol out of order");
-        }
-    };
+    state
+        .status_updater
+        .send_finished(
+            cstate.node_id,
+            &cstate.cmd,
+            timeout_status,
+            "".to_owned(),
+            "".to_owned(),
+        )
+        .await;
 }
 
 // ------------------------------------------------------------------ //
@@ -264,7 +248,7 @@ async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> 
 async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
     let request = get_json_body::<StartRequest>(req).await?;
-    let transaction_id = get_random_u32();
+    let transaction_id = rand::random::<u32>();
     let channel = state.tasks_ready.get(&request.queuename).ok_or_else(|| {
         json_response_err(
             StatusCode::NOT_FOUND,
@@ -309,9 +293,7 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
     });
 
     let cmd = state.subgraph[node_id];
-
     cmd.call_preamble();
-
     {
         let mut lock = state.connections.lock().await;
         lock.insert(
@@ -321,7 +303,6 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
                 cancel: token,
                 cmd: cmd.clone(),
                 node_id,
-                hostpid: None,
             },
         );
     }
@@ -346,9 +327,9 @@ async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
             .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
         state
             .status_updater
-            .send_started(cstate.node_id, &cstate.cmd, &request.hostpid)
+            .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
             .await;
-        cstate.hostpid = Some(request.hostpid);
+        //cstate.hostpid = Some(request.hostpid);
     }
 
     Ok(Response::builder().status(200).body("".into()).unwrap())
@@ -368,15 +349,11 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
         cstate
     };
 
-    let hostpid = cstate.hostpid.as_ref().ok_or_else(|| {
-        json_response_err(StatusCode::UNPROCESSABLE_ENTITY, "Protocol out of order")
-    })?;
     state
         .status_updater
         .send_finished(
             cstate.node_id,
             &cstate.cmd,
-            hostpid,
             request.status,
             request.stdout,
             request.stderr,

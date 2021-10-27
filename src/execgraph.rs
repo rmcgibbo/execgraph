@@ -1,6 +1,6 @@
 use crate::{
     graphtheory::transitive_closure_dag,
-    logfile::LogfileSnapshot,
+    logfile2::{LogEntry, LogFile},
     server::{router, State as ServerState},
     sync::{ReadyTracker, StatusUpdater},
 };
@@ -132,31 +132,18 @@ impl Cmd {
 pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     key_to_nodeid: HashMap<String, NodeIndex<u32>>,
-    logfile: String,
-    logfile_snapshot: LogfileSnapshot,
+    pub logfile: LogFile,
     completed: HashSet<String>,
 }
 
 impl ExecGraph {
-    pub fn new(logfile: String) -> Result<ExecGraph> {
-        // Load prior the successful tasks from logfile.
-        let logfile_snapshot = LogfileSnapshot::new(&logfile)?;
-
-        Ok(ExecGraph {
+    pub fn new(logfile: LogFile) -> ExecGraph {
+        ExecGraph {
             deps: Graph::new(),
             key_to_nodeid: HashMap::new(),
             logfile,
-            logfile_snapshot,
             completed: HashSet::new(),
-        })
-    }
-
-    pub fn logfile_runcount(&self, key: &str) -> i32 {
-        self.logfile_snapshot
-            .runcounts
-            .get(key)
-            .map(|x| x + 1)
-            .unwrap_or(0)
+        }
     }
 
     pub fn ntasks(&self) -> usize {
@@ -196,121 +183,6 @@ impl ExecGraph {
         Ok(new_node.index() as u32)
     }
 
-    fn get_subgraph<'a, 'b: 'a>(
-        &'b mut self,
-        target: Option<u32>,
-        rerun_failures: bool,
-    ) -> Result<DiGraph<&'a Cmd, ()>> {
-        // Compute the priority and just mutate the graph. Ugly, but it
-        // keeps everything in the Cmd struct
-        let priority = crate::graphtheory::blevel_dag(&self.deps)?;
-        for (i, p) in priority.iter().enumerate() {
-            self.deps[NodeIndex::from(i as u32)].priority = *p;
-        }
-
-        // Get the subgraph containing all cmds in the transitive closure of target.
-        // these are all the commands we need to resolve first. if target is none, then
-        // just get the whole subraph (with an unnecessary copy unfortunately)
-        let subgraph = match target {
-            Some(target_index) => {
-                let mut reversed = self.deps.clone();
-                reversed.reverse();
-                let tc = transitive_closure_dag(&reversed)?;
-
-                let mut relevant = tc
-                    .edges_directed(NodeIndex::from(target_index), Direction::Outgoing)
-                    .map(|e| e.target())
-                    .collect::<HashSet<NodeIndex>>();
-                relevant.insert(NodeIndex::from(target_index));
-
-                self.deps.filter_map(
-                    |n, w| match relevant.contains(&n) {
-                        true => Some(w),
-                        false => None,
-                    },
-                    |_e, _w| Some(()),
-                )
-            }
-            None => self.deps.filter_map(|_n, w| Some(w), |_e, _w| Some(())),
-        };
-
-        let mut reused_old_keys = HashMap::new();
-
-        // Now let's remove all edges from the dependency graph if the source has already finished
-        // or if we've already exeuted the task in a previous call to execute
-        let mut filtered_subgraph = subgraph.filter_map(
-            |_n, &w| {
-                if self.completed.contains(&w.key) {
-                    // if we already ran this command within this process, don't record it
-                    // in reused_old_keys. that's only for stuff that was run in a previous
-                    // session
-                    return None; // returning none excludes it from filtered_subgraph
-                }
-                let has_success = self.logfile_snapshot.has_success(&w.key);
-                if has_success {
-                    reused_old_keys.insert(
-                        w.key.clone(),
-                        self.logfile_snapshot.get_record(&w.key).expect(
-                            "Key must be present because we just checked for it two lines above",
-                        ),
-                    );
-                    return None;
-                }
-
-                Some(w)
-            },
-            |_e, &w| Some(w),
-        );
-
-        if !rerun_failures {
-            let tc = transitive_closure_dag(&filtered_subgraph)?;
-            let failures = tc
-                .node_indices()
-                .filter(|&n| {
-                    let w = tc[n];
-                    self.logfile_snapshot.has_failure(&w.key)
-                })
-                .collect::<HashSet<NodeIndex>>();
-
-            filtered_subgraph = filtered_subgraph.filter_map(
-                |n, &w| {
-                    if failures.contains(&n) {
-                        reused_old_keys.insert(
-                            w.key.clone(),
-                            self.logfile_snapshot.get_record(&w.key).expect(
-                                "key must be present because of how the `failures` set was built",
-                            ),
-                        );
-                        return None;
-                    }
-                    for e in tc.edges_directed(n, Direction::Incoming) {
-                        if failures.contains(&e.source()) {
-                            return None;
-                        }
-                    }
-
-                    Some(w)
-                },
-                |_e, _w| Some(()),
-            );
-        }
-
-        // See test_copy_reused_keys_logfile.
-        // This is not elegant at all. The point is that when a job is run in one execgraph invocation and
-        // then requested in a new invocation but not rerun because we detected that it had already been
-        // run, we want to copy the entries in the logfile. this ensures that the last entries in the logfile
-        // since the final blank line describe the full set of jobs that the last invocation dependend on.
-        // this way, when reading the log file, it's possible to figure out what jobs are garbage and what
-        // jobs are still "in use".
-        crate::logfile::copy_reused_keys(&self.logfile, &reused_old_keys)?;
-        for key in reused_old_keys.keys() {
-            self.logfile_snapshot.remove(key);
-            self.completed.insert(key.to_owned());
-        }
-
-        Ok(filtered_subgraph)
-    }
-
     pub async fn execute(
         &mut self,
         target: Option<u32>,
@@ -326,16 +198,25 @@ impl ExecGraph {
             unsafe { std::mem::transmute::<_, Arc<DiGraph<&'static Cmd, ()>>>(g) }
         }
 
-        let logfile = self.logfile.clone();
         let count_offset = self.completed.len() as u32;
-        let subgraph = Arc::new(self.get_subgraph(target, rerun_failures)?);
+        let subgraph = Arc::new(get_subgraph(
+            &mut self.deps,
+            &mut self.completed,
+            &mut self.logfile,
+            target,
+            rerun_failures,
+        )?);
         if subgraph.raw_nodes().is_empty() {
             return Ok((0, vec![]));
         }
 
         let token = CancellationToken::new();
-        let (mut servicer, tasks_ready, status_updater) =
-            ReadyTracker::new(subgraph.clone(), count_offset, failures_allowed);
+        let (mut servicer, tasks_ready, status_updater) = ReadyTracker::new(
+            subgraph.clone(),
+            &mut self.logfile,
+            count_offset,
+            failures_allowed,
+        );
 
         // Run local processes
         let handles = (0..num_parallel)
@@ -404,12 +285,12 @@ impl ExecGraph {
         // run the background service that will send commands to the ready channel to be picked up by the
         // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
         servicer
-            .background_serve(&logfile, token.clone())
+            .background_serve(token.clone())
             .await
             .expect("background_serve failed");
         token.cancel();
         join_all(handles).await;
-        servicer.drain(&logfile).expect("failed to drain queue");
+        servicer.drain().expect("failed to drain queue");
 
         provisioner_exited_rx
             .await
@@ -438,85 +319,72 @@ async fn run_local_process_loop(
     status_updater: StatusUpdater,
     token: CancellationToken,
 ) -> Result<()> {
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+
     while let Ok((subgraph_node_id, _priority)) = tasks_ready.recv().await {
         let cmd = subgraph[subgraph_node_id];
         cmd.call_preamble();
-        let skip_execution_debugging_race_conditions = cmd.cmdline.is_empty();
-        let hostname = gethostname::gethostname().to_string_lossy().to_string();
-        let (hostpid, status, stdout, stderr) = if skip_execution_debugging_race_conditions {
-            let pid = 0;
-            let fake_status = 0;
-            let hostpid = format!("{}:{}", hostname, pid);
-            status_updater
-                .send_started(subgraph_node_id, &cmd, &hostpid)
-                .await;
 
-            (hostpid, fake_status, "".to_owned(), "".to_owned())
-        } else {
-            let maybe_child = Command::new(&cmd.cmdline[0])
-                .args(&cmd.cmdline[1..])
-                .kill_on_drop(true)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-            let mut child = match maybe_child {
-                Ok(child) => child,
-                Err(_) => {
-                    log::error!("failed to execute {:#?}", &cmd.cmdline[0]);
-                    status_updater
-                        .send_started(subgraph_node_id, &cmd, "")
-                        .await;
-                    status_updater
-                        .send_finished(
-                            subgraph_node_id,
-                            &cmd,
-                            "",
-                            127,
-                            "".to_owned(),
-                            format!("No such command: {:#?}", &cmd.cmdline[0]),
-                        )
-                        .await;
-                    continue;
-                }
-            };
-
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| anyhow!("failed to extract stdin from child process"))?;
-            stdin.write_all(&cmd.stdin).await?;
-            drop(stdin);
-
-            let pid = child.id().ok_or_else(|| {
-                anyhow!("child hasn't been waited for yet, so its pid should exist")
-            })?;
-            let hostpid = format!("{}:{}", hostname, pid);
-            status_updater
-                .send_started(subgraph_node_id, &cmd, &hostpid)
-                .await;
-
-            // Like `let output = child.await.expect("sh wasn't running");`, except
-            // that we also wait for the cancellation token at the same time.
-            let output = tokio::select! {
-                _ = token.cancelled() => {
-                    return Err(anyhow!("cancelled"));
-                }
-                wait_with_output = child.wait_with_output() => {
-                    wait_with_output.expect("sh wasn't running")
-                }
-            };
-
-            let code = match output.status.code() {
-                Some(code) => code,
-                None => output.status.signal().expect("No exit code and no signal?"),
-            };
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            (hostpid, code, stdout, stderr)
+        let maybe_child = Command::new(&cmd.cmdline[0])
+            .args(&cmd.cmdline[1..])
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match maybe_child {
+            Ok(child) => child,
+            Err(_) => {
+                status_updater
+                    .send_started(subgraph_node_id, cmd, &hostname, 0)
+                    .await;
+                status_updater
+                    .send_finished(
+                        subgraph_node_id,
+                        cmd,
+                        127,
+                        "".to_owned(),
+                        format!("No such command: {:#?}", &cmd.cmdline[0]),
+                    )
+                    .await;
+                continue;
+            }
         };
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to extract stdin from child process"))?;
+        stdin.write_all(&cmd.stdin).await?;
+        drop(stdin);
+
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow!("child hasn't been waited for yet, so its pid should exist"))?;
+
         status_updater
-            .send_finished(subgraph_node_id, &cmd, &hostpid, status, stdout, stderr)
+            .send_started(subgraph_node_id, cmd, &hostname, pid)
+            .await;
+
+        // Like `let output = child.await.expect("sh wasn't running");`, except
+        // that we also wait for the cancellation token at the same time.
+        let output = tokio::select! {
+            _ = token.cancelled() => {
+                return Err(anyhow!("cancelled"));
+            }
+            wait_with_output = child.wait_with_output() => {
+                wait_with_output.expect("sh wasn't running")
+            }
+        };
+
+        let status = match output.status.code() {
+            Some(code) => code,
+            None => output.status.signal().expect("No exit code and no signal?"),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        status_updater
+            .send_finished(subgraph_node_id, cmd, status, stdout, stderr)
             .await;
     }
 
@@ -566,4 +434,109 @@ async fn spawn_and_wait_for_provisioner(
     }
 
     Ok(())
+}
+
+fn get_subgraph<'a, 'b: 'a>(
+    deps: &'b mut DiGraph<Cmd, ()>,
+    completed: &mut HashSet<String>,
+    logfile: &mut LogFile,
+    target: Option<u32>,
+    rerun_failures: bool,
+) -> Result<DiGraph<&'a Cmd, ()>> {
+    // Compute the priority and just mutate the graph. Ugly, but it
+    // keeps everything in the Cmd struct
+    let priority = crate::graphtheory::blevel_dag(deps)?;
+    for (i, p) in priority.iter().enumerate() {
+        deps[NodeIndex::from(i as u32)].priority = *p;
+    }
+
+    // Get the subgraph containing all cmds in the transitive closure of target.
+    // these are all the commands we need to resolve first. if target is none, then
+    // just get the whole subraph (with an unnecessary copy unfortunately)
+    let subgraph = match target {
+        Some(target_index) => {
+            // TODO it sucks that we have to clone/reverse this.
+            let mut reversed = deps.clone();
+            reversed.reverse();
+            let tc = transitive_closure_dag(&reversed)?;
+
+            let mut relevant = tc
+                .edges_directed(NodeIndex::from(target_index), Direction::Outgoing)
+                .map(|e| e.target())
+                .collect::<HashSet<NodeIndex>>();
+            relevant.insert(NodeIndex::from(target_index));
+
+            deps.filter_map(
+                |n, w| match relevant.contains(&n) {
+                    true => Some(w),
+                    false => None,
+                },
+                |_e, _w| Some(()),
+            )
+        }
+        None => deps.filter_map(|_n, w| Some(w), |_e, _w| Some(())),
+    };
+
+    let mut reused_old_keys = HashSet::new();
+
+    // Now let's remove all edges from the dependency graph if the source has already finished
+    // or if we've already exeuted the task in a previous call to execute
+    let mut filtered_subgraph = subgraph.filter_map(
+        |_n, &w| {
+            if completed.contains(&w.key) {
+                // if we already ran this command within this process, don't record it
+                // in reused_old_keys. that's only for stuff that was run in a previous
+                // session
+                return None; // returning none excludes it from filtered_subgraph
+            }
+            let has_success = logfile.has_success(&w.key);
+            if has_success {
+                reused_old_keys.insert(w.key.clone());
+                return None;
+            }
+
+            Some(w)
+        },
+        |_e, &w| Some(w),
+    );
+
+    // If we are skipping failures, we need to further filter the graph down
+    // to not include the failures or any downstream tasks, and add the failures
+    // that were important to `reused_old_keys`.
+    if !rerun_failures {
+        let tc = transitive_closure_dag(&filtered_subgraph)?;
+        let failures = tc
+            .node_indices()
+            .filter(|&n| {
+                let w = tc[n];
+                logfile.has_failure(&w.key)
+            })
+            .collect::<HashSet<NodeIndex>>();
+
+        filtered_subgraph = filtered_subgraph.filter_map(
+            |n, &w| {
+                if failures.contains(&n) {
+                    reused_old_keys.insert(w.key.clone());
+                    return None;
+                }
+                for e in tc.edges_directed(n, Direction::Incoming) {
+                    if failures.contains(&e.source()) {
+                        return None;
+                    }
+                }
+
+                Some(w)
+            },
+            |_e, _w| Some(()),
+        );
+    }
+
+    // See test_copy_reused_keys_logfile.
+    for key in reused_old_keys {
+        logfile.write(LogEntry::new_backref(&key))?;
+        completed.insert(key);
+        // TODO: do we need to do anything more?
+    }
+
+    Ok(filtered_subgraph)
 }

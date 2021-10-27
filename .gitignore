@@ -5,3 +5,7 @@ result
 _execgraph.so
 execgraph*.whl
 execgraph.so
+wal-log-test-bad-checksum
+wal-log-test-locking
+.mypy_cache/
+__pycache__/
