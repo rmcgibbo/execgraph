@@ -1,5 +1,10 @@
+use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::SystemTime};
+use std::{
+    collections::HashMap,
+    io::{BufRead, Write},
+    time::SystemTime,
+};
 use thiserror::Error;
 
 pub type Result<T> = core::result::Result<T, LogfileError>;
@@ -95,12 +100,12 @@ impl LogEntry {
 }
 
 pub struct LogFile {
-    log: crate::appendlog::LogFile,
+    f: std::fs::File,
     workflow_key: Option<String>,
     runcounts: HashMap<String, RuncountStatus>,
 }
 pub struct LogFileReadOnly {
-    log: crate::appendlog::LogFile,
+    f: std::fs::File,
 }
 
 #[derive(Copy, Clone)]
@@ -121,15 +126,29 @@ impl RuncountStatus {
 
 impl LogFile {
     pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
-        let mut log = crate::appendlog::LogFile::with_options()
-            .writeable()
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .create(true)
+            .write(true)
             .open(path)?;
+        f.try_lock(FileLockMode::Exclusive)?;
         let mut runcounts = HashMap::new();
         let mut workflow_key = None;
 
-        for bytes in log.iter(..)? {
-            let value: LogEntry = bincode::deserialize(&bytes?)?;
-
+        let mut reader = std::io::BufReader::new(&f);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let nbytes = reader.read_line(&mut line)?;
+            if nbytes == 0 {
+                break;
+            }
+            let len = line.trim_end_matches(&['\r', '\n'][..]).len();
+            line.truncate(len);
+            let value: LogEntry = serde_json::from_str(&line).map_err(|e| {
+                eprintln!("Error parsing line={}", line);
+                e
+            })?;
             match value {
                 LogEntry::Header(h) => match workflow_key {
                     None => workflow_key = Some(h.workflow_key),
@@ -159,7 +178,7 @@ impl LogFile {
         }
 
         Ok(LogFile {
-            log,
+            f,
             workflow_key,
             runcounts,
         })
@@ -170,12 +189,12 @@ impl LogFile {
     }
 
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
-        self.log.flush()
+        self.f.flush()
     }
 
     pub fn write(&mut self, e: LogEntry) -> Result<()> {
-        let mut v = bincode::serialize(&e)?;
-        self.log.write(&mut v)?;
+        serde_json::to_writer(&mut self.f, &e)?;
+        self.f.write_all(&[b'\n'])?;
         Ok(())
     }
 
@@ -210,9 +229,9 @@ impl LogFile {
 
 impl LogFileReadOnly {
     pub fn open(path: std::path::PathBuf) -> Result<Self> {
-        Ok(Self {
-            log: crate::appendlog::LogFile::with_options().open(path)?,
-        })
+        let f = std::fs::OpenOptions::new().read(true).open(path)?;
+        f.try_lock(FileLockMode::Exclusive)?;
+        Ok(Self { f })
     }
 
     pub fn read_current(&mut self) -> Result<Vec<LogEntry>> {
@@ -261,9 +280,21 @@ impl LogFileReadOnly {
     }
 
     pub fn read(&mut self) -> Result<Vec<LogEntry>> {
+        let mut reader = std::io::BufReader::new(&self.f);
         let mut v = Vec::new();
-        for bytes in self.log.iter(..)? {
-            let value: LogEntry = bincode::deserialize(&bytes?)?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let nbytes = reader.read_line(&mut line)?;
+            if nbytes == 0 {
+                break;
+            }
+            let len = line.trim_end_matches(&['\r', '\n'][..]).len();
+            line.truncate(len);
+            let value: LogEntry = serde_json::from_str(&line).map_err(|e| {
+                eprintln!("Error parsing line={}", line);
+                e
+            })?;
             v.push(value);
         }
         Ok(v)
@@ -280,20 +311,24 @@ pub enum LogfileError {
     ),
 
     #[error("{0}")]
-    BincodeError(
+    JsonError(
         #[source]
         #[from]
-        Box<bincode::ErrorKind>,
-    ),
-
-    #[error("{0}")]
-    WalError(
-        #[source]
-        #[from]
-        crate::appendlog::LogError,
+        serde_json::Error,
     ),
 
     #[error("Mismatched keys")]
     WorkflowKeyMismatch,
+
+    #[error("the log is locked")]
+    AlreadyLocked,
 }
 
+impl From<advisory_lock::FileLockError> for LogfileError {
+    fn from(err: advisory_lock::FileLockError) -> Self {
+        match err {
+            advisory_lock::FileLockError::Io(err) => LogfileError::IoError(err),
+            advisory_lock::FileLockError::AlreadyLocked => LogfileError::AlreadyLocked,
+        }
+    }
+}

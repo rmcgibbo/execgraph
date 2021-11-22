@@ -1,15 +1,15 @@
-
-use std::ffi::OsString;
 use pyo3::{
-    exceptions::{PyIOError, PyIndexError, PyRuntimeError, PyValueError, PyOSError},
+    exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
     prelude::*,
     types::PyTuple,
 };
+use std::ffi::OsString;
 use tokio::runtime::Runtime;
 
-use crate::execgraph::{Cmd, ExecGraph};
-use crate::logfile2::{self, LogEntry, LogFile};
-
+use crate::{
+    execgraph::{Cmd, ExecGraph},
+    logfile2::{self, LogEntry, LogFile},
+};
 
 /// Parallel execution of shell commands with DAG dependencies.
 /// It's sort of like the core routine behind a build system like Make

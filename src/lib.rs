@@ -1,9 +1,7 @@
-pub mod appendlog;
-mod logfile2;
+mod execgraph;
 mod graphtheory;
 pub mod httpinterface;
-pub mod sync;
-mod execgraph;
-mod server;
+mod logfile2;
 pub mod pylib;
-
+mod server;
+pub mod sync;
