@@ -131,6 +131,8 @@ impl LogFile {
             .create(true)
             .write(true)
             .open(path)?;
+        // TODO: use a different file as the lock, like ``path + .lock``, so that
+        // in extreme circumstances the user can rm -rf the lock file.
         f.try_lock(FileLockMode::Exclusive)?;
         let mut runcounts = HashMap::new();
         let mut workflow_key = None;
