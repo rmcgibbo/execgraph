@@ -20,34 +20,34 @@ pub enum LogEntry {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HeaderEntry {
-    version: u32,
-    time: SystemTime,
-    user: String,
-    hostname: String,
-    workflow_key: String,
+    pub version: u32,
+    pub time: SystemTime,
+    pub user: String,
+    pub hostname: String,
+    pub workflow_key: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ReadyEntry {
-    time: SystemTime,
-    key: String,
-    runcount: u32,
-    command: String,
+    pub time: SystemTime,
+    pub key: String,
+    pub runcount: u32,
+    pub command: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StartedEntry {
-    time: SystemTime,
-    key: String,
-    host: String,
-    pid: u32,
+    pub time: SystemTime,
+    pub key: String,
+    pub host: String,
+    pub pid: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FinishedEntry {
-    time: SystemTime,
-    key: String,
-    status: i32,
+    pub time: SystemTime,
+    pub key: String,
+    pub status: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
