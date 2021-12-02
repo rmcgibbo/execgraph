@@ -52,7 +52,7 @@ pub struct FinishedEntry {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BackrefEntry {
-    key: String,
+    pub key: String,
 }
 
 impl LogEntry {
