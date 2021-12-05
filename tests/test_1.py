@@ -682,6 +682,9 @@ exit(1)
     # make sure someone else can't acquire the lock
     subprocess.run([sys.executable, tmp_path / "script"], check=True, capture_output=True)
 
+    del f1
+    assert ".wrk.lock" not in os.listdir(tmp_path)
+
 
 def test_write_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")

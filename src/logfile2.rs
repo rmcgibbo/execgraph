@@ -129,6 +129,7 @@ impl LogEntry {
 pub struct LogFile {
     f: std::fs::File,
     lockf: std::fs::File,
+    lockf_path: std::path::PathBuf,
     workflow_key: Option<String>,
     runcounts: HashMap<String, RuncountStatus>,
 }
@@ -156,10 +157,11 @@ impl RuncountStatus {
 impl LogFile {
     pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         // acquire the lock file and write something to it
+        let lockf_path = path.as_ref().with_file_name(".wrk.lock");
         let mut lockf = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
-            .open(path.as_ref().with_file_name(".wrk.lock"))?;
+            .open(&lockf_path)?;
         lockf.try_lock(FileLockMode::Exclusive)?;
         serde_json::to_writer(&lockf, &LogEntry::new_header("")?)?;
         lockf.flush()?;
@@ -220,6 +222,7 @@ impl LogFile {
             workflow_key,
             runcounts,
             lockf,
+            lockf_path,
         })
     }
 
@@ -228,7 +231,6 @@ impl LogFile {
     }
 
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
-        self.lockf.flush()?;
         self.f.flush()
     }
 
@@ -264,6 +266,13 @@ impl LogFile {
                     _ => false,
                 })
                 .unwrap_or(false)
+    }
+}
+
+impl Drop for LogFile {
+    fn drop(&mut self) {
+        drop(self.lockf.flush());
+        drop(std::fs::remove_file(&self.lockf_path));
     }
 }
 
