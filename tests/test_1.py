@@ -674,6 +674,8 @@ try:
 except OSError as e:
     if str(e) == "the log is locked":
         exit(0)
+    else:
+        print(e)
 exit(1)
     """ % tmp_path)
 

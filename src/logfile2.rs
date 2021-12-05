@@ -128,6 +128,7 @@ impl LogEntry {
 
 pub struct LogFile {
     f: std::fs::File,
+    lockf: std::fs::File,
     workflow_key: Option<String>,
     runcounts: HashMap<String, RuncountStatus>,
 }
@@ -218,6 +219,7 @@ impl LogFile {
             f,
             workflow_key,
             runcounts,
+            lockf,
         })
     }
 
@@ -226,6 +228,7 @@ impl LogFile {
     }
 
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
+        self.lockf.flush()?;
         self.f.flush()
     }
 
