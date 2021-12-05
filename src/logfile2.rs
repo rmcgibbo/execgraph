@@ -128,6 +128,7 @@ impl LogEntry {
 
 pub struct LogFile {
     f: std::fs::File,
+    #[allow(dead_code)]
     lockf: std::fs::File,
     lockf_path: std::path::PathBuf,
     workflow_key: Option<String>,
@@ -135,7 +136,8 @@ pub struct LogFile {
 }
 pub struct LogFileReadOnly {
     f: std::fs::File,
-    lockf: std::fs::File,
+    #[allow(dead_code)]
+    lockf: core::result::Result<std::fs::File, std::io::Error>,
 }
 
 #[derive(Copy, Clone)]
@@ -270,8 +272,7 @@ impl LogFile {
 }
 
 impl Drop for LogFile {
-    fn drop(&mut self) {
-        drop(self.lockf.flush());
+    fn drop(&mut self) {        
         drop(std::fs::remove_file(&self.lockf_path));
     }
 }
@@ -281,17 +282,16 @@ impl LogFileReadOnly {
         // acquire the lock file and write something to it
         let lockf = std::fs::OpenOptions::new()
             .read(true)
-            .open(path.with_file_name(".wrk.lock"))?;
-        lockf.try_lock(FileLockMode::Exclusive)?;
+            .open(path.with_file_name(".wrk.lock"));
+        if let Ok(ref x) = lockf {            
+            x.try_lock(FileLockMode::Exclusive)?;
+        }            
 
         let f = std::fs::OpenOptions::new().read(true).open(path)?;
         Ok(Self { f, lockf })
     }
 
     pub fn read_current(&mut self) -> Result<Vec<LogEntry>> {
-        self.lockf.sync_all()?; // do something silly so it doesn't get optimized out that
-                                // we're holding the lock
-
         let mut result = Vec::new();
         let mut rev_iter = self.read()?.into_iter().rev();
         let mut pending_backrefs = std::collections::HashSet::new();
