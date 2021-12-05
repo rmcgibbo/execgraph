@@ -64,7 +64,7 @@ impl PyExecGraph {
                 None => "default-key-value".to_owned(),
             },
         };
-        log.write(LogEntry::new_header(&key))?;
+        log.write(LogEntry::new_header(&key)?)?;
 
         Ok(PyExecGraph {
             g: ExecGraph::new(log),

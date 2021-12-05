@@ -2,6 +2,7 @@ use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    env,
     io::{BufRead, Write},
     time::SystemTime,
 };
@@ -25,6 +26,8 @@ pub struct HeaderEntry {
     pub user: String,
     pub hostname: String,
     pub workflow_key: String,
+    pub cmdline: Vec<String>,
+    pub workdir: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -56,14 +59,16 @@ pub struct BackrefEntry {
 }
 
 impl LogEntry {
-    pub fn new_header(workflow_key: &str) -> LogEntry {
-        LogEntry::Header(HeaderEntry {
+    pub fn new_header(workflow_key: &str) -> Result<LogEntry> {
+        Ok(LogEntry::Header(HeaderEntry {
             version: 3,
             time: SystemTime::now(),
             user: whoami::username(),
             hostname: gethostname::gethostname().to_string_lossy().to_string(),
             workflow_key: workflow_key.to_owned(),
-        })
+            cmdline: env::args().collect(),
+            workdir: env::current_dir()?.to_string_lossy().to_string(),
+        }))
     }
 
     pub fn new_ready(key: &str, runcount: u32, command: &str) -> LogEntry {
@@ -96,6 +101,26 @@ impl LogEntry {
         LogEntry::Backref(BackrefEntry {
             key: key.to_owned(),
         })
+    }
+
+    pub fn is_header(&self) -> bool {
+        matches!(self, LogEntry::Header(_x))
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(self, LogEntry::Ready(_x))
+    }
+
+    pub fn is_started(&self) -> bool {
+        matches!(self, LogEntry::Started(_x))
+    }
+
+    pub fn is_finished(&self) -> bool {
+        matches!(self, LogEntry::Finished(_x))
+    }
+
+    pub fn is_backref(&self) -> bool {
+        matches!(self, LogEntry::Backref(_x))
     }
 }
 
