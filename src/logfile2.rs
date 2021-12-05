@@ -28,6 +28,7 @@ pub struct HeaderEntry {
     pub workflow_key: String,
     pub cmdline: Vec<String>,
     pub workdir: String,
+    pub pid: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,6 +69,7 @@ impl LogEntry {
             workflow_key: workflow_key.to_owned(),
             cmdline: env::args().collect(),
             workdir: env::current_dir()?.to_string_lossy().to_string(),
+            pid: std::process::id(),
         }))
     }
 
@@ -131,6 +133,7 @@ pub struct LogFile {
 }
 pub struct LogFileReadOnly {
     f: std::fs::File,
+    lockf: std::fs::File,
 }
 
 #[derive(Copy, Clone)]
@@ -151,14 +154,21 @@ impl RuncountStatus {
 
 impl LogFile {
     pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+        // acquire the lock file and write something to it
+        let mut lockf = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(path.as_ref().with_file_name(".wrk.lock"))?;
+        lockf.try_lock(FileLockMode::Exclusive)?;
+        serde_json::to_writer(&lockf, &LogEntry::new_header("")?)?;
+        lockf.flush()?;
+
         let f = std::fs::OpenOptions::new()
             .read(true)
             .create(true)
             .write(true)
             .open(path)?;
-        // TODO: use a different file as the lock, like ``path + .lock``, so that
-        // in extreme circumstances the user can rm -rf the lock file.
-        f.try_lock(FileLockMode::Exclusive)?;
+
         let mut runcounts = HashMap::new();
         let mut workflow_key = None;
 
@@ -256,12 +266,20 @@ impl LogFile {
 
 impl LogFileReadOnly {
     pub fn open(path: std::path::PathBuf) -> Result<Self> {
+        // acquire the lock file and write something to it
+        let lockf = std::fs::OpenOptions::new()
+            .read(true)
+            .open(path.with_file_name(".wrk.lock"))?;
+        lockf.try_lock(FileLockMode::Exclusive)?;
+
         let f = std::fs::OpenOptions::new().read(true).open(path)?;
-        f.try_lock(FileLockMode::Exclusive)?;
-        Ok(Self { f })
+        Ok(Self { f, lockf })
     }
 
     pub fn read_current(&mut self) -> Result<Vec<LogEntry>> {
+        self.lockf.sync_all()?; // do something silly so it doesn't get optimized out that
+                                // we're holding the lock
+
         let mut result = Vec::new();
         let mut rev_iter = self.read()?.into_iter().rev();
         let mut pending_backrefs = std::collections::HashSet::new();
