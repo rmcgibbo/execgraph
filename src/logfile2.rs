@@ -136,8 +136,6 @@ pub struct LogFile {
 }
 pub struct LogFileReadOnly {
     f: std::fs::File,
-    #[allow(dead_code)]
-    lockf: core::result::Result<std::fs::File, std::io::Error>,
 }
 
 #[derive(Copy, Clone)]
@@ -279,16 +277,8 @@ impl Drop for LogFile {
 
 impl LogFileReadOnly {
     pub fn open(path: std::path::PathBuf) -> Result<Self> {
-        // acquire the lock file and write something to it
-        let lockf = std::fs::OpenOptions::new()
-            .read(true)
-            .open(path.with_file_name(".wrk.lock"));
-        if let Ok(ref x) = lockf {            
-            x.try_lock(FileLockMode::Exclusive)?;
-        }            
-
         let f = std::fs::OpenOptions::new().read(true).open(path)?;
-        Ok(Self { f, lockf })
+        Ok(Self { f })
     }
 
     pub fn read_current(&mut self) -> Result<Vec<LogEntry>> {
