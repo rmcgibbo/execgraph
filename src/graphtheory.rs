@@ -50,6 +50,7 @@ pub fn descendants_at_distance<N, V>(
 /// for all v, w in V there is an edge (v, w) in E+ if and only if there
 /// is a non-null path from v to w in G.
 /// https://github.com/networkx/networkx/blob/cabf22e98d06d6c34ff88515f339b515695a7455/networkx/algorithms/dag.py#L581
+#[tracing::instrument(skip_all)]
 pub fn transitive_closure_dag<N: Clone, V>(graph: &DiGraph<N, V>) -> Result<DiGraph<N, ()>> {
     let mut tc = graph.map(|_, w| w.clone(), |_, _| ());
     let toposort =
@@ -64,6 +65,7 @@ pub fn transitive_closure_dag<N: Clone, V>(graph: &DiGraph<N, V>) -> Result<DiGr
     Ok(tc)
 }
 
+#[tracing::instrument(skip_all)]
 pub fn blevel_dag<N, V>(graph: &DiGraph<N, V>) -> Result<Vec<u32>> {
     let toposort =
         toposort(&graph, None).map_err(|e| anyhow!("Graph contains a cycle: {:?}", e))?;

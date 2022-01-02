@@ -47,7 +47,7 @@ pub struct ReadyTracker<'a> {
     inflight: HashSet<NodeIndex>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StatusUpdater {
     s: async_channel::Sender<CompletedEvent>,
     queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,

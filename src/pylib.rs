@@ -5,6 +5,7 @@ use pyo3::{
 };
 use std::ffi::OsString;
 use tokio::runtime::Runtime;
+use tracing::{debug, error, info, span, warn, trace, Level};
 
 use crate::{
     execgraph::{Cmd, ExecGraph},
@@ -44,6 +45,7 @@ pub struct PyExecGraph {
 impl PyExecGraph {
     #[new]
     #[args(num_parallel = -1, failures_allowed = 1, newkeyfn = "None", rerun_failures=true)]
+    #[tracing::instrument(skip(py))]
     fn new(
         py: Python,
         mut num_parallel: i32,
@@ -52,6 +54,7 @@ impl PyExecGraph {
         newkeyfn: Option<PyObject>,
         rerun_failures: bool,
     ) -> PyResult<PyExecGraph> {
+
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
         }
@@ -64,6 +67,7 @@ impl PyExecGraph {
                 None => "default-key-value".to_owned(),
             },
         };
+        debug!("Writing new log header key={}", key);
         log.write(LogEntry::new_header(&key)?)?;
 
         Ok(PyExecGraph {
@@ -85,6 +89,7 @@ impl PyExecGraph {
     }
 
     /// Get the runcount that should be used for a task with this key.
+    #[tracing::instrument(skip(self))]
     fn logfile_runcount(&self, key: &str) -> u32 {
         match self.g.logfile.runcount(key) {
             // the task is new and has never been executed before.
@@ -181,7 +186,7 @@ impl PyExecGraph {
     ///     key (str): unique identifier
     ///     dependencies (List[int], default=[]): dependencies for this task
     /// Returns:
-    ///     taskid (int): integer id of this task
+    ///     taskid (int): integer id of this task    
     #[args(
         dependencies = "vec![]",
         display = "None",
@@ -191,6 +196,7 @@ impl PyExecGraph {
         postamble = "None"
     )]
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip_all)]
     fn add_task(
         &mut self,
         cmdline: Vec<OsString>,
@@ -258,6 +264,7 @@ impl PyExecGraph {
         remote_provisioner = "None",
         remote_provisioner_arg2 = "None"
     )]
+    #[tracing::instrument(skip_all)]
     fn execute(
         &mut self,
         py: Python,
@@ -313,6 +320,7 @@ fn test_make_capsule(py: Python) -> PyResult<PyObject> {
 }
 
 #[pyfunction]
+#[tracing::instrument(skip(py))]
 fn load_logfile(py: Python, path: std::path::PathBuf, mode: String) -> PyResult<PyObject> {
     let mut log = logfile2::LogFileReadOnly::open(path)?;
     let value = match &mode as &str {
@@ -324,6 +332,7 @@ fn load_logfile(py: Python, path: std::path::PathBuf, mode: String) -> PyResult<
 }
 
 #[pyfunction]
+#[tracing::instrument(skip(value))]
 fn write_logfile(path: std::path::PathBuf, value: &PyAny) -> PyResult<()> {
     let mut log = logfile2::LogFile::new(path)?;
     let v: Vec<LogEntry> = pythonize::depythonize(value)?;
@@ -336,7 +345,8 @@ fn write_logfile(path: std::path::PathBuf, value: &PyAny) -> PyResult<()> {
 
 #[pymodule]
 pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
-    env_logger::init();
+    console_subscriber::init();
+
     m.add_class::<PyExecGraph>()?;
     m.add_function(wrap_pyfunction!(test_make_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(load_logfile, m)?)?;

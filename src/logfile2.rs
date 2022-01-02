@@ -126,6 +126,7 @@ impl LogEntry {
     }
 }
 
+#[derive(Debug)]
 pub struct LogFile {
     f: std::fs::File,
     #[allow(dead_code)]
@@ -138,7 +139,7 @@ pub struct LogFileReadOnly {
     f: std::fs::File,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum RuncountStatus {
     Ready(u32),
     Started(u32),
@@ -155,7 +156,8 @@ impl RuncountStatus {
 }
 
 impl LogFile {
-    pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
+    #[tracing::instrument]
+    pub fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
         // acquire the lock file and write something to it
         let lockf_path = path.as_ref().with_file_name(".wrk.lock");
         let mut lockf = std::fs::OpenOptions::new()
@@ -230,20 +232,24 @@ impl LogFile {
         self.workflow_key.clone()
     }
 
+    #[tracing::instrument]
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
         self.f.flush()
     }
 
+    #[tracing::instrument]
     pub fn write(&mut self, e: LogEntry) -> Result<()> {
         serde_json::to_writer(&mut self.f, &e)?;
         self.f.write_all(&[b'\n'])?;
         Ok(())
     }
 
+    #[tracing::instrument(fields(result))]
     pub fn runcount(&self, key: &str) -> Option<RuncountStatus> {
         self.runcounts.get(key).copied()
     }
 
+    #[tracing::instrument(fields(result))]
     pub fn has_success(&self, key: &str) -> bool {
         !key.is_empty()
             && self
@@ -256,6 +262,7 @@ impl LogFile {
                 .unwrap_or(false)
     }
 
+    #[tracing::instrument(fields(result))]
     pub fn has_failure(&self, key: &str) -> bool {
         !key.is_empty()
             && self
@@ -270,7 +277,7 @@ impl LogFile {
 }
 
 impl Drop for LogFile {
-    fn drop(&mut self) {        
+    fn drop(&mut self) {
         drop(std::fs::remove_file(&self.lockf_path));
     }
 }

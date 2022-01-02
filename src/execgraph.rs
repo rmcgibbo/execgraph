@@ -21,6 +21,7 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::{error, trace};
 
 #[derive(Derivative)]
 #[derivative(Debug, Clone, Default, PartialEq, Hash)]
@@ -55,6 +56,7 @@ impl Capsule {
         Capsule { capsule }
     }
 
+    #[tracing::instrument]
     fn call(&self) -> Result<i32> {
         const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
         let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
@@ -94,6 +96,7 @@ impl Cmd {
         }
     }
 
+    #[tracing::instrument]
     pub fn call_preamble(&self) {
         match &self.preamble {
             Some(preamble) => {
@@ -111,6 +114,7 @@ impl Cmd {
         };
     }
 
+    #[tracing::instrument]
     pub fn call_postamble(&self) {
         match &self.postamble {
             Some(postamble) => {
@@ -137,6 +141,7 @@ pub struct ExecGraph {
 }
 
 impl ExecGraph {
+    #[tracing::instrument(skip_all)]
     pub fn new(logfile: LogFile) -> ExecGraph {
         ExecGraph {
             deps: Graph::new(),
@@ -162,11 +167,15 @@ impl ExecGraph {
             .collect()
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
-        if !cmd.key.is_empty() {
+        if cmd.key.is_empty() {
             if let Some(index) = self.key_to_nodeid.get(&cmd.key) {
                 return Ok(index.index() as u32);
             }
+        }
+        if cmd.cmdline.len() == 0 {
+            return Err(anyhow!("cmd={:?}: cmdline size == 0", cmd));
         }
 
         let key = cmd.key.clone();
@@ -179,10 +188,12 @@ impl ExecGraph {
             self.deps.add_edge(dep, new_node, ());
         }
 
-        self.key_to_nodeid.insert(key, new_node);
+        self.key_to_nodeid.insert(key, new_node);        
+        trace!("Added command to task graph");
         Ok(new_node.index() as u32)
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn execute(
         &mut self,
         target: Option<u32>,
@@ -207,8 +218,10 @@ impl ExecGraph {
             rerun_failures,
         )?);
         if subgraph.raw_nodes().is_empty() {
+            trace!("Short-circuiting execution because subgraph N=0.");
             return Ok((0, vec![]));
         }
+        trace!("Executing dependency graph of N={} tasks", subgraph.node_count());
 
         let token = CancellationToken::new();
         let (mut servicer, tasks_ready, status_updater) = ReadyTracker::new(
@@ -219,10 +232,11 @@ impl ExecGraph {
         );
 
         // Run local processes
+        trace!("Spawning {} local process loops", num_parallel);
         let handles = (0..num_parallel)
             .map(|_| {
                 let subgraph = extend_graph_lifetime(subgraph.clone());
-                let token = token.clone();
+                let token = token.clone();                
                 tokio::spawn(run_local_process_loop(
                     subgraph,
                     tasks_ready.get(&None).expect("No null queue").clone(),
@@ -246,7 +260,7 @@ impl ExecGraph {
                 let token1 = token.clone();
                 let token2 = token.clone();
                 let token3 = token.clone();
-
+                
                 tokio::spawn(async move {
                     let state = ServerState::new(subgraph, tasks_ready, status_updater);
                     let router = router(state);
@@ -254,18 +268,21 @@ impl ExecGraph {
                     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                     let server = Server::bind(&addr).serve(service);
                     let bound_addr = server.local_addr();
+                    trace!("Bound server to {}", bound_addr);
                     let graceful = server.with_graceful_shutdown(token1.cancelled());
                     let (server_start_tx, server_start_rx) = oneshot::channel();
 
                     tokio::spawn(async move {
                         server_start_rx.await.expect("failed to recv");
+                        trace!("Spawning remote provisioner {}", provisioner);
                         if let Err(e) =
                             spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2)
                                 .await
-                        {
-                            log::error!("Provisioner failed: {}", e);
+                        {                            
+                            error!("Provisioner failed: {}", e);
                         }
                         token3.cancel();
+                        trace!("Remote provisioner exited");
                         provisioner_exited_tx
                             .send(())
                             .expect("could not send to channel");
@@ -278,6 +295,7 @@ impl ExecGraph {
                 });
             }
             None => {
+                trace!("Not spawning remote provisioner or server");
                 provisioner_exited_tx.send(()).expect("Could not send");
             }
         };
@@ -313,6 +331,7 @@ impl ExecGraph {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn run_local_process_loop(
     subgraph: Arc<DiGraph<&Cmd, ()>>,
     tasks_ready: async_priority_channel::Receiver<NodeIndex, u32>,
@@ -391,6 +410,7 @@ async fn run_local_process_loop(
     Ok(())
 }
 
+#[tracing::instrument]
 async fn spawn_and_wait_for_provisioner(
     provisioner: &str,
     arg2: Option<String>,
@@ -436,6 +456,7 @@ async fn spawn_and_wait_for_provisioner(
     Ok(())
 }
 
+#[tracing::instrument(skip(deps, completed, logfile))]
 fn get_subgraph<'a, 'b: 'a>(
     deps: &'b mut DiGraph<Cmd, ()>,
     completed: &mut HashSet<String>,
@@ -466,13 +487,15 @@ fn get_subgraph<'a, 'b: 'a>(
                 .collect::<HashSet<NodeIndex>>();
             relevant.insert(NodeIndex::from(target_index));
 
-            deps.filter_map(
+            let r = deps.filter_map(
                 |n, w| match relevant.contains(&n) {
                     true => Some(w),
                     false => None,
                 },
                 |_e, _w| Some(()),
-            )
+            );
+            trace!("Got N={} nodes in transitive closure of taget = {}", r.node_count(), target_index);
+            r
         }
         None => deps.filter_map(|_n, w| Some(w), |_e, _w| Some(())),
     };
@@ -487,14 +510,17 @@ fn get_subgraph<'a, 'b: 'a>(
                 // if we already ran this command within this process, don't record it
                 // in reused_old_keys. that's only for stuff that was run in a previous
                 // session
+                trace!("Skipping {} because it was already run successfully within this session", w.key);
                 return None; // returning none excludes it from filtered_subgraph
             }
             let has_success = logfile.has_success(&w.key);
             if has_success {
+                trace!("Skipping {} because it already ran successfully accord to the log file", w.key);
                 reused_old_keys.insert(w.key.clone());
                 return None;
             }
 
+            trace!("Retaining {} because it has not been run before", w.key);
             Some(w)
         },
         |_e, &w| Some(w),
@@ -504,6 +530,7 @@ fn get_subgraph<'a, 'b: 'a>(
     // to not include the failures or any downstream tasks, and add the failures
     // that were important to `reused_old_keys`.
     if !rerun_failures {
+        trace!("Recomputing transitive closure of filtered subgraph");
         let tc = transitive_closure_dag(&filtered_subgraph)?;
         let failures = tc
             .node_indices()
@@ -513,14 +540,18 @@ fn get_subgraph<'a, 'b: 'a>(
             })
             .collect::<HashSet<NodeIndex>>();
 
+        trace!("Found N={} commands that previously failed", failures.len());
         filtered_subgraph = filtered_subgraph.filter_map(
             |n, &w| {
                 if failures.contains(&n) {
+                    trace!("Skipping {} because it previously failed", w.key);
                     reused_old_keys.insert(w.key.clone());
                     return None;
                 }
                 for e in tc.edges_directed(n, Direction::Incoming) {
                     if failures.contains(&e.source()) {
+                        trace!("Skipping {} because it's downstream of a task that previously failed.",
+                                w.key);
                         return None;
                     }
                 }
@@ -533,6 +564,7 @@ fn get_subgraph<'a, 'b: 'a>(
 
     // See test_copy_reused_keys_logfile.
     for key in reused_old_keys {
+        trace!("Writing backref for key={}", key);
         logfile.write(LogEntry::new_backref(&key))?;
         completed.insert(key);
         // TODO: do we need to do anything more?

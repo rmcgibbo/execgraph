@@ -43,6 +43,9 @@
           numpy
           scipy
           curl
+
+          # for tokio-console
+          protobuf
         ];
       };
     });
