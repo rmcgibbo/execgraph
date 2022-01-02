@@ -48,18 +48,19 @@ in buildPythonPackage rec {
 
   buildInputs = [ protobuf ];
 
+  RUSTFLAGS = "--cfg tokio_unstable";
   RUST_BACKTRACE = "full";
   CARGO_INCREMENTAL = "0";
   CARGO_PROFILE_RELEASE_LTO = "thin";
 
-  preBuild = ''
+  preBuild = ''  
     cargo build -j $NIX_BUILD_CORES \
       --frozen \
       --release \
       --bins
 
     mkdir -p $out/bin
-    install -Dv target/release/execgraph-remote $out/bin/
+    install -Dv target/release/execgraph-remote $out/bin/    
   '';
 
   preCheck = ''
