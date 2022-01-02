@@ -1,0 +1,2 @@
+[env]
+RUSTFLAGS="--cfg tokio_unstable"

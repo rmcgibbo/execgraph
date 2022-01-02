@@ -44,8 +44,9 @@ in buildPythonPackage rec {
     rust.rustc
     rust.cargo
     maturinBuildHook
-    protobuf  # for tokio-console
   ];
+
+  buildInputs = [ protobuf ];
 
   RUST_BACKTRACE = "full";
   CARGO_INCREMENTAL = "0";
