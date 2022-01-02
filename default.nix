@@ -7,6 +7,7 @@
 , scipy
 , networkx
 , curl
+, protobuf
 }:
 
 let
@@ -43,6 +44,7 @@ in buildPythonPackage rec {
     rust.rustc
     rust.cargo
     maturinBuildHook
+    protobuf  # for tokio-console
   ];
 
   RUST_BACKTRACE = "full";
