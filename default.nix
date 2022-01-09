@@ -32,10 +32,11 @@ in buildPythonPackage rec {
     "tests"
   ];
 
+  # TODO: switch to naersk would be nice
   cargoDeps = rustPlatform.fetchCargoTarball {
     inherit src;
     name = "${pname}-${version}";
-    sha256 = "sha256-MreqUa6wuyxFMC/NY++b1hppxbTbvOJqVUd8YzcLevk=";
+    sha256 = "sha256-htiurbyzWKo9kV8DB8KfrHLKQdHpKBlWuBE2+qjbOnQ=";
     # sha256 = "0000000000000000000000000000000000000000000000000000";
   };
 
