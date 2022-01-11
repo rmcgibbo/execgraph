@@ -5,7 +5,7 @@ use pyo3::{
 };
 use std::ffi::OsString;
 use tokio::runtime::Runtime;
-use tracing::{debug, error, info, span, warn, trace, Level};
+use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph},
@@ -274,8 +274,11 @@ impl PyExecGraph {
     ) -> PyResult<(u32, Vec<String>)> {
         // Create a new process group so that at shutdown time, we can send a
         // SIGTERM to this process group annd kill of all child processes.
-        nix::unistd::setpgid(nix::unistd::Pid::this(), nix::unistd::Pid::this())
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+	unsafe {
+	    if libc::setpgid(libc::getpid(), libc::getpid()) != 0 {
+		PyRuntimeError::new_err("Cannot setpgid");
+	    }
+	}
         py.allow_threads(move || {
             let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
@@ -345,7 +348,7 @@ fn write_logfile(path: std::path::PathBuf, value: &PyAny) -> PyResult<()> {
 
 #[pymodule]
 pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
-    console_subscriber::init();
+    tracing_subscriber::fmt::init();
 
     m.add_class::<PyExecGraph>()?;
     m.add_function(wrap_pyfunction!(test_make_capsule, m)?)?;

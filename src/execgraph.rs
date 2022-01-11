@@ -174,7 +174,7 @@ impl ExecGraph {
                 return Ok(index.index() as u32);
             }
         }
-        if cmd.cmdline.len() == 0 {
+        if cmd.cmdline.is_empty() {
             return Err(anyhow!("cmd={:?}: cmdline size == 0", cmd));
         }
 

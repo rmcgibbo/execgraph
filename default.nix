@@ -49,7 +49,6 @@ in buildPythonPackage rec {
 
   buildInputs = [ protobuf ];
 
-  RUSTFLAGS = "--cfg tokio_unstable";
   RUST_BACKTRACE = "full";
   CARGO_INCREMENTAL = "0";
   CARGO_PROFILE_RELEASE_LTO = "thin";
