@@ -1,9 +1,10 @@
 use crate::{
     execgraph::Cmd,
     httpinterface::*,
-    sync::{QueueSnapshot, Queuename, StatusUpdater},
+    sync::{ReadyTrackerClient, Snapshot},
 };
 use anyhow::Result;
+use bitvec::array::BitArray;
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
@@ -27,21 +28,15 @@ struct ConnectionState {
 pub struct State<'a> {
     connections: Mutex<HashMap<u32, ConnectionState>>,
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
-    tasks_ready: HashMap<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>,
-    status_updater: StatusUpdater,
+    tracker: &'a ReadyTrackerClient,
 }
 
 impl<'a> State<'a> {
-    pub fn new(
-        subgraph: Arc<DiGraph<&'a Cmd, ()>>,
-        tasks_ready: HashMap<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>,
-        status_updater: StatusUpdater,
-    ) -> State {
+    pub fn new(subgraph: Arc<DiGraph<&'a Cmd, ()>>, tracker: &'a ReadyTrackerClient) -> State<'a> {
         State {
             connections: Mutex::new(HashMap::new()),
             subgraph,
-            tasks_ready,
-            status_updater,
+            tracker,
         }
     }
 }
@@ -168,7 +163,7 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
 
     let timeout_status = 130;
     state
-        .status_updater
+        .tracker
         .send_finished(
             cstate.node_id,
             &cstate.cmd,
@@ -191,56 +186,39 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
     // the number of pending tasks in a specific queue is greater than. Or maybe they sent in
     // no request data, and in that case we just give the response back immediately.
     async fn get_snapshot(
-        request: &Option<StatusRequest>,
+        _request: &Option<StatusRequest>,
         state: Arc<State<'_>>,
-    ) -> Result<HashMap<Queuename, QueueSnapshot>, RouteError> {
-        if let Some(request) = request {
-            let deadline = std::time::Instant::now() + std::time::Duration::new(request.timeout, 0);
-            while std::time::Instant::now() < deadline {
-                let snapshot = state.status_updater.get_queuestate();
-                match snapshot.get(&request.queue) {
-                    Some(q) => {
-                        if q.n_pending > request.pending_greater_than {
-                            return Ok(snapshot);
-                        }
-                    }
-                    None => {
-                        return Err(json_response_err(StatusCode::NOT_FOUND, "No such queue"));
-                    }
-                };
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        };
-
-        Ok(state.status_updater.get_queuestate())
+    ) -> Result<HashMap<BitArray<u64>, Snapshot>, RouteError> {
+        Ok(state.tracker.get_queuestate())
     }
 
     let snapshot = get_snapshot(&request, state.clone()).await?;
     let resp = snapshot
         .iter()
         .map(|(name, queue)| {
-            let num_ready = state.tasks_ready.get(name).unwrap().len() as u32;
+            // let num_ready = state.tracker.get(name).unwrap().len() as u32;
             // the 'pending' count includes all tasks between the stages of having
             // been added to the ready queue and having been marked as completed.
             // so we'll say that the that can be broken into the number in the ready
             // queue and the number that are currently inflight.
-            if queue.n_pending < num_ready {
-                panic!(
-                    "this shouldn't happen, and indiciates some kind of internal accounting bug"
-                );
-            }
+            // if queue.n_pending < num_ready {
+            //     panic!(
+            //         "this shouldn't happen, and indiciates some kind of internal accounting bug"
+            //     );
+            // }
 
             (
-                name.clone(),
+                name.data,
                 StatusQueueReply {
-                    num_ready,
-                    num_failed: queue.n_failed,
-                    num_success: queue.n_success,
-                    num_inflight: queue.n_pending - num_ready,
+                    num_ready: queue.num_ready,
+                    num_inflight: 0,
+                    // num_failed: queue.n_failed,
+                    // num_success: queue.n_success,
+                    // num_inflight: queue.n_pending - num_ready,
                 },
             )
         })
-        .collect::<HashMap<Queuename, StatusQueueReply>>();
+        .collect::<HashMap<u64, StatusQueueReply>>();
 
     json_success_resp(&StatusReply { queues: resp })
 }
@@ -268,18 +246,21 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
     let state = get_state(&req);
     let request = get_json_body::<StartRequest>(req).await?;
     let transaction_id = rand::random::<u32>();
-    let channel = state.tasks_ready.get(&request.queuename).ok_or_else(|| {
-        json_response_err(
-            StatusCode::NOT_FOUND,
-            format!("No such queue: {:?}", request.queuename),
-        )
-    })?;
-    let (node_id, _) = channel.try_recv().map_err(|e| {
-        json_response_err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("Channel closed: {:?}", e),
-        )
-    })?;
+
+    let node_id = state
+        .tracker
+        .get_ready_task(request.runnertypeid)
+        .await
+        .map_err(|e| match e {
+            crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => json_response_err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Channel closed: {:?}", e),
+            ),
+            crate::sync::ReadyTrackerClientError::NoSuchRunnerType => json_response_err(
+                StatusCode::NOT_FOUND,
+                format!("Invalid runner type: {:?}", request.runnertypeid),
+            ),
+        })?;
 
     let (ping_tx, ping_rx) = async_channel::bounded::<()>(1);
     let token = CancellationToken::new();
@@ -346,10 +327,9 @@ async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
             .get_mut(&request.transaction_id)
             .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
         state
-            .status_updater
+            .tracker
             .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
             .await;
-        //cstate.hostpid = Some(request.hostpid);
     }
 
     Ok(Response::builder().status(200).body("".into()).unwrap())
@@ -371,7 +351,7 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     };
 
     state
-        .status_updater
+        .tracker
         .send_finished(
             cstate.node_id,
             &cstate.cmd,

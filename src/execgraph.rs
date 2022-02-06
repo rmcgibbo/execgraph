@@ -2,9 +2,10 @@ use crate::{
     graphtheory::transitive_closure_dag,
     logfile2::{LogEntry, LogFile},
     server::{router, State as ServerState},
-    sync::{ReadyTracker, StatusUpdater},
+    sync::{new_ready_tracker, ReadyTrackerClient},
 };
 use anyhow::{anyhow, Result};
+use bitvec::array::BitArray;
 use derivative::Derivative;
 use futures::future::join_all;
 use hyper::Server;
@@ -22,17 +23,15 @@ use std::{
 use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace};
-use crate::runnercapabilities::{RunnerCapabilities, FeatureExpr};
 
+// TODO: remove clone?
 #[derive(Derivative)]
 #[derivative(Debug, Clone, Default, PartialEq, Hash)]
 pub struct Cmd {
     pub cmdline: Vec<OsString>,
     pub key: String,
     pub display: Option<String>,
-    #[derivative(PartialEq = "ignore")]
-    #[derivative(Hash = "ignore")]
-    pub features: FeatureExpr,
+    pub affinity: BitArray<u64>,
 
     pub runcount: u32,
     pub priority: u32,
@@ -52,10 +51,9 @@ pub struct Cmd {
 
 #[derive(Debug)]
 pub struct RemoteProvisionerSpec {
-    cmd: String,
-    arg2: Option<String>,
+    pub cmd: String,
+    pub arg2: Option<String>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Capsule {
@@ -212,13 +210,14 @@ impl ExecGraph {
         failures_allowed: u32,
         rerun_failures: bool,
         provisioner: Option<RemoteProvisionerSpec>,
-        capabilities: RunnerCapabilities,
-
     ) -> Result<(u32, Vec<String>)> {
         fn extend_graph_lifetime<'a>(
             g: Arc<DiGraph<&'a Cmd, ()>>,
         ) -> Arc<DiGraph<&'static Cmd, ()>> {
             unsafe { std::mem::transmute::<_, Arc<DiGraph<&'static Cmd, ()>>>(g) }
+        }
+        fn transmute_lifetime<'a, T>(x: &'a T) -> &'static T {
+            unsafe { std::mem::transmute::<_, _>(x) }
         }
 
         let count_offset = self.completed.len() as u32;
@@ -239,12 +238,11 @@ impl ExecGraph {
         );
 
         let token = CancellationToken::new();
-        let (mut servicer, tasks_ready, status_updater) = ReadyTracker::new(
+        let (mut servicer, tracker) = new_ready_tracker(
             subgraph.clone(),
             &mut self.logfile,
             count_offset,
             failures_allowed,
-            &capabilities,
         );
 
         // Run local processes
@@ -255,8 +253,7 @@ impl ExecGraph {
                 let token = token.clone();
                 tokio::spawn(run_local_process_loop(
                     subgraph,
-                    tasks_ready.get(&None).expect("No null queue").clone(),
-                    status_updater.clone(),
+                    transmute_lifetime(&tracker),
                     token,
                 ))
             })
@@ -270,15 +267,13 @@ impl ExecGraph {
         match provisioner {
             Some(provisioner) => {
                 let subgraph = extend_graph_lifetime(subgraph.clone());
-                let tasks_ready = tasks_ready.clone();
-                let status_updater = status_updater.clone();
                 // let p2 = provisioner_arg2.clone();
                 let token1 = token.clone();
                 let token2 = token.clone();
                 let token3 = token.clone();
 
                 tokio::spawn(async move {
-                    let state = ServerState::new(subgraph, tasks_ready, status_updater);
+                    let state = ServerState::new(subgraph, transmute_lifetime(&tracker));
                     let router = router(state);
                     let service = RouterService::new(router).expect("Failed to constuct Router");
                     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
@@ -292,8 +287,7 @@ impl ExecGraph {
                         server_start_rx.await.expect("failed to recv");
                         trace!("Spawning remote provisioner {}", provisioner.cmd);
                         if let Err(e) =
-                            spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2)
-                                .await
+                            spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2).await
                         {
                             error!("Provisioner failed: {}", e);
                         }
@@ -350,13 +344,13 @@ impl ExecGraph {
 #[tracing::instrument(skip_all)]
 async fn run_local_process_loop(
     subgraph: Arc<DiGraph<&Cmd, ()>>,
-    tasks_ready: async_priority_channel::Receiver<NodeIndex, u32>,
-    status_updater: StatusUpdater,
+    tracker: &ReadyTrackerClient,
     token: CancellationToken,
 ) -> Result<()> {
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
-    while let Ok((subgraph_node_id, _priority)) = tasks_ready.recv().await {
+    let local_queue_runnertype = 0;
+    while let Ok(subgraph_node_id) = tracker.get_ready_task(local_queue_runnertype).await {
         let cmd = subgraph[subgraph_node_id];
         cmd.call_preamble();
 
@@ -370,10 +364,10 @@ async fn run_local_process_loop(
         let mut child = match maybe_child {
             Ok(child) => child,
             Err(_) => {
-                status_updater
+                tracker
                     .send_started(subgraph_node_id, cmd, &hostname, 0)
                     .await;
-                status_updater
+                tracker
                     .send_finished(
                         subgraph_node_id,
                         cmd,
@@ -397,7 +391,7 @@ async fn run_local_process_loop(
             .id()
             .ok_or_else(|| anyhow!("child hasn't been waited for yet, so its pid should exist"))?;
 
-        status_updater
+        tracker
             .send_started(subgraph_node_id, cmd, &hostname, pid)
             .await;
 
@@ -418,7 +412,7 @@ async fn run_local_process_loop(
         };
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        status_updater
+        tracker
             .send_finished(subgraph_node_id, cmd, status, stdout, stderr)
             .await;
     }
@@ -442,7 +436,11 @@ async fn spawn_and_wait_for_provisioner(
         .take()
         .ok_or_else(|| anyhow!("failed to take stdin from child process"))?;
 
-    let arg2_string = provisioner.arg2.as_ref().map(|x| x as &str).unwrap_or_else(|| "");
+    let arg2_string = provisioner
+        .arg2
+        .as_ref()
+        .map(|x| x as &str)
+        .unwrap_or_else(|| "");
     let arg2_bytes = arg2_string.as_bytes();
     let mut buf = Vec::new();
     buf.extend_from_slice(&(arg2_bytes.len() as u64).to_be_bytes());

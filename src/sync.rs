@@ -1,16 +1,17 @@
-use crate::{
-    execgraph::Cmd,
-    logfile2,
-    runnercapabilities::{RunnerCapabilities, RunnerTypeId},
-};
+use crate::{execgraph::Cmd, logfile2};
 use anyhow::Result;
+use bitvec::array::BitArray;
 use logfile2::{LogEntry, LogFile};
 use petgraph::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
     convert::{TryFrom, TryInto},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering::SeqCst},
+        Arc, Mutex,
+    },
 };
+use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 const FAIL_COMMAND_PREFIX: &str = "wrk/";
@@ -33,28 +34,41 @@ macro_rules! u32checked_add {
 // the local runner will have the capability ["local"]
 //
 
-pub struct ReadyTracker<'a> {
+const NUM_RUNNER_TYPES: usize = 64;
+
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub num_ready: u32,
+}
+
+#[derive(Debug, Clone)]
+struct TaskItem {
+    id: NodeIndex,
+    affinity: BitArray<u64>,
+    taken: Arc<AtomicBool>,
+}
+
+pub struct ReadyTrackerServer<'a> {
     pub finished_order: Vec<NodeIndex>,
     pub n_failed: u32,
 
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile,
-    // TODO: change from a hashmap to a vec, since we're now indexing with integer runnertypeids.
-    ready: Option<HashMap<RunnerTypeId, async_priority_channel::Sender<NodeIndex, u32>>>,
+    ready: Option<[async_priority_channel::Sender<TaskItem, u32>; NUM_RUNNER_TYPES]>,
     completed: async_channel::Receiver<CompletedEvent>,
     n_success: u32,
     n_pending: u32,
     count_offset: u32,
     failures_allowed: u32,
-    // queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
+    queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
     inflight: HashSet<NodeIndex>,
-    capabilities: &'a RunnerCapabilities,
 }
 
-#[derive(Clone, Debug)]
-pub struct StatusUpdater {
+#[derive(Debug)]
+pub struct ReadyTrackerClient {
+    queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
     s: async_channel::Sender<CompletedEvent>,
-    // queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
+    r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
 }
 
 struct TaskStatus {
@@ -62,71 +76,49 @@ struct TaskStatus {
     poisoned: bool,
 }
 
-impl<'a> ReadyTracker<'a> {
-    pub fn new(
-        g: Arc<DiGraph<&'a Cmd, ()>>,
-        logfile: &'a mut LogFile,
-        count_offset: u32,
-        failures_allowed: u32,
-        capabilities: &'a RunnerCapabilities,
-    ) -> (
-        ReadyTracker<'a>,
-        HashMap<RunnerTypeId, async_priority_channel::Receiver<NodeIndex, u32>>,
-        StatusUpdater,
-    ) {
-        let mut ready_s =
-            HashMap::<RunnerTypeId, async_priority_channel::Sender<NodeIndex, u32>>::new();
-        let mut ready_r =
-            HashMap::<RunnerTypeId, async_priority_channel::Receiver<NodeIndex, u32>>::new();
+pub fn new_ready_tracker<'a>(
+    g: Arc<DiGraph<&'a Cmd, ()>>,
+    logfile: &'a mut LogFile,
+    count_offset: u32,
+    failures_allowed: u32,
+) -> (ReadyTrackerServer<'a>, ReadyTrackerClient) {
+    let mut ready_s = vec![];
+    let mut ready_r = vec![];
 
-        // Create empty channels for each runnertype
-        for t in capabilities.runner_types() {
-            let (sender, receiver) = async_priority_channel::unbounded();
-            ready_s.insert(t, sender);
-            ready_r.insert(t, receiver);
-        }
-
-        // let queuestate = Arc::new(Mutex::new(
-        //     ready_s
-        //         .keys()
-        //         .map(|queuename| {
-        //             (
-        //                 queuename.clone(),
-        //                 QueueSnapshot {
-        //                     n_pending: 0,
-        //                     n_success: 0,
-        //                     n_failed: 0,
-        //                 },
-        //             )
-        //         })
-        //         .collect::<HashMap<Queuename, QueueSnapshot>>(),
-        // ));
-
-        let (finished_s, finished_r) = async_channel::unbounded();
-
-        (
-            ReadyTracker {
-                finished_order: vec![],
-                g,
-                ready: Some(ready_s),
-                completed: finished_r,
-                n_failed: 0,
-                n_success: 0,
-                n_pending: 0,
-                count_offset,
-                failures_allowed,
-                // queuestate: queuestate.clone(),
-                inflight: HashSet::new(),
-                logfile,
-                capabilities,
-            },
-            ready_r,
-            StatusUpdater {
-                s: finished_s,
-                //queuestate,
-            },
-        )
+    // Create empty channels for each runnertype
+    for _ in 0..NUM_RUNNER_TYPES {
+        let (sender, receiver) = async_priority_channel::unbounded();
+        ready_s.push(sender);
+        ready_r.push(receiver);
     }
+
+    let queuestate = Arc::new(Mutex::new(HashMap::new()));
+    let (finished_s, finished_r) = async_channel::unbounded();
+
+    (
+        ReadyTrackerServer {
+            finished_order: vec![],
+            g,
+            ready: Some(ready_s.try_into().unwrap()),
+            completed: finished_r,
+            n_failed: 0,
+            n_success: 0,
+            n_pending: 0,
+            count_offset,
+            failures_allowed,
+            queuestate: queuestate.clone(),
+            inflight: HashSet::new(),
+            logfile,
+        },
+        ReadyTrackerClient {
+            r: ready_r.try_into().unwrap(),
+            s: finished_s,
+            queuestate,
+        },
+    )
+}
+
+impl<'a> ReadyTrackerServer<'a> {
     pub fn drain(&mut self) -> Result<()> {
         loop {
             match self.completed.try_recv() {
@@ -179,13 +171,7 @@ impl<'a> ReadyTracker<'a> {
         self.add_to_ready_queue(
             statuses
                 .iter()
-                .filter_map(|(k, v)| {
-                    if v.n_unmet_deps == 0 {
-                        Some((*k, self.g[*k].priority))
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|(k, v)| if v.n_unmet_deps == 0 { Some(*k) } else { None })
                 .collect(),
         )
         .await?;
@@ -252,13 +238,6 @@ impl<'a> ReadyTracker<'a> {
         let is_success = e.status == 0;
         let total = statuses.len() as u32;
         let cmd = self.g[e.id];
-
-        self.queuestate
-            .lock()
-            .expect("Something must have panicked while holding this lock?")
-            .get_mut(&statuses.get(&e.id).expect("No such  task?").queuename)
-            .expect("No such queue")
-            .n_pending -= 1;
         self.n_pending -= 1;
 
         if is_success {
@@ -295,76 +274,110 @@ impl<'a> ReadyTracker<'a> {
             eprint!("{}", e.stderr);
         }
 
-        for (queuename, ready) in group(
-            self.g
-                .edges_directed(e.id, Direction::Outgoing)
-                .filter_map(|edge| {
-                    let downstream_id = edge.target();
-                    let mut status = statuses.get_mut(&downstream_id).expect("key doesn't exist");
-                    if is_success {
-                        if !status.poisoned {
-                            status.n_unmet_deps -= 1;
-                            if status.n_unmet_deps == 0 {
-                                return Some((
-                                    // TODO: can we avoid this clone?
-                                    status.queuename.clone(),
-                                    (downstream_id, self.g[downstream_id].priority),
-                                ));
-                            }
+        let ready = self
+            .g
+            .edges_directed(e.id, Direction::Outgoing)
+            .filter_map(|edge| {
+                let downstream_id = edge.target();
+                let mut status = statuses.get_mut(&downstream_id).expect("key doesn't exist");
+                if is_success {
+                    if !status.poisoned {
+                        status.n_unmet_deps -= 1;
+                        if status.n_unmet_deps == 0 {
+                            return Some(downstream_id);
                         }
-                    } else {
-                        // failed. mark any (first-order) downstream tasks as poisoned.
-                        status.poisoned = true;
                     }
+                } else {
+                    // failed. mark any (first-order) downstream tasks as poisoned.
+                    status.poisoned = true;
+                }
 
-                    None
-                }),
-        ) {
-            self.add_to_ready_queue(ready).await?;
-        }
-
+                None
+            })
+            .collect();
+        self.add_to_ready_queue(ready).await?;
         Ok(())
     }
 
     async fn add_to_ready_queue(
         &mut self,
-        ready: Vec<(NodeIndex, u32)>, // cmd index and priority
+        ready: Vec<NodeIndex>, // cmd index and priority
     ) -> Result<()> {
-        // let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
-        // let queuestate = queuestate_lock
-        //     .get_mut(queuename)
-        //     .expect("No such Queuename");
-        //queuestate.n_pending = u32checked_add!(queuestate.n_pending, ready.len());
+        let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
         self.n_pending = u32checked_add!(self.n_pending, ready.len());
+        let mut inserts = vec![vec![]; NUM_RUNNER_TYPES];
 
-        for (index, _priority) in ready.iter() {
-            let cmd = self.g[*index];
+        for index in ready.into_iter() {
+            let cmd = self.g[index];
+            let priority = cmd.priority;
             self.logfile
                 .write(LogEntry::new_ready(&cmd.key, cmd.runcount, &cmd.display()))?;
-        }
+            queuestate_lock
+                .entry(cmd.affinity)
+                .or_insert_with(|| Snapshot { num_ready: 0 })
+                .num_ready += 1;
 
-        let mut inserts = vec![vec![]; self.capabilities.runner_types().count()];
-        for (index, priority) in ready.into_iter() {
-            let cmd = self.g[index];
-            for allowed_runnertype in self.capabilities.affinity(cmd) {
-                inserts[allowed_runnertype as usize].push((index, priority));
+            let taken = Arc::new(AtomicBool::new(false));
+            for i in cmd
+                .affinity
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| if *b { Some(i) } else { None })
+            {
+                inserts[i].push((
+                    TaskItem {
+                        id: index,
+                        taken: taken.clone(),
+                        affinity: cmd.affinity,
+                    },
+                    priority,
+                ));
             }
         }
+
+        drop(queuestate_lock);
+
         let channels = self
             .ready
             .as_mut()
             .expect("send channel was already dropped?");
-        for (runnertype, ready) in inserts.into_iter().enumerate() {
-            channels[&runnertype.try_into().unwrap()]
-                .sendv(ready.into_iter().peekable())
-                .await?;
+        for (i, ready) in inserts.into_iter().enumerate() {
+            if !ready.is_empty() {
+                channels[i].sendv(ready.into_iter().peekable()).await?;
+            }
         }
 
         Ok(())
     }
 }
 
-impl StatusUpdater {
+impl ReadyTrackerClient {
+    pub async fn get_ready_task(
+        &self,
+        runnertypeid: u32,
+    ) -> Result<NodeIndex, ReadyTrackerClientError> {
+        let reciever = self
+            .r
+            .get(runnertypeid as usize)
+            .ok_or(ReadyTrackerClientError::NoSuchRunnerType)?;
+
+        // Each task might be in multiple ready queues, one for each runner type that it's
+        // eligible for. So within the ready queue we store an AtomicBool that represents
+        // whether this item has already been claimed. A different way to implement this would
+        // be to pop off receiver channel and then mutate all of the other channels to remove
+        // the item, but instead we're using this tombstone idea.
+        loop {
+            let (task, _priority) = reciever.recv().await?;
+            if !task.taken.fetch_and(true, SeqCst) {
+                let mut s = self.queuestate.lock().expect("foo");
+                let x = s.get_mut(&task.affinity).expect("bar");
+                x.num_ready -= 1;
+
+                return Ok(task.id);
+            }
+        }
+    }
+
     /// When a task is started, notify the tracker by calling this.
     pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, host: &str, pid: u32) {
         cmd.call_preamble();
@@ -406,7 +419,7 @@ impl StatusUpdater {
     }
 
     /// Retreive a snapshot of the state of the queue
-    pub fn get_queuestate(&self) -> HashMap<Queuename, QueueSnapshot> {
+    pub fn get_queuestate(&self) -> HashMap<BitArray<u64>, Snapshot> {
         self.queuestate
             .lock()
             .expect("Something must have panicked while holding this lock")
@@ -432,23 +445,15 @@ enum CompletedEvent {
     Finished(FinishedEvent),
 }
 
-// https://users.rust-lang.org/t/group-iterator-into-hashmap-k-vec-v/31727/2
-fn group<K, V, I>(iter: I) -> HashMap<K, Vec<V>>
-where
-    K: Eq + std::hash::Hash,
-    I: Iterator<Item = (K, V)>,
-{
-    let mut hash_map = match iter.size_hint() {
-        (_, Some(len)) => HashMap::with_capacity(len),
-        (len, None) => HashMap::with_capacity(len),
-    };
+#[derive(Debug, Error)]
+pub enum ReadyTrackerClientError {
+    #[error("{0}")]
+    ChannelRecvError(
+        #[source]
+        #[from]
+        async_priority_channel::RecvError,
+    ),
 
-    for (key, value) in iter {
-        hash_map
-            .entry(key)
-            .or_insert_with(|| Vec::with_capacity(1))
-            .push(value)
-    }
-
-    hash_map
+    #[error("No such runner type")]
+    NoSuchRunnerType,
 }

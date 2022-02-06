@@ -52,7 +52,7 @@ async fn main() -> Result<(), RemoteError> {
     };
 
     while still_accepting_tasks() {
-        match run_command(&base, &client, &opt.queue).await {
+        match run_command(&base, &client, opt.runnertypeid).await {
             Err(RemoteError::Connection(e)) => {
                 // break with no error message
                 debug!("{:#?}", e);
@@ -68,7 +68,7 @@ async fn main() -> Result<(), RemoteError> {
 async fn run_command(
     base: &reqwest::Url,
     client: &reqwest::Client,
-    queue: &Option<String>,
+    runnertypeid: u32,
 ) -> Result<(), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
@@ -77,9 +77,7 @@ async fn run_command(
 
     let start = client
         .get(start_route)
-        .json(&StartRequest {
-            queuename: queue.clone(),
-        })
+        .json(&StartRequest { runnertypeid })
         .send()
         .await?
         .error_for_status()?
@@ -280,9 +278,8 @@ struct Opt {
     /// Url of controller
     url: String,
 
-    /// Work on tasks for a particular slurm queue. If not supplied,
-    /// work on 'general' tasks.
-    queue: Option<String>,
+    /// "Runner type", a number between 0 and 63 signifying the features of this node
+    runnertypeid: u32,
 
     /// Stop accepting new tasks after this amount of time, in seconds.
     #[structopt(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]

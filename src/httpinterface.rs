@@ -1,4 +1,3 @@
-use crate::sync::Queuename;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ffi::OsString};
 
@@ -17,19 +16,17 @@ pub struct StatusRequest {
 #[derive(Serialize, Deserialize)]
 pub struct StatusReply {
     #[serde(with = "vectorize")]
-    pub queues: HashMap<Queuename, StatusQueueReply>,
+    pub queues: HashMap<u64, StatusQueueReply>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct StatusQueueReply {
     pub num_ready: u32,
-    pub num_failed: u32,
-    pub num_success: u32,
     pub num_inflight: u32,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct StartRequest {
-    pub queuename: Option<String>,
+    pub runnertypeid: u32,
 }
 
 #[derive(Serialize, Deserialize)]
