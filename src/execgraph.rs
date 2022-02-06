@@ -22,6 +22,7 @@ use std::{
 use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, trace};
+use crate::runnercapabilities::{RunnerCapabilities, FeatureExpr};
 
 #[derive(Derivative)]
 #[derivative(Debug, Clone, Default, PartialEq, Hash)]
@@ -29,7 +30,10 @@ pub struct Cmd {
     pub cmdline: Vec<OsString>,
     pub key: String,
     pub display: Option<String>,
-    pub queuename: Option<String>,
+    #[derivative(PartialEq = "ignore")]
+    #[derivative(Hash = "ignore")]
+    pub features: FeatureExpr,
+
     pub runcount: u32,
     pub priority: u32,
 
@@ -45,6 +49,13 @@ pub struct Cmd {
     #[derivative(Hash = "ignore")]
     pub postamble: Option<Capsule>,
 }
+
+#[derive(Debug)]
+pub struct RemoteProvisionerSpec {
+    cmd: String,
+    arg2: Option<String>,
+}
+
 
 #[derive(Debug, Clone)]
 pub struct Capsule {
@@ -188,7 +199,7 @@ impl ExecGraph {
             self.deps.add_edge(dep, new_node, ());
         }
 
-        self.key_to_nodeid.insert(key, new_node);        
+        self.key_to_nodeid.insert(key, new_node);
         trace!("Added command to task graph");
         Ok(new_node.index() as u32)
     }
@@ -200,8 +211,9 @@ impl ExecGraph {
         num_parallel: u32,
         failures_allowed: u32,
         rerun_failures: bool,
-        provisioner: Option<String>,
-        provisioner_arg2: Option<String>,
+        provisioner: Option<RemoteProvisionerSpec>,
+        capabilities: RunnerCapabilities,
+
     ) -> Result<(u32, Vec<String>)> {
         fn extend_graph_lifetime<'a>(
             g: Arc<DiGraph<&'a Cmd, ()>>,
@@ -221,7 +233,10 @@ impl ExecGraph {
             trace!("Short-circuiting execution because subgraph N=0.");
             return Ok((0, vec![]));
         }
-        trace!("Executing dependency graph of N={} tasks", subgraph.node_count());
+        trace!(
+            "Executing dependency graph of N={} tasks",
+            subgraph.node_count()
+        );
 
         let token = CancellationToken::new();
         let (mut servicer, tasks_ready, status_updater) = ReadyTracker::new(
@@ -229,6 +244,7 @@ impl ExecGraph {
             &mut self.logfile,
             count_offset,
             failures_allowed,
+            &capabilities,
         );
 
         // Run local processes
@@ -236,7 +252,7 @@ impl ExecGraph {
         let handles = (0..num_parallel)
             .map(|_| {
                 let subgraph = extend_graph_lifetime(subgraph.clone());
-                let token = token.clone();                
+                let token = token.clone();
                 tokio::spawn(run_local_process_loop(
                     subgraph,
                     tasks_ready.get(&None).expect("No null queue").clone(),
@@ -256,11 +272,11 @@ impl ExecGraph {
                 let subgraph = extend_graph_lifetime(subgraph.clone());
                 let tasks_ready = tasks_ready.clone();
                 let status_updater = status_updater.clone();
-                let p2 = provisioner_arg2.clone();
+                // let p2 = provisioner_arg2.clone();
                 let token1 = token.clone();
                 let token2 = token.clone();
                 let token3 = token.clone();
-                
+
                 tokio::spawn(async move {
                     let state = ServerState::new(subgraph, tasks_ready, status_updater);
                     let router = router(state);
@@ -274,11 +290,11 @@ impl ExecGraph {
 
                     tokio::spawn(async move {
                         server_start_rx.await.expect("failed to recv");
-                        trace!("Spawning remote provisioner {}", provisioner);
+                        trace!("Spawning remote provisioner {}", provisioner.cmd);
                         if let Err(e) =
-                            spawn_and_wait_for_provisioner(&provisioner, p2, bound_addr, token2)
+                            spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2)
                                 .await
-                        {                            
+                        {
                             error!("Provisioner failed: {}", e);
                         }
                         token3.cancel();
@@ -412,12 +428,11 @@ async fn run_local_process_loop(
 
 #[tracing::instrument]
 async fn spawn_and_wait_for_provisioner(
-    provisioner: &str,
-    arg2: Option<String>,
+    provisioner: &RemoteProvisionerSpec,
     bound_addr: SocketAddr,
     token: CancellationToken,
 ) -> Result<()> {
-    let mut child = Command::new(provisioner)
+    let mut child = Command::new(&provisioner.cmd)
         .arg(format!("http://{}", bound_addr))
         .kill_on_drop(true)
         .stdin(Stdio::piped())
@@ -427,7 +442,7 @@ async fn spawn_and_wait_for_provisioner(
         .take()
         .ok_or_else(|| anyhow!("failed to take stdin from child process"))?;
 
-    let arg2_string = arg2.unwrap_or_else(|| "".to_owned());
+    let arg2_string = provisioner.arg2.as_ref().map(|x| x as &str).unwrap_or_else(|| "");
     let arg2_bytes = arg2_string.as_bytes();
     let mut buf = Vec::new();
     buf.extend_from_slice(&(arg2_bytes.len() as u64).to_be_bytes());
@@ -494,7 +509,11 @@ fn get_subgraph<'a, 'b: 'a>(
                 },
                 |_e, _w| Some(()),
             );
-            trace!("Got N={} nodes in transitive closure of taget = {}", r.node_count(), target_index);
+            trace!(
+                "Got N={} nodes in transitive closure of taget = {}",
+                r.node_count(),
+                target_index
+            );
             r
         }
         None => deps.filter_map(|_n, w| Some(w), |_e, _w| Some(())),
@@ -510,12 +529,18 @@ fn get_subgraph<'a, 'b: 'a>(
                 // if we already ran this command within this process, don't record it
                 // in reused_old_keys. that's only for stuff that was run in a previous
                 // session
-                trace!("Skipping {} because it was already run successfully within this session", w.key);
+                trace!(
+                    "Skipping {} because it was already run successfully within this session",
+                    w.key
+                );
                 return None; // returning none excludes it from filtered_subgraph
             }
             let has_success = logfile.has_success(&w.key);
             if has_success {
-                trace!("Skipping {} because it already ran successfully accord to the log file", w.key);
+                trace!(
+                    "Skipping {} because it already ran successfully accord to the log file",
+                    w.key
+                );
                 reused_old_keys.insert(w.key.clone());
                 return None;
             }
@@ -550,8 +575,10 @@ fn get_subgraph<'a, 'b: 'a>(
                 }
                 for e in tc.edges_directed(n, Direction::Incoming) {
                     if failures.contains(&e.source()) {
-                        trace!("Skipping {} because it's downstream of a task that previously failed.",
-                                w.key);
+                        trace!(
+                            "Skipping {} because it's downstream of a task that previously failed.",
+                            w.key
+                        );
                         return None;
                     }
                 }

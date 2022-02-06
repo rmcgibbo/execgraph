@@ -8,7 +8,8 @@ use tokio::runtime::Runtime;
 use tracing::{debug, warn};
 
 use crate::{
-    execgraph::{Cmd, ExecGraph},
+    execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
+    runnercapabilities::{RunnerCapabilities, FeatureExpr},
     logfile2::{self, LogEntry, LogFile},
 };
 
@@ -44,7 +45,12 @@ pub struct PyExecGraph {
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(num_parallel = -1, failures_allowed = 1, newkeyfn = "None", rerun_failures=true)]
+    #[args(
+        num_parallel = -1,
+        failures_allowed = 1,
+        newkeyfn = "None",
+        rerun_failures=true
+    )]
     #[tracing::instrument(skip(py))]
     fn new(
         py: Python,
@@ -54,7 +60,6 @@ impl PyExecGraph {
         newkeyfn: Option<PyObject>,
         rerun_failures: bool,
     ) -> PyResult<PyExecGraph> {
-
         if num_parallel < 0 {
             num_parallel = num_cpus::get() as i32 + 2;
         }
@@ -186,11 +191,11 @@ impl PyExecGraph {
     ///     key (str): unique identifier
     ///     dependencies (List[int], default=[]): dependencies for this task
     /// Returns:
-    ///     taskid (int): integer id of this task    
+    ///     taskid (int): integer id of this task
     #[args(
         dependencies = "vec![]",
         display = "None",
-        queuename = "None",
+        features = "vec![]",
         stdin = "vec![]",
         preamble = "None",
         postamble = "None"
@@ -203,7 +208,7 @@ impl PyExecGraph {
         key: String,
         dependencies: Vec<u32>,
         display: Option<String>,
-        queuename: Option<String>,
+        features: Vec<String>,
         stdin: Vec<u8>,
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
@@ -213,10 +218,10 @@ impl PyExecGraph {
             cmdline,
             key,
             display,
-            queuename,
             stdin,
             runcount,
             priority: 0,
+            features: FeatureExpr::new(features),
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
         };
@@ -248,11 +253,6 @@ impl PyExecGraph {
     ///     it'll be passed as the second argument to remote_provisioner. The first
     ///     argument will be the url.
     ///
-    /// Notes:
-    ///     We currently do not do output buffering, so stdout goes directly to the
-    ///     terminal, including the bad behavior of overlapping streams for stout of
-    ///     commands executed in parallel.
-    ///
     /// Returns:
     ///     num_failed (int): the number of tasks that failed. a failure is identified
     ///         when a task exits with a nonzero exit code.
@@ -262,7 +262,9 @@ impl PyExecGraph {
     #[args(
         target = "None",
         remote_provisioner = "None",
-        remote_provisioner_arg2 = "None"
+        remote_provisioner_arg2 = "None",
+        local_capabilities = "vec![\"local\".to_string()]",
+        remote_capabilities = "vec![]"
     )]
     #[tracing::instrument(skip_all)]
     fn execute(
@@ -271,14 +273,26 @@ impl PyExecGraph {
         target: Option<u32>,
         remote_provisioner: Option<String>,
         remote_provisioner_arg2: Option<String>,
+        local_capabilities: Vec<String>,
+        remote_capabilities: Vec<Vec<String>>,
     ) -> PyResult<(u32, Vec<String>)> {
         // Create a new process group so that at shutdown time, we can send a
-        // SIGTERM to this process group annd kill of all child processes.
-	unsafe {
-	    if libc::setpgid(libc::getpid(), libc::getpid()) != 0 {
-		PyRuntimeError::new_err("Cannot setpgid");
-	    }
-	}
+        // SIGTERM to this process group and kill of all child processes.
+        unsafe {
+            if libc::setpgid(libc::getpid(), libc::getpid()) != 0 {
+                PyRuntimeError::new_err("Cannot setpgid");
+            }
+        }
+
+        let x = match remote_provisioner {
+            Some(cmd) => Some(RemoteProvisionerSpec {cmd: cmd, arg2: remote_provisioner_arg2 }),
+            None => None
+        };
+        let c = RunnerCapabilities {
+            local: local_capabilities,
+            remote: remote_capabilities,
+        };
+
         py.allow_threads(move || {
             let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
@@ -288,8 +302,8 @@ impl PyExecGraph {
                         self.num_parallel,
                         self.failures_allowed,
                         self.rerun_failures,
-                        remote_provisioner,
-                        remote_provisioner_arg2,
+                        x,
+                        c
                     )
                     .await
             })

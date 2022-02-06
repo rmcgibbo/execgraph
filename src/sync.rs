@@ -1,35 +1,37 @@
-use crate::{execgraph::Cmd, logfile2};
+use crate::{
+    execgraph::Cmd,
+    logfile2,
+    runnercapabilities::{RunnerCapabilities, RunnerTypeId},
+};
 use anyhow::Result;
 use logfile2::{LogEntry, LogFile};
 use petgraph::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
-    convert::TryFrom,
+    convert::{TryFrom, TryInto},
     sync::{Arc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
 
 const FAIL_COMMAND_PREFIX: &str = "wrk/";
 
-pub type Queuename = Option<String>;
-
 macro_rules! u32checked_add {
-    // macth like arm for macro
-    ($a:expr,$b:expr) => {
-        // macro expand to this code
-        {
-            $a.checked_add(u32::try_from($b).expect("arithmetic overflow"))
-                .expect("arithmetic overflow")
-        }
-    };
+    ($a:expr,$b:expr) => {{
+        $a.checked_add(u32::try_from($b).expect("arithmetic overflow"))
+            .expect("arithmetic overflow")
+    }};
 }
 
-#[derive(Clone, Debug)]
-pub struct QueueSnapshot {
-    pub n_pending: u32,
-    pub n_success: u32,
-    pub n_failed: u32,
-}
+// Each task has a vec of features that it requires,
+// which are abstract to us but are like ["gpu", "remote", "..."]
+// they also might be like ["!remote"].
+//
+// Each runner will have a list of capabilties, and we'll
+// match the runner against the capabilities to determine
+// whether the task is eligible to run on the runner.
+//
+// the local runner will have the capability ["local"]
+//
 
 pub struct ReadyTracker<'a> {
     pub finished_order: Vec<NodeIndex>,
@@ -37,26 +39,27 @@ pub struct ReadyTracker<'a> {
 
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile,
-    ready: Option<HashMap<Queuename, async_priority_channel::Sender<NodeIndex, u32>>>,
+    // TODO: change from a hashmap to a vec, since we're now indexing with integer runnertypeids.
+    ready: Option<HashMap<RunnerTypeId, async_priority_channel::Sender<NodeIndex, u32>>>,
     completed: async_channel::Receiver<CompletedEvent>,
     n_success: u32,
     n_pending: u32,
     count_offset: u32,
     failures_allowed: u32,
-    queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
+    // queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
     inflight: HashSet<NodeIndex>,
+    capabilities: &'a RunnerCapabilities,
 }
 
 #[derive(Clone, Debug)]
 pub struct StatusUpdater {
     s: async_channel::Sender<CompletedEvent>,
-    queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
+    // queuestate: Arc<Mutex<HashMap<Queuename, QueueSnapshot>>>,
 }
 
 struct TaskStatus {
     n_unmet_deps: usize,
     poisoned: bool,
-    queuename: Queuename,
 }
 
 impl<'a> ReadyTracker<'a> {
@@ -65,42 +68,39 @@ impl<'a> ReadyTracker<'a> {
         logfile: &'a mut LogFile,
         count_offset: u32,
         failures_allowed: u32,
+        capabilities: &'a RunnerCapabilities,
     ) -> (
         ReadyTracker<'a>,
-        HashMap<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>,
+        HashMap<RunnerTypeId, async_priority_channel::Receiver<NodeIndex, u32>>,
         StatusUpdater,
     ) {
         let mut ready_s =
-            HashMap::<Queuename, async_priority_channel::Sender<NodeIndex, u32>>::new();
+            HashMap::<RunnerTypeId, async_priority_channel::Sender<NodeIndex, u32>>::new();
         let mut ready_r =
-            HashMap::<Queuename, async_priority_channel::Receiver<NodeIndex, u32>>::new();
-        for queuename in g
-            .node_indices()
-            .map(|i| g[i].queuename.clone())
-            .chain(std::iter::once(None))
-            .collect::<HashSet<_>>()
-            .iter()
-        {
+            HashMap::<RunnerTypeId, async_priority_channel::Receiver<NodeIndex, u32>>::new();
+
+        // Create empty channels for each runnertype
+        for t in capabilities.runner_types() {
             let (sender, receiver) = async_priority_channel::unbounded();
-            ready_s.insert(queuename.clone(), sender);
-            ready_r.insert(queuename.clone(), receiver);
+            ready_s.insert(t, sender);
+            ready_r.insert(t, receiver);
         }
 
-        let queuestate = Arc::new(Mutex::new(
-            ready_s
-                .keys()
-                .map(|queuename| {
-                    (
-                        queuename.clone(),
-                        QueueSnapshot {
-                            n_pending: 0,
-                            n_success: 0,
-                            n_failed: 0,
-                        },
-                    )
-                })
-                .collect::<HashMap<Queuename, QueueSnapshot>>(),
-        ));
+        // let queuestate = Arc::new(Mutex::new(
+        //     ready_s
+        //         .keys()
+        //         .map(|queuename| {
+        //             (
+        //                 queuename.clone(),
+        //                 QueueSnapshot {
+        //                     n_pending: 0,
+        //                     n_success: 0,
+        //                     n_failed: 0,
+        //                 },
+        //             )
+        //         })
+        //         .collect::<HashMap<Queuename, QueueSnapshot>>(),
+        // ));
 
         let (finished_s, finished_r) = async_channel::unbounded();
 
@@ -115,14 +115,15 @@ impl<'a> ReadyTracker<'a> {
                 n_pending: 0,
                 count_offset,
                 failures_allowed,
-                queuestate: queuestate.clone(),
+                // queuestate: queuestate.clone(),
                 inflight: HashSet::new(),
                 logfile,
+                capabilities,
             },
             ready_r,
             StatusUpdater {
                 s: finished_s,
-                queuestate,
+                //queuestate,
             },
         )
     }
@@ -169,23 +170,25 @@ impl<'a> ReadyTracker<'a> {
                     TaskStatus {
                         n_unmet_deps: self.g.edges_directed(i, Direction::Incoming).count(),
                         poisoned: false,
-                        // TODO: can we avoid this clone?
-                        queuename: self.g[i].queuename.clone(),
                     },
                 )
             })
             .collect();
 
         // trigger all of the tasks that have zero unmet dependencies
-        for (queuename, ready) in group(statuses.iter().filter_map(|(k, v)| {
-            if v.n_unmet_deps == 0 {
-                Some((&v.queuename, (*k, self.g[*k].priority)))
-            } else {
-                None
-            }
-        })) {
-            self.add_to_ready_queue(queuename, ready).await?;
-        }
+        self.add_to_ready_queue(
+            statuses
+                .iter()
+                .filter_map(|(k, v)| {
+                    if v.n_unmet_deps == 0 {
+                        Some((*k, self.g[*k].priority))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+        .await?;
 
         // every time we put a task into the ready queue, we increment n_pending.
         // every time a task completes, we decrement n_pending.
@@ -317,7 +320,7 @@ impl<'a> ReadyTracker<'a> {
                     None
                 }),
         ) {
-            self.add_to_ready_queue(&queuename, ready).await?;
+            self.add_to_ready_queue(ready).await?;
         }
 
         Ok(())
@@ -325,29 +328,37 @@ impl<'a> ReadyTracker<'a> {
 
     async fn add_to_ready_queue(
         &mut self,
-        queuename: &Queuename,
-        ready: Vec<(NodeIndex, u32)>,
+        ready: Vec<(NodeIndex, u32)>, // cmd index and priority
     ) -> Result<()> {
-        let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
-        let queuestate = queuestate_lock
-            .get_mut(queuename)
-            .expect("No such Queuename");
-        queuestate.n_pending = u32checked_add!(queuestate.n_pending, ready.len());
+        // let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
+        // let queuestate = queuestate_lock
+        //     .get_mut(queuename)
+        //     .expect("No such Queuename");
+        //queuestate.n_pending = u32checked_add!(queuestate.n_pending, ready.len());
         self.n_pending = u32checked_add!(self.n_pending, ready.len());
 
-        for (index, _) in ready.iter() {
+        for (index, _priority) in ready.iter() {
             let cmd = self.g[*index];
             self.logfile
                 .write(LogEntry::new_ready(&cmd.key, cmd.runcount, &cmd.display()))?;
         }
 
-        self.ready
+        let mut inserts = vec![vec![]; self.capabilities.runner_types().count()];
+        for (index, priority) in ready.into_iter() {
+            let cmd = self.g[index];
+            for allowed_runnertype in self.capabilities.affinity(cmd) {
+                inserts[allowed_runnertype as usize].push((index, priority));
+            }
+        }
+        let channels = self
+            .ready
             .as_mut()
-            .expect("send channel was already dropped?")
-            .get_mut(queuename)
-            .expect("No such Queuename")
-            .sendv(ready.into_iter().peekable())
-            .await?;
+            .expect("send channel was already dropped?");
+        for (runnertype, ready) in inserts.into_iter().enumerate() {
+            channels[&runnertype.try_into().unwrap()]
+                .sendv(ready.into_iter().peekable())
+                .await?;
+        }
 
         Ok(())
     }

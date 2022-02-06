@@ -81,7 +81,7 @@ impl std::error::Error for JsonResponseErr {}
 //     // fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
 //     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 //         f.debug_struct("State")
-//             .field("connections", &self.connections)        
+//             .field("connections", &self.connections)
 //             .field("subgraph", subgraph)
 //         .finish()
 //     }
