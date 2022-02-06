@@ -196,25 +196,11 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
     let resp = snapshot
         .iter()
         .map(|(name, queue)| {
-            // let num_ready = state.tracker.get(name).unwrap().len() as u32;
-            // the 'pending' count includes all tasks between the stages of having
-            // been added to the ready queue and having been marked as completed.
-            // so we'll say that the that can be broken into the number in the ready
-            // queue and the number that are currently inflight.
-            // if queue.n_pending < num_ready {
-            //     panic!(
-            //         "this shouldn't happen, and indiciates some kind of internal accounting bug"
-            //     );
-            // }
-
             (
                 name.data,
                 StatusQueueReply {
                     num_ready: queue.num_ready,
-                    num_inflight: 0,
-                    // num_failed: queue.n_failed,
-                    // num_success: queue.n_success,
-                    // num_inflight: queue.n_pending - num_ready,
+                    num_inflight: queue.num_inflight,
                 },
             )
         })
@@ -249,10 +235,9 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
 
     let node_id = state
         .tracker
-        .get_ready_task(request.runnertypeid)
-        .await
+        .try_recv(request.runnertypeid)
         .map_err(|e| match e {
-            crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => json_response_err(
+            crate::sync::ReadyTrackerClientError::ChannelTryRecvError(_) => json_response_err(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("Channel closed: {:?}", e),
             ),
@@ -260,6 +245,7 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
                 StatusCode::NOT_FOUND,
                 format!("Invalid runner type: {:?}", request.runnertypeid),
             ),
+            crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => unreachable!(),
         })?;
 
     let (ping_tx, ping_rx) = async_channel::bounded::<()>(1);

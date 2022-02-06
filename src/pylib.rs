@@ -283,9 +283,9 @@ impl PyExecGraph {
         }
 
         let x = remote_provisioner.map(|cmd| RemoteProvisionerSpec {
-                cmd,
-                arg2: remote_provisioner_arg2,
-            });
+            cmd,
+            arg2: remote_provisioner_arg2,
+        });
 
         py.allow_threads(move || {
             let rt = Runtime::new().expect("Failed to build tokio runtime");

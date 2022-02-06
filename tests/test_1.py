@@ -212,7 +212,9 @@ def test_simple_remote(num_parallel, tmp_path):
 
     eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="task0")
     for i in range(1, 5):
-        eg.add_task(["sh", "-c", "echo foo; sleep 0.1; echo foo"], key="", dependencies=[i - 1])
+        eg.add_task(
+            ["sh", "-c", "echo foo; sleep 0.1; echo foo"], key="", dependencies=[i - 1]
+        )
 
     nfailed, _ = eg.execute(remote_provisioner="execgraph-remote")
     assert nfailed == 0
@@ -223,12 +225,7 @@ def test_poisoned(tmp_path):
     first = []
     for i in range(10):
         cmd = ["true"] if i % 2 == 0 else [f"false"]
-        first.append(
-            eg.add_task(
-                cmd,
-                key=f"{i}"
-            )
-        )
+        first.append(eg.add_task(cmd, key=f"{i}"))
     final = eg.add_task(["true"], key="", dependencies=first)
     final2 = eg.add_task(["true"], key="", dependencies=[final])
     nfailed, order = eg.execute()
@@ -262,7 +259,7 @@ def test_shutdown(tmp_path):
         print("#!/bin/sh", file=f)
         print("set -e -x", file=f)
         for i in range(10):
-            print(f"execgraph-remote $1 &", file=f)
+            print(f"execgraph-remote $1 0 &", file=f)
         print("wait", file=f)
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
@@ -274,7 +271,8 @@ def test_shutdown(tmp_path):
 
 def test_shutdown_2(tmp_path):
     with open(tmp_path / "provisioner", "w") as f:
-        print(f"""#!{sys.executable}
+        print(
+            f"""#!{sys.executable}
 import asyncio
 import sys
 import time
@@ -325,15 +323,21 @@ async def do_stuff():
 
 if __name__ == "__main__":
     asyncio.run(main())
-""", file=f)
+""",
+            file=f,
+        )
     os.chmod(tmp_path / "provisioner", 0o744)
 
     eg = _execgraph.ExecGraph(1, tmp_path / "foo")
     eg.add_task(["sleep", "1"], key="1")
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "provisioner"), remote_provisioner_arg2="foo bar")
+    nfailed, _ = eg.execute(
+        remote_provisioner=str(tmp_path / "provisioner"),
+        remote_provisioner_arg2="foo bar",
+    )
     with open(tmp_path / "finished") as f:
         assert f.read() == "1"
     assert nfailed == 0
+
 
 def test_status_1(tmp_path):
     assert find_executable("execgraph-remote") is not None
@@ -344,14 +348,15 @@ def test_status_1(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
-    eg.add_task(["false"], key="foo")
-    eg.add_task(["false"], key="bar")
+    eg.add_task(["false"], key="foo", affinity=3)
+    eg.add_task(["false"], key="bar", affinity=3)
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
+        x = f.read()
         assert (
-            f.read()
-            == '{"status":"success","code":200,"data":{"queues":[[null,{"num_ready":2,"num_failed":0,"num_success":0,"num_inflight":0}]]}}'
+            x
+            == '{"status":"success","code":200,"data":{"queues":[[3,{"num_ready":2,"num_inflight":0}]]}}'
         )
 
     assert nfailed == 0
@@ -359,15 +364,18 @@ def test_status_1(tmp_path):
 
 def test_status_2(tmp_path):
     with open(tmp_path / "multi-provisioner", "w") as f:
-        print("""#!/bin/sh
+        print(
+            """#!/bin/sh
 set -e -x
 curl -X GET \
   -H "Content-type: application/json" \
   -H "Accept: application/json" \
   -d '{"queue":null, "pending_greater_than": 10, "timeout": 10}' \
   $1/status > %s/resp.json
-""" % tmp_path, file=f)
-
+"""
+            % tmp_path,
+            file=f,
+        )
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
@@ -386,19 +394,17 @@ def test_queue(tmp_path):
     with open(tmp_path / "multi-provisioner", "w") as f:
         print("#!/bin/sh", file=f)
         print("set -e -x", file=f)
-        print("curl $1/status > %s/resp.json" % tmp_path, file=f)
-        print(f"execgraph-remote $1 gpu &", file=f)
-        print(f"execgraph-remote $1 doesntexistdoesntexist &", file=f)
-        print(f"execgraph-remote $1 &", file=f)
-        print(f"wait", file=f)
+        print("curl $1/status > %s/resp0.json" % tmp_path, file=f)
+        print(f"execgraph-remote $1 0", file=f)
+        print("curl $1/status > %s/resp1.json" % tmp_path, file=f)
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
-    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
-    eg.add_task(["true"], key="foo", queuename="gpu")
-    eg.add_task(["true"], key="bar")
+    eg = _execgraph.ExecGraph(num_parallel=0, logfile=tmp_path / "foo")
+    eg.add_task(["true"], key="foo", affinity=1)
+    eg.add_task(["true"], key="bar", affinity=2)
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
-    with open(tmp_path / "resp.json") as f:
+    with open(tmp_path / "resp0.json") as f:
         value = json.load(f)
         value["data"]["queues"] = sorted(
             value["data"]["queues"], key=lambda x: str(x[0])
@@ -410,20 +416,16 @@ def test_queue(tmp_path):
                 "queues": sorted(
                     [
                         [
-                            None,
+                            1,
                             {
                                 "num_ready": 1,
-                                "num_failed": 0,
-                                "num_success": 0,
                                 "num_inflight": 0,
                             },
                         ],
                         [
-                            "gpu",
+                            2,
                             {
                                 "num_ready": 1,
-                                "num_failed": 0,
-                                "num_success": 0,
                                 "num_inflight": 0,
                             },
                         ],
@@ -433,6 +435,24 @@ def test_queue(tmp_path):
             },
         }
 
+    with open(tmp_path / "resp0.json") as f:
+        value = json.load(f)
+        assert sorted(value["data"]["queues"], key=lambda x: x[0]) == [
+            [
+                1,
+                {
+                    "num_ready": 1,
+                    "num_inflight": 0,
+                },
+            ],
+            [
+                2,
+                {
+                    "num_ready": 1,
+                    "num_inflight": 0,
+                },
+            ],
+        ]
     assert nfailed == 0
 
 
@@ -498,6 +518,7 @@ def test_preamble(tmp_path):
 def test_hang(tmp_path):
     import time
     from collections import Counter
+
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
 
     eg.add_task(["false"], key="-")
@@ -509,7 +530,7 @@ def test_hang(tmp_path):
     end = time.time()
 
     # this should be fast. it shouldn't take anywhere close to 60 seconds
-    assert end-start < 1.0
+    assert end - start < 1.0
 
     del eg
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
@@ -536,6 +557,7 @@ def test_stdin(tmp_path):
 def test_newkeyfn_1(tmp_path):
     def fn():
         return "foo"
+
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo", newkeyfn=fn)
     assert eg.key() == "foo"
     del eg
@@ -562,18 +584,25 @@ def test_failcounts_1(tmp_path):
 
 
 def test_sigint_1(tmp_path):
-    script = """
+    script = (
+        """
 import sys
 sys.path.insert(0, ".")
 import execgraph as _execgraph
 eg = _execgraph.ExecGraph(8, logfile="%s/wrk_log")
 eg.add_task(["sleep", "2"], key="key")
 eg.execute()
-    """ % tmp_path
+    """
+        % tmp_path
+    )
     with open(tmp_path / "script", "w") as f:
         f.write(script)
 
-    p = subprocess.Popen([sys.executable, tmp_path / "script"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p = subprocess.Popen(
+        [sys.executable, tmp_path / "script"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     time.sleep(1)
     p.send_signal(signal.SIGINT)
     p.wait(timeout=1)
@@ -585,13 +614,12 @@ eg.execute()
     assert log[3]["Finished"]["status"] == 130
 
 
-@pytest.mark.parametrize("rerun_failures, expected", [
-    (True, 1),
-    (False, 0)
-])
+@pytest.mark.parametrize("rerun_failures, expected", [(True, 1), (False, 0)])
 def test_rerun_failures_1(tmp_path, rerun_failures, expected):
     def create():
-        eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo", rerun_failures=rerun_failures)
+        eg = _execgraph.ExecGraph(
+            8, logfile=tmp_path / "foo", rerun_failures=rerun_failures
+        )
         eg.add_task(["false", "1"], key="a")
         eg.add_task(["false", "2"], key="b", dependencies=[0])
         eg.add_task(["false", "3"], key="c", dependencies=[1])
@@ -624,14 +652,14 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
 
 def test_priority(tmp_path):
     def single_source_longest_dag_path_length(graph, s):
-        assert(graph.in_degree(s) == 0)
-        dist = dict.fromkeys(graph.nodes, -float('inf'))
+        assert graph.in_degree(s) == 0
+        dist = dict.fromkeys(graph.nodes, -float("inf"))
         dist[s] = 0
         topo_order = nx.topological_sort(graph)
         for n in topo_order:
             for s in graph.successors(n):
-                if dist[s] < dist[n] + graph.edges[n,s]['weight']:
-                    dist[s] = dist[n] + graph.edges[n,s]['weight']
+                if dist[s] < dist[n] + graph.edges[n, s]["weight"]:
+                    dist[s] = dist[n] + graph.edges[n, s]["weight"]
         return dist
 
     def is_sorted(x):
@@ -643,18 +671,17 @@ def test_priority(tmp_path):
         key = f"{i}-0"
         id = eg.add_task(["true"], key)
         g.add_node(key)
-        for j in range(1, i+1):
+        for j in range(1, i + 1):
             newkey = f"{i}-{j}"
             id = eg.add_task(["true"], newkey, dependencies=[id])
             g.add_edge(key, newkey, weight=1)
             key = newkey
 
-
-    keys = [eg.get_task(i)[1] for i in range(id+1)]
+    keys = [eg.get_task(i)[1] for i in range(id + 1)]
     # print(keys)
     g.add_edges_from([(k, "collector", {"weight": 1}) for k in keys])
 
-    lengths = (single_source_longest_dag_path_length(g.reverse(), "collector"))
+    lengths = single_source_longest_dag_path_length(g.reverse(), "collector")
     nfailed, order = eg.execute()
 
     assert is_sorted([lengths[key] for key in order])
@@ -662,10 +689,11 @@ def test_priority(tmp_path):
 
 def test_lock(tmp_path):
     # acquire the lock
-    f1 = _execgraph.ExecGraph(1, logfile = tmp_path / "foo")
+    f1 = _execgraph.ExecGraph(1, logfile=tmp_path / "foo")
 
     with open(tmp_path / "script", "w") as f:
-        f.write("""
+        f.write(
+            """
 import sys
 sys.path.insert(0, ".")
 import execgraph as _execgraph
@@ -677,10 +705,14 @@ except OSError as e:
     else:
         print(e)
 exit(1)
-    """ % tmp_path)
+    """
+            % tmp_path
+        )
 
     # make sure someone else can't acquire the lock
-    subprocess.run([sys.executable, tmp_path / "script"], check=True, capture_output=True)
+    subprocess.run(
+        [sys.executable, tmp_path / "script"], check=True, capture_output=True
+    )
 
     del f1
     assert ".wrk.lock" not in os.listdir(tmp_path)

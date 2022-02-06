@@ -350,7 +350,7 @@ async fn run_local_process_loop(
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
 
     let local_queue_runnertype = 0;
-    while let Ok(subgraph_node_id) = tracker.get_ready_task(local_queue_runnertype).await {
+    while let Ok(subgraph_node_id) = tracker.recv(local_queue_runnertype).await {
         let cmd = subgraph[subgraph_node_id];
         cmd.call_preamble();
 

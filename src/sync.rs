@@ -39,6 +39,7 @@ const NUM_RUNNER_TYPES: usize = 64;
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     pub num_ready: u32,
+    pub num_inflight: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -238,7 +239,19 @@ impl<'a> ReadyTrackerServer<'a> {
         let is_success = e.status == 0;
         let total = statuses.len() as u32;
         let cmd = self.g[e.id];
-        self.n_pending -= 1;
+
+        {
+            self.n_pending -= 1;
+            let mut locked = self
+                .queuestate
+                .lock()
+                .expect("Something must have panicked while holding this lock?");
+            let num_inflight = &mut locked
+                .get_mut(&cmd.affinity)
+                .expect("No such queue")
+                .num_inflight;
+            *num_inflight = num_inflight.checked_sub(1).expect("Underflow");
+        }
 
         if is_success {
             self.n_success += 1;
@@ -314,7 +327,10 @@ impl<'a> ReadyTrackerServer<'a> {
                 .write(LogEntry::new_ready(&cmd.key, cmd.runcount, &cmd.display()))?;
             queuestate_lock
                 .entry(cmd.affinity)
-                .or_insert_with(|| Snapshot { num_ready: 0 })
+                .or_insert_with(|| Snapshot {
+                    num_ready: 0,
+                    num_inflight: 0,
+                })
                 .num_ready += 1;
 
             let taken = Arc::new(AtomicBool::new(false));
@@ -352,10 +368,31 @@ impl<'a> ReadyTrackerServer<'a> {
 }
 
 impl ReadyTrackerClient {
-    pub async fn get_ready_task(
-        &self,
-        runnertypeid: u32,
-    ) -> Result<NodeIndex, ReadyTrackerClientError> {
+    pub fn try_recv(&self, runnertypeid: u32) -> Result<NodeIndex, ReadyTrackerClientError> {
+        let reciever = self
+            .r
+            .get(runnertypeid as usize)
+            .ok_or(ReadyTrackerClientError::NoSuchRunnerType)?;
+
+        // Each task might be in multiple ready queues, one for each runner type that it's
+        // eligible for. So within the ready queue we store an AtomicBool that represents
+        // whether this item has already been claimed. A different way to implement this would
+        // be to pop off receiver channel and then mutate all of the other channels to remove
+        // the item, but instead we're using this tombstone idea.
+        loop {
+            let (task, _priority) = reciever.try_recv()?;
+            if !task.taken.fetch_and(true, SeqCst) {
+                let mut s = self.queuestate.lock().expect("foo");
+                let x = s.get_mut(&task.affinity).expect("bar");
+                x.num_ready -= 1;
+                x.num_inflight += 1;
+
+                return Ok(task.id);
+            }
+        }
+    }
+
+    pub async fn recv(&self, runnertypeid: u32) -> Result<NodeIndex, ReadyTrackerClientError> {
         let reciever = self
             .r
             .get(runnertypeid as usize)
@@ -372,6 +409,7 @@ impl ReadyTrackerClient {
                 let mut s = self.queuestate.lock().expect("foo");
                 let x = s.get_mut(&task.affinity).expect("bar");
                 x.num_ready -= 1;
+                x.num_inflight += 1;
 
                 return Ok(task.id);
             }
@@ -452,6 +490,13 @@ pub enum ReadyTrackerClientError {
         #[source]
         #[from]
         async_priority_channel::RecvError,
+    ),
+
+    #[error("{0}")]
+    ChannelTryRecvError(
+        #[source]
+        #[from]
+        async_priority_channel::TryRecvError,
     ),
 
     #[error("No such runner type")]
