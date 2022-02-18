@@ -100,7 +100,7 @@ fn get_state(req: &Request<Body>) -> Arc<State<'static>> {
 // and the request information and generates an appropriate response.
 #[tracing::instrument]
 async fn error_handler(err: RouteError, _: RequestInfo) -> Response<Body> {
-    log::warn!("{}", err);
+    //log::warn!("{}", err);
 
     let e2 = err.downcast_ref::<JsonResponseErr>();
     match e2 {

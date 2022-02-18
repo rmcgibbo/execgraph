@@ -381,7 +381,8 @@ impl ReadyTrackerClient {
         // the item, but instead we're using this tombstone idea.
         loop {
             let (task, _priority) = reciever.try_recv()?;
-            if !task.taken.fetch_and(true, SeqCst) {
+            let was_taken = task.taken.fetch_or(true, SeqCst);
+            if !was_taken {
                 let mut s = self.queuestate.lock().expect("foo");
                 let x = s.get_mut(&task.affinity).expect("bar");
                 x.num_ready -= 1;
@@ -405,7 +406,7 @@ impl ReadyTrackerClient {
         // the item, but instead we're using this tombstone idea.
         loop {
             let (task, _priority) = reciever.recv().await?;
-            if !task.taken.fetch_and(true, SeqCst) {
+            if !task.taken.fetch_or(true, SeqCst) {
                 let mut s = self.queuestate.lock().expect("foo");
                 let x = s.get_mut(&task.affinity).expect("bar");
                 x.num_ready -= 1;
