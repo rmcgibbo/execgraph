@@ -9,3 +9,4 @@ wal-log-test-bad-checksum
 wal-log-test-locking
 .mypy_cache/
 __pycache__/
+.direnv/
