@@ -1,12 +1,14 @@
 {
   description = "Parallel execution of shell commands with DAG dependencies";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-21.11";
   inputs.py-utils.url = "github:rmcgibbo/python-flake-utils";
   inputs.utils.url = "github:numtide/flake-utils";
+  inputs.crane.url = "github:ipetkov/crane";
+  inputs.crane.inputs.nixpkgs.follows = "nixpkgs";
 
-  outputs = { self, nixpkgs, utils, py-utils }: {
+  outputs = { self, nixpkgs, utils, py-utils, crane }: {
     overlay = py-utils.lib.mkPythonOverlay (pkgs: {
-      execgraph = pkgs.callPackage ./. { };
+      execgraph = pkgs.callPackage ./. { inherit crane; };
     });
   } //
   utils.lib.eachDefaultSystem (system:
@@ -16,7 +18,7 @@
         overlays = [ self.overlay ];
       };
     in
-      {
+    {
       defaultPackage = pkgs.python3.pkgs.execgraph;
 
       devShell = pkgs.mkShell rec {

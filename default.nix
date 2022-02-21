@@ -1,13 +1,13 @@
 { lib
+, system
 , buildPythonPackage
-, pytestCheckHook
-, rustPlatform
-, maturin
+, pytest
+, python
 , numpy
 , scipy
 , networkx
 , curl
-, protobuf
+, crane
 }:
 
 let
@@ -18,12 +18,6 @@ let
         in lib.any (prefix: lib.hasPrefix prefix relPath) prefixList);
       inherit src;
     };
-
-in buildPythonPackage rec {
-  pname = "execgraph";
-  version = "0.1.0";
-  format = "pyproject";
-
   src = filterSrcByPrefix ./. [
     "pyproject.toml"
     "src"
@@ -32,48 +26,57 @@ in buildPythonPackage rec {
     "tests"
   ];
 
-  # TODO: switch to naersk would be nice
-  cargoDeps = rustPlatform.fetchCargoTarball {
+  # Build *just* the cargo dependencies, since they don't change super often
+  craneLib = crane.lib.${system};
+  cargoArtifacts = craneLib.buildDepsOnly {
     inherit src;
-    name = "${pname}-${version}";
-    sha256 = "sha256-IjjH1YVDJu6VaZCxO23u2A75qSRMhvzIh0/4DB1C+rM=";
-    # sha256 = "0000000000000000000000000000000000000000000000000000";
+    name = "execgraph-deps";
+    version = "0.1.0";
+    nativeBuildInputs = [
+      python
+    ];
+    doCheck = false;
+  };
+  execgraph = craneLib.buildPackage {
+    inherit cargoArtifacts src;
+    name = "execgraph";
+    version = "0.1.0";
+    nativeBuildInputs = [
+      python
+    ];
+    doCheck = false;
   };
 
-  nativeBuildInputs = with rustPlatform; [
-    cargoSetupHook
-    rust.rustc
-    rust.cargo
-    maturinBuildHook
+in buildPythonPackage rec {
+  pname = "execgraph";
+  version = "0.1.0";
+  format = "other";
+  inherit src;
+
+  nativeBuildInputs = [
+    execgraph
   ];
 
-  buildInputs = [ protobuf ];
-
-  RUST_BACKTRACE = "full";
-  CARGO_INCREMENTAL = "0";
-  CARGO_PROFILE_RELEASE_LTO = "thin";
-
-  preBuild = ''  
-    cargo build -j $NIX_BUILD_CORES \
-      --frozen \
-      --release \
-      --bins
-
+  installPhase = ''
     mkdir -p $out/bin
-    install -Dv target/release/execgraph-remote $out/bin/    
-  '';
+    mkdir -p $out/${python.sitePackages}
+    ln -s ${execgraph}/bin/execgraph-remote $out/bin/
+    ln -s ${execgraph}/lib/libexecgraph.so $out/${python.sitePackages}/execgraph.so
 
-  preCheck = ''
+    export PYTHONPATH="$out/${python.sitePackages}:$PYTHONPATH"
     export PATH=$out/bin:$PATH
   '';
 
+  checkPhase = ''
+    py.test
+  '';
+
   checkInputs = [
-    pytestCheckHook
+    pytest
     numpy
     scipy
     networkx
     curl
   ];
-  pytestFlagsArray = [ "-s" ];
   pythonImportsCheck = [ "execgraph" ];
 }
