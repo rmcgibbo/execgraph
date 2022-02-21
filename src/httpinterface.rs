@@ -33,7 +33,7 @@ pub struct StartRequest {
 pub struct StartResponse {
     pub transaction_id: u32,
     pub cmdline: Vec<OsString>,
-    pub stdin: Vec<u8>,
+    pub env: Vec<(OsString, OsString)>,
     pub ping_interval_msecs: u64,
 }
 

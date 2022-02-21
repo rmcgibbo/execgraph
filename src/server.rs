@@ -296,7 +296,7 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
     json_success_resp(&StartResponse {
         transaction_id,
         cmdline: cmd.cmdline.clone(),
-        stdin: cmd.stdin.clone(),
+        env: cmd.env.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
     })
 }

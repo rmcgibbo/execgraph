@@ -10,7 +10,6 @@ use log::{debug, warn};
 use serde::Deserialize;
 use std::{os::unix::process::ExitStatusExt, time::Duration};
 use structopt::StructOpt;
-use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use whoami::username;
 
@@ -156,12 +155,13 @@ async fn run_command(
     // Run the command and record the pid
     let maybe_child = tokio::process::Command::new(&start.data.cmdline[0])
         .args(&start.data.cmdline[1..])
-        .stdin(std::process::Stdio::piped())
+        .envs(start.data.env.iter().cloned())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();
 
-    let mut child = match maybe_child {
+    let child = match maybe_child {
         Ok(child) => child,
         Err(_) => {
             // Tell the server that we've started the command
@@ -200,16 +200,6 @@ async fn run_command(
             return Ok(());
         }
     };
-
-    let mut stdin = child
-        .stdin
-        .take()
-        .expect("Failed to extract stdin from subprocess");
-    stdin
-        .write_all(&start.data.stdin)
-        .await
-        .expect("Unable to write to stdin of subprocess");
-    drop(stdin);
 
     let pid = child
         .id()

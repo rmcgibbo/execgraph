@@ -545,13 +545,13 @@ def test_hang(tmp_path):
         assert len(v) == 3
 
 
-def test_stdin(tmp_path):
+def test_env_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", f"cat <&0 > {tmp_path}/log.txt"], key="0", stdin=b"stdin")
+    eg.add_task(["sh", "-c", f"echo $foo > {tmp_path}/log.txt"], key="0", env=[("foo", "bar")])
     eg.execute()
 
     with open(tmp_path / "log.txt", "rb") as f:
-        assert f.read() == b"stdin"
+        assert f.read() == b"bar\n"
 
 
 def test_newkeyfn_1(tmp_path):

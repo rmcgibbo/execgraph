@@ -160,7 +160,6 @@ impl PyExecGraph {
     ///      do it for you). When we execute the command, we'll append the key to
     ///      a log file. That way when we rerun the graph at some later time, we'll
     ///      be able to skip executing any commands that have already been executed.
-    ///      Note: the key may not contain any tab characters.
     ///   3. Next, there's the list of dependencies, identified by integer ids
     ///      that reference previous tasks. A task cannot depend on itself, and can only
     ///      depend on previous tasks tha have already been added. This enforces a DAG
@@ -170,10 +169,14 @@ impl PyExecGraph {
     ///      we run the command. If not supplied, we'll just use the cmdline for these
     ///      purposes. But if the cmdline contains some boring wrapper scripts that you
     ///      want to hide from your users, this might make sense.
-    ///   5. Then there's the concept of a "queue name". You can associate each
-    ///      job with a resource (arbitrary string), like "gpu", and then it will be
-    ///      restricted and only run on remote runners that identify themselves as having
-    ///      that resource.
+    ///   5. Then there's the concept of queue affinity. This us a u64 bitmask, which allows
+    ///      us to address up to 64 "queues". Each task can have an affinity for one or more
+    ///      of the queues. Queue 0 is the 'local' queue, and has up to n_parallel execution
+    ///      slots. Queue 1 is the 'console' queue, and has either zero slots if n_parallel
+    ///      is zero, or else 1 slot. If a task runs in the console queue, it will have
+    ///      stdin/stdout/stderr hooked up. The remaining queues are not set up, but can be used
+    ///      by remote executors -- when they connect they advertise what queue they are serving
+    ///      and are given appropriate tasks.
     ///   6. Next is the 'preamble' and 'postamble'. These are an optional PyCapsule that's
     ///      supposed to contain a C function pointer inside and the name "Execgraph::Capsule".
     ///      The functions will be called (passing the capsule's `ctx` pointer as the only
@@ -196,7 +199,7 @@ impl PyExecGraph {
         dependencies = "vec![]",
         display = "None",
         affinity = "1",
-        stdin = "vec![]",
+        env = "vec![]",
         preamble = "None",
         postamble = "None"
     )]
@@ -209,7 +212,7 @@ impl PyExecGraph {
         dependencies: Vec<u32>,
         display: Option<String>,
         affinity: u64,
-        stdin: Vec<u8>,
+        env: Vec<(OsString, OsString)>,
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
     ) -> PyResult<u32> {
@@ -218,7 +221,7 @@ impl PyExecGraph {
             cmdline,
             key,
             display,
-            stdin,
+            env,
             runcount,
             priority: 0,
             affinity: BitArray::<u64>::new(affinity),
