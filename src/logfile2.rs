@@ -283,13 +283,13 @@ impl LogFileReadOnly {
         Ok(Self { f })
     }
 
-    pub fn read_current(&mut self) -> Result<Vec<LogEntry>> {
-        let mut result = Vec::new();
+    pub fn read_current_and_outdated(&mut self) -> Result<(Vec<LogEntry>, Vec<LogEntry>)> {
+        let mut result_current = Vec::new();
         let mut rev_iter = self.read()?.into_iter().rev();
         let mut pending_backrefs = std::collections::HashSet::new();
         let mut header = None;
 
-        // iterate backward until we hit the first header
+        // iterate backward adding LogEntries to result_current until we hit the first header
         for item in rev_iter.by_ref() {
             match &item {
                 LogEntry::Header(_) => {
@@ -300,32 +300,35 @@ impl LogFileReadOnly {
                     pending_backrefs.insert(b.key.clone());
                 }
                 _ => {
-                    result.push(item);
+                    result_current.push(item);
                 }
             };
         }
-        // keep iterating until we clear all of the pending backrefs
-        for item in rev_iter {
+        // keep iterating backward and adding LogEntries if they're in the pending_backrefs
+        // until we clear all of the pending backrefs
+        for item in rev_iter.by_ref() {
             if pending_backrefs.is_empty() {
                 break;
             }
             match &item {
                 LogEntry::Ready(v) if pending_backrefs.contains(&v.key) => {
                     assert!(pending_backrefs.remove(&v.key));
-                    result.push(item);
+                    result_current.push(item);
                 }
-                LogEntry::Started(v) if pending_backrefs.contains(&v.key) => result.push(item),
-                LogEntry::Finished(v) if pending_backrefs.contains(&v.key) => result.push(item),
+                LogEntry::Started(v) if pending_backrefs.contains(&v.key) => result_current.push(item),
+                LogEntry::Finished(v) if pending_backrefs.contains(&v.key) => result_current.push(item),
                 _ => {}
             }
         }
 
-        // put the header on  the front
+        // put the header on the front
         if let Some(header) = header {
-            result.push(header);
+            result_current.push(header);
         }
+        // keep iterating backward and put everything else into the outdated list
+        let result_outdated: Vec<LogEntry> = rev_iter.rev().collect();
 
-        Ok(result.into_iter().rev().collect())
+        Ok((result_current.into_iter().rev().collect(), result_outdated))
     }
 
     pub fn read(&mut self) -> Result<Vec<LogEntry>> {

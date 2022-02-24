@@ -337,7 +337,8 @@ fn test_make_capsule(py: Python) -> PyResult<PyObject> {
 fn load_logfile(py: Python, path: std::path::PathBuf, mode: String) -> PyResult<PyObject> {
     let mut log = logfile2::LogFileReadOnly::open(path)?;
     let value = match &mode as &str {
-        "current" => log.read_current()?,
+        "current" => log.read_current_and_outdated()?.0,
+        "outdated" => log.read_current_and_outdated()?.1,
         "all" => log.read()?,
         _ => return Err(PyValueError::new_err("Unrecognized mode")),
     };
