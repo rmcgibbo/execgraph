@@ -326,7 +326,7 @@ impl LogFileReadOnly {
             result_current.push(header);
         }
         // keep iterating backward and put everything else into the outdated list
-        let result_outdated: Vec<LogEntry> = rev_iter.rev().collect();
+        let result_outdated: Vec<LogEntry> = rev_iter.collect();
 
         Ok((result_current.into_iter().rev().collect(), result_outdated))
     }
