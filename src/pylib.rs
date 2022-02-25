@@ -337,12 +337,13 @@ fn test_make_capsule(py: Python) -> PyResult<PyObject> {
 fn load_logfile(py: Python, path: std::path::PathBuf, mode: String) -> PyResult<PyObject> {
     let mut log = logfile2::LogFileReadOnly::open(path)?;
     let value = match &mode as &str {
-        "current" => log.read_current_and_outdated()?.0,
-        "outdated" => log.read_current_and_outdated()?.1,
-        "all" => log.read()?,
+        "current,outdated" => pythonize::pythonize(py, &log.read_current_and_outdated()?),
+        "current" => pythonize::pythonize(py, &log.read_current_and_outdated()?.0),
+        "outdated" => pythonize::pythonize(py, &log.read_current_and_outdated()?.1),
+        "all" => pythonize::pythonize(py, &log.read()?),
         _ => return Err(PyValueError::new_err("Unrecognized mode")),
     };
-    Ok(pythonize::pythonize(py, &value)?)
+    Ok(value?)
 }
 
 #[pyfunction]
