@@ -68,7 +68,7 @@ in buildPythonPackage rec {
   '';
 
   checkPhase = ''
-    py.test
+    py.test -vvv
   '';
 
   checkInputs = [

@@ -170,6 +170,7 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
             timeout_status,
             "".to_owned(),
             "".to_owned(),
+            HashMap::new(),
         )
         .await;
 }
@@ -344,6 +345,7 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
             request.status,
             request.stdout,
             request.stderr,
+            request.values,
         )
         .await;
 

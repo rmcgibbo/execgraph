@@ -213,11 +213,53 @@ def test_simple_remote(num_parallel, tmp_path):
     eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="task0")
     for i in range(1, 5):
         eg.add_task(
-            ["sh", "-c", "echo foo; sleep 0.1; echo foo"], key="", dependencies=[i - 1]
+            ["sh", "-c", "echo foo; sleep 0.1; echo foo"],
+            key=f"{i}",
+            dependencies=[i - 1],
         )
 
-    nfailed, _ = eg.execute(remote_provisioner="execgraph-remote")
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            """#!/bin/sh
+        set -e -x
+        execgraph-remote $1 0
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
     assert nfailed == 0
+
+
+def test_murder_remote(num_parallel, tmp_path):
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+
+    eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="task0")
+    for i in range(1, 5):
+        eg.add_task(
+            ["sh", "-c", "echo foo; sleep 1; echo foo"],
+            key=f"{i}",
+            dependencies=[i - 1],
+        )
+
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            """#!/bin/sh
+        set -e -x
+        execgraph-remote $1 0 &
+        sleep 1.5
+        kill %
+        wait
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
+    with open(tmp_path / "foo") as f:
+        print(f.read())
+    assert nfailed > 0
 
 
 def test_poisoned(tmp_path):
@@ -547,7 +589,9 @@ def test_hang(tmp_path):
 
 def test_env_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", f"echo $foo > {tmp_path}/log.txt"], key="0", env=[("foo", "bar")])
+    eg.add_task(
+        ["sh", "-c", f"echo $foo > {tmp_path}/log.txt"], key="0", env=[("foo", "bar")]
+    )
     eg.execute()
 
     with open(tmp_path / "log.txt", "rb") as f:
@@ -729,3 +773,37 @@ def test_write_1(tmp_path):
     contents2 = _execgraph.load_logfile(tmp_path / "bar", "all")
 
     assert contents == contents2
+
+
+def test_fd3_1(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 'foo=bar baz=\"qux\"'>&3"], key="foo")
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == {"foo": "bar", "baz": "qux"}
+
+
+def test_fd3_2(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == {}
+
+
+def test_fd3_3(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(
+        ["dd", "if=/dev/zero", "of=/proc/self/fd/3", "bs=1024" "count=1024"], key="foo"
+    )
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == {}
+
+
+def test_fd3_4(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 'foo=bar baz=\"qux\" foo=bar2'>&3"], key="foo")
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == {"foo": "bar2", "baz": "qux"}

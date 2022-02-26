@@ -50,6 +50,7 @@ pub struct EndRequest {
     pub status: i32,
     pub stdout: String,
     pub stderr: String,
+    pub values: HashMap<String, String>,
 }
 
 pub mod vectorize {

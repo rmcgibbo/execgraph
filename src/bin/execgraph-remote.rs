@@ -1,15 +1,26 @@
 #![cfg(feature = "extension-module")]
 
 extern crate reqwest;
-use anyhow::Result;
+// use anyhow::Result;
 use async_channel::bounded;
-use execgraph::httpinterface::*;
+use execgraph::{
+    httpinterface::*,
+    localrunner::{
+        anon_pipe, wait_for_child_output_and_another_file_descriptor, ChildProcessError,
+    },
+};
 use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use serde::Deserialize;
-use std::{os::unix::process::ExitStatusExt, time::Duration};
+use std::{
+    collections::HashMap,
+    os::unix::{prelude::FromRawFd, process::ExitStatusExt},
+    time::Duration,
+};
 use structopt::StructOpt;
+use thiserror::Error;
+use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use whoami::username;
 
@@ -152,14 +163,33 @@ async fn run_command(
         }
     });
 
+    let (read_fd3, write_fd3) = anon_pipe();
+
     // Run the command and record the pid
-    let maybe_child = tokio::process::Command::new(&start.data.cmdline[0])
+    let mut command = tokio::process::Command::new(&start.data.cmdline[0]);
+    let maybe_child = command
         .args(&start.data.cmdline[1..])
         .envs(start.data.env.iter().cloned())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .fd_mappings(vec![
+            // Map the pipe as FD 3 in the child process.
+            FdMapping {
+                parent_fd: write_fd3.as_raw_fd(),
+                child_fd: 3,
+            },
+        ])
+        .unwrap()
         .spawn();
+
+    // Deadlock potential: After spawning the command and passing it the
+    // write end of the pipe we need to close it ourselves
+    if unsafe { libc::close(write_fd3.as_raw_fd()) } != 0 {
+        panic!("Cannot close: {}", std::io::Error::last_os_error());
+    }
+    // SAFETY: this takes ownership over the file descriptor and will close it.
+    let fd3_file = unsafe { tokio::fs::File::from_raw_fd(read_fd3.into_raw_fd()) };
 
     let child = match maybe_child {
         Ok(child) => child,
@@ -188,6 +218,7 @@ async fn run_command(
                     status: 127,
                     stdout: "".to_owned(),
                     stderr: format!("No such command: {:#?}", &start.data.cmdline[0]),
+                    values: HashMap::new(),
                 })
                 .send() => {
                     value?.error_for_status()?;
@@ -222,9 +253,9 @@ async fn run_command(
     };
 
     // Wait for the command to finish
-    let (status, stdout, stderr) = tokio::select! {
-        status = child.wait_with_output() => {
-            let output = status.expect("sh wasn't running");
+    let (status, stdout, stderr, fd3_values) = tokio::select! {
+        child_result = wait_for_child_output_and_another_file_descriptor(child, fd3_file) => {
+            let (output, fd3_values) = child_result?;
             let status_obj = output.status;
             let status = match status_obj.code() {
                 Some(code) => code,
@@ -232,7 +263,7 @@ async fn run_command(
             };
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            (status, stdout, stderr)
+            (status, stdout, stderr, fd3_values)
         }
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
@@ -249,7 +280,8 @@ async fn run_command(
             transaction_id,
             status,
             stdout,
-            stderr
+            stderr,
+            values: fd3_values,
         })
         .send() => {
             value?.error_for_status()?;
@@ -276,30 +308,49 @@ struct Opt {
     max_time_accepting_tasks: Option<std::time::Duration>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 enum RemoteError {
+    #[error("Ping timeout: {0}")]
     PingTimeout(String),
-    Connection(reqwest::Error),
-    Parse(url::ParseError),
-    InvalidHeaderValue(reqwest::header::InvalidHeaderValue),
+
+    #[error("Connection error: {0}")]
+    Connection(
+        #[source]
+        #[from]
+        reqwest::Error,
+    ),
+    #[error("Url Parse Error: {0}")]
+    Parse(
+        #[source]
+        #[from]
+        url::ParseError,
+    ),
+    #[error("InvalidHeader: {0}")]
+    InvalidHeaderValue(
+        #[source]
+        #[from]
+        reqwest::header::InvalidHeaderValue,
+    ),
+    #[error("InvalidHostname: {0}")]
     InvalidHostname(String),
-}
 
-impl From<url::ParseError> for RemoteError {
-    fn from(err: url::ParseError) -> RemoteError {
-        RemoteError::Parse(err)
-    }
-}
+    #[error("Utf8Error: {0}")]
+    Utf8Error(
+        #[from]
+        #[source]
+        std::str::Utf8Error,
+    ),
 
-impl From<reqwest::Error> for RemoteError {
-    fn from(err: reqwest::Error) -> RemoteError {
-        RemoteError::Connection(err)
-    }
+    #[error("IoError: {0}")]
+    IoError(
+        #[from]
+        #[source]
+        std::io::Error,
+    ),
 }
-
-impl From<reqwest::header::InvalidHeaderValue> for RemoteError {
-    fn from(err: reqwest::header::InvalidHeaderValue) -> RemoteError {
-        RemoteError::InvalidHeaderValue(err)
+impl From<ChildProcessError> for RemoteError {
+    fn from(e: ChildProcessError) -> Self {
+        e.into()
     }
 }
 
@@ -312,7 +363,7 @@ struct StartResponseFull {
     data: StartResponse,
 }
 
-fn parse_seconds(s: &str) -> Result<std::time::Duration> {
+fn parse_seconds(s: &str) -> Result<std::time::Duration, Box<dyn std::error::Error>> {
     let x = s.parse::<u64>()?;
     Ok(std::time::Duration::new(x, 0))
 }

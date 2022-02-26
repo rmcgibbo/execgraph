@@ -52,6 +52,7 @@ pub struct FinishedEntry {
     pub time: SystemTime,
     pub key: String,
     pub status: i32,
+    pub values: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -91,10 +92,11 @@ impl LogEntry {
         })
     }
 
-    pub fn new_finished(key: &str, status: i32) -> LogEntry {
+    pub fn new_finished(key: &str, status: i32, values: HashMap<String, String>) -> LogEntry {
         LogEntry::Finished(FinishedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
+            values,
             status,
         })
     }

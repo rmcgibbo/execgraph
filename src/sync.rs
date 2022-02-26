@@ -1,5 +1,5 @@
 use crate::{execgraph::Cmd, logfile2};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bitvec::array::BitArray;
 use logfile2::{LogEntry, LogFile};
 use petgraph::prelude::*;
@@ -63,6 +63,7 @@ pub struct ReadyTrackerServer<'a> {
     failures_allowed: u32,
     queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
     inflight: HashSet<NodeIndex>,
+    statuses: HashMap<NodeIndex, TaskStatus>,
 }
 
 #[derive(Debug)]
@@ -96,6 +97,20 @@ pub fn new_ready_tracker<'a>(
     let queuestate = Arc::new(Mutex::new(HashMap::new()));
     let (finished_s, finished_r) = async_channel::unbounded();
 
+    // for each task, how many unmet first-order dependencies does it have?
+    let statuses: HashMap<NodeIndex, TaskStatus> = g
+        .node_indices()
+        .map(|i| {
+            (
+                i,
+                TaskStatus {
+                    n_unmet_deps: g.edges_directed(i, Direction::Incoming).count(),
+                    poisoned: false,
+                },
+            )
+        })
+        .collect();
+
     (
         ReadyTrackerServer {
             finished_order: vec![],
@@ -110,6 +125,7 @@ pub fn new_ready_tracker<'a>(
             queuestate: queuestate.clone(),
             inflight: HashSet::new(),
             logfile,
+            statuses,
         },
         ReadyTrackerClient {
             r: ready_r.try_into().unwrap(),
@@ -120,20 +136,23 @@ pub fn new_ready_tracker<'a>(
 }
 
 impl<'a> ReadyTrackerServer<'a> {
+    #[tracing::instrument(skip_all)]
     pub fn drain(&mut self) -> Result<()> {
+        let mut inflight = self.inflight.clone();
         loop {
             match self.completed.try_recv() {
                 Ok(CompletedEvent::Started(e)) => {
                     let cmd = self.g[e.id];
                     self.logfile
                         .write(LogEntry::new_started(&cmd.key, "host", 0))?;
-                    assert!(self.inflight.insert(e.id));
+                    assert!(inflight.insert(e.id));
                 }
                 Ok(CompletedEvent::Finished(e)) => {
                     let cmd = self.g[e.id];
+                    self._finished_bookkeeping_1(&e)?;
                     self.logfile
-                        .write(LogEntry::new_finished(&cmd.key, e.status))?;
-                    assert!(self.inflight.remove(&e.id));
+                        .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
+                    assert!(inflight.remove(&e.id));
                 }
                 Err(_) => {
                     break;
@@ -141,41 +160,35 @@ impl<'a> ReadyTrackerServer<'a> {
             }
         }
 
-        for k in self.inflight.iter() {
+        self.inflight.clear();
+        for k in inflight.iter() {
             let timeout_status = 130;
             let cmd = self.g[*k];
+            let e = FinishedEvent {
+                id: k.to_owned(),
+                status: timeout_status,
+                stdout: "".to_string(),
+                stderr: "".to_string(),
+                values: HashMap::new(),
+            };
+            self._finished_bookkeeping_1(&e)?;
             self.logfile
-                .write(LogEntry::new_finished(&cmd.key, timeout_status))?;
+                .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
         }
-        self.inflight.clear();
-
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn background_serve(&mut self, token: CancellationToken) -> Result<()> {
-        // for each task, how many unmet first-order dependencies does it have?
-        let mut statuses: HashMap<NodeIndex, TaskStatus> = self
-            .g
-            .node_indices()
-            .map(|i| {
-                (
-                    i,
-                    TaskStatus {
-                        n_unmet_deps: self.g.edges_directed(i, Direction::Incoming).count(),
-                        poisoned: false,
-                    },
-                )
-            })
-            .collect();
-
         // trigger all of the tasks that have zero unmet dependencies
         self.add_to_ready_queue(
-            statuses
+            self.statuses
                 .iter()
                 .filter_map(|(k, v)| if v.n_unmet_deps == 0 { Some(*k) } else { None })
                 .collect(),
         )
-        .await?;
+        .await
+        .context("couldn't add to ready queue")?;
 
         // every time we put a task into the ready queue, we increment n_pending.
         // every time a task completes, we decrement n_pending.
@@ -187,7 +200,12 @@ impl<'a> ReadyTrackerServer<'a> {
         loop {
             tokio::select! {
                 event = self.completed.recv() => {
-                    match event.expect("No event received?") {
+                    if event.is_err() {
+                        tracing::error!("{:#?}", event);
+                        self.ready = None;
+                        break;
+                    }
+                    match event.unwrap() {
                         CompletedEvent::Started(e) => {
                             let cmd = self.g[e.id];
                             self.logfile.write(LogEntry::new_started(
@@ -200,11 +218,12 @@ impl<'a> ReadyTrackerServer<'a> {
                         CompletedEvent::Finished(e) => {
                             let cmd = self.g[e.id];
                             self.finished_order.push(e.id);
+                            self._finished_bookkeeping(&e).await?;
                             self.logfile.write(LogEntry::new_finished(
                                 &cmd.key,
                                 e.status,
+                                e.values,
                             ))?;
-                            self._finished_bookkeeping(&mut statuses, &e).await?;
                             assert!(self.inflight.remove(&e.id));
 
                             if self.n_failed >= self.failures_allowed || self.n_pending == 0 {
@@ -218,10 +237,12 @@ impl<'a> ReadyTrackerServer<'a> {
                     }
                 },
                 _ = token.cancelled() => {
+                    tracing::debug!("background_serve breaking on token cancellation");
                     self.ready = None;
                     break;
                 }
                 _ = tokio::signal::ctrl_c() => {
+                    tracing::debug!("background_serve breaking on ctrl-c");
                     self.ready = None;
                     break;
                 }
@@ -231,13 +252,14 @@ impl<'a> ReadyTrackerServer<'a> {
         Ok(())
     }
 
-    async fn _finished_bookkeeping(
-        &mut self,
-        statuses: &mut HashMap<NodeIndex, TaskStatus>,
-        e: &FinishedEvent,
-    ) -> Result<()> {
+    async fn _finished_bookkeeping(&mut self, e: &FinishedEvent) -> Result<()> {
+        self._finished_bookkeeping_1(e)?;
+        self._finished_bookkeeping_2(e).await
+    }
+
+    fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent) -> Result<()> {
         let is_success = e.status == 0;
-        let total = statuses.len() as u32;
+        let total = self.statuses.len() as u32;
         let cmd = self.g[e.id];
 
         {
@@ -287,6 +309,12 @@ impl<'a> ReadyTrackerServer<'a> {
             eprint!("{}", e.stderr);
         }
 
+        Ok(())
+    }
+
+    async fn _finished_bookkeeping_2(&mut self, e: &FinishedEvent) -> Result<()> {
+        let is_success = e.status == 0;
+        let statuses = &mut self.statuses;
         let ready = self
             .g
             .edges_directed(e.id, Direction::Outgoing)
@@ -359,7 +387,9 @@ impl<'a> ReadyTrackerServer<'a> {
             .expect("send channel was already dropped?");
         for (i, ready) in inserts.into_iter().enumerate() {
             if !ready.is_empty() {
-                channels[i].sendv(ready.into_iter().peekable()).await?;
+                if let Err(e) = channels[i].sendv(ready.into_iter().peekable()).await {
+                    tracing::error!("Perhaps TOCTOU? {}", e);
+                }
             }
         }
 
@@ -429,7 +459,7 @@ impl ReadyTrackerClient {
             }))
             .await;
         if r.is_err() {
-            log::debug!("send_started: cannot send to channel: {:#?}", r);
+            tracing::debug!("send_started: cannot send to channel: {:#?}", r);
         };
     }
 
@@ -441,6 +471,7 @@ impl ReadyTrackerClient {
         status: i32,
         stdout: String,
         stderr: String,
+        values: HashMap<String, String>,
     ) {
         cmd.call_postamble();
         let r = self
@@ -450,10 +481,11 @@ impl ReadyTrackerClient {
                 status,
                 stdout,
                 stderr,
+                values,
             }))
             .await;
         if r.is_err() {
-            log::debug!("send_finished: cannot send to channel: {:#?}", r);
+            tracing::debug!("send_finished: cannot send to channel: {:#?}", r);
         };
     }
 
@@ -478,7 +510,9 @@ struct FinishedEvent {
     status: i32,
     stdout: String,
     stderr: String,
+    values: HashMap<String, String>,
 }
+#[derive(Debug)]
 enum CompletedEvent {
     Started(StartedEvent),
     Finished(FinishedEvent),

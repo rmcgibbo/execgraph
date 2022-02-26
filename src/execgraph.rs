@@ -1,8 +1,9 @@
 use crate::{
     graphtheory::transitive_closure_dag,
+    localrunner::{run_local_process_loop, LocalQueueType},
     logfile2::{LogEntry, LogFile},
     server::{router, State as ServerState},
-    sync::{new_ready_tracker, ReadyTrackerClient},
+    sync::new_ready_tracker,
 };
 use anyhow::{anyhow, Result};
 use bitvec::array::BitArray;
@@ -16,7 +17,6 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
     net::SocketAddr,
-    os::unix::process::ExitStatusExt,
     process::Stdio,
     sync::Arc,
 };
@@ -255,7 +255,7 @@ impl ExecGraph {
                     subgraph,
                     transmute_lifetime(&tracker),
                     token,
-                    0, // 0 for local queue
+                    LocalQueueType::NormalLocalQueue, // 0 for local queue
                 ))
             });
             if num_parallel > 0 {
@@ -267,7 +267,7 @@ impl ExecGraph {
                             subgraph,
                             transmute_lifetime(&tracker),
                             token,
-                            1, // 1 for console queue
+                            LocalQueueType::ConsoleQueue, // 1 for console queue
                         ))
                     }))
                     .collect::<Vec<tokio::task::JoinHandle<_>>>()
@@ -356,97 +356,6 @@ impl ExecGraph {
         }
         Ok((n_failed, completed))
     }
-}
-
-#[tracing::instrument(skip_all)]
-async fn run_local_process_loop(
-    subgraph: Arc<DiGraph<&Cmd, ()>>,
-    tracker: &ReadyTrackerClient,
-    token: CancellationToken,
-    runnertypeid: u32,
-) -> Result<()> {
-    let hostname = gethostname::gethostname().to_string_lossy().to_string();
-    assert!(runnertypeid == 0 || runnertypeid == 1);
-    let is_console = runnertypeid == 1;
-
-    while let Ok(subgraph_node_id) = tracker.recv(runnertypeid).await {
-        let cmd = subgraph[subgraph_node_id];
-        cmd.call_preamble();
-
-        let maybe_child = match is_console {
-            false => Command::new(&cmd.cmdline[0])
-                .args(&cmd.cmdline[1..])
-                .kill_on_drop(true)
-                .envs(cmd.env.iter().cloned())
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn(),
-            true => Command::new(&cmd.cmdline[0])
-                .args(&cmd.cmdline[1..])
-                .kill_on_drop(true)
-                .envs(cmd.env.iter().cloned())
-                .stdin(Stdio::inherit())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
-                .spawn(),
-        };
-        let child = match maybe_child {
-            Ok(child) => child,
-            Err(_) => {
-                tracker
-                    .send_started(subgraph_node_id, cmd, &hostname, 0)
-                    .await;
-                tracker
-                    .send_finished(
-                        subgraph_node_id,
-                        cmd,
-                        127,
-                        "".to_owned(),
-                        format!("No such command: {:#?}", &cmd.cmdline[0]),
-                    )
-                    .await;
-                continue;
-            }
-        };
-
-        let pid = child
-            .id()
-            .ok_or_else(|| anyhow!("child hasn't been waited for yet, so its pid should exist"))?;
-
-        tracker
-            .send_started(subgraph_node_id, cmd, &hostname, pid)
-            .await;
-
-        // Like `let output = child.await.expect("sh wasn't running");`, except
-        // that we also wait for the cancellation token at the same time.
-        let output = tokio::select! {
-            _ = token.cancelled() => {
-                return Err(anyhow!("cancelled"));
-            }
-            wait_with_output = child.wait_with_output() => {
-                wait_with_output.expect("sh wasn't running")
-            }
-        };
-
-        let status = match output.status.code() {
-            Some(code) => code,
-            None => output.status.signal().expect("No exit code and no signal?"),
-        };
-        let (stdout, stderr) = if is_console {
-            ("".to_string(), "".to_string())
-        } else {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            (stdout, stderr)
-        };
-
-        tracker
-            .send_finished(subgraph_node_id, cmd, status, stdout, stderr)
-            .await;
-    }
-
-    Ok(())
 }
 
 #[tracing::instrument]

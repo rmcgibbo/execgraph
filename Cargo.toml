@@ -17,10 +17,11 @@ lto = "off"
 [dependencies]
 advisory-lock = "^0.3"
 anyhow = "^1.0"
-async-channel = "1.6.1"
-async-priority-channel = "0.1"
+async-channel = ">=1.6.1"
+async-priority-channel = ">=0.1"
 bitvec = "*"
-derivative = "2.2.0"
+tokio-command-fds = {version = "*", git = "https://github.com/rmcgibbo/tokio-command-fds"}
+derivative = "^2"
 env_logger = "^0.9"
 lazy_static = "*"
 futures = "^0.3"
@@ -28,20 +29,22 @@ gethostname = "^0.2"
 hyper = "^0.14"
 log = "^0.4"
 libc = "*"
+nix = "*"
 num_cpus = "^1"
 petgraph = { version = "^0.6", features = ["graphmap"], default-features = false }
 pyo3 = "^0.14"
 pythonize = "^0.14"
 rand = "^0.8"
 regex = "*"
-reqwest = { version = "0.11", features = ["json"],  default-features = false }
+reqwest = { version = ">=0.11", features = ["json"],  default-features = false }
 routerify = "^2"
 routerify-json-response = "^2"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "^1", features = ["derive"] }
+serde_json = "^1"
 tokio = { version = "^1", features = ["full", "tracing"] }
-tokio-util = {version = "0.6.8"}
-structopt = { version = "0.3", default-features = false }
+tokio-util = {version = ">=0.6.8"}
+shell-words = "^1"
+structopt = { version = ">=0.3", default-features = false }
 thiserror = "^1"
 url = "^2"
 whoami = "^1"
