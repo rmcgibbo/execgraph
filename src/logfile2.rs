@@ -52,6 +52,7 @@ pub struct FinishedEntry {
     pub time: SystemTime,
     pub key: String,
     pub status: i32,
+    #[serde(default)]
     pub values: HashMap<String, String>,
 }
 
