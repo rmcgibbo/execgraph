@@ -780,7 +780,7 @@ def test_fd3_1(tmp_path):
     eg.add_task(["sh", "-c", "echo 'foo=bar baz=\"qux\"'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == {"foo": "bar", "baz": "qux"}
+    assert contents[-1]["Finished"]["values"] == [{"foo": "bar", "baz": "qux"}]
 
 
 def test_fd3_2(tmp_path):
@@ -788,7 +788,7 @@ def test_fd3_2(tmp_path):
     eg.add_task(["sh", "-c", "echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == {}
+    assert contents[-1]["Finished"]["values"] == []
 
 
 def test_fd3_3(tmp_path):
@@ -798,7 +798,7 @@ def test_fd3_3(tmp_path):
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == {}
+    assert contents[-1]["Finished"]["values"] == []
 
 
 def test_fd3_4(tmp_path):
@@ -806,4 +806,28 @@ def test_fd3_4(tmp_path):
     eg.add_task(["sh", "-c", "echo 'foo=bar baz=\"qux\" foo=bar2'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == {"foo": "bar2", "baz": "qux"}
+    assert contents[-1]["Finished"]["values"] == [{"foo": "bar2", "baz": "qux"}]
+
+
+def test_fd3_5(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 'a=c c=\"'>&3"], key="foo")
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == []
+
+
+def test_fd3_6(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 'a=c c='>&3"], key="foo")
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == [{"a": "c", "c": ""}]
+
+
+def test_fd3_7(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 'a=c'>&3; echo foo=bar foo=foo>&3"], key="foo")
+    eg.execute()
+    contents = _execgraph.load_logfile(tmp_path / "foo", "all")
+    assert contents[-1]["Finished"]["values"] == [{"a": "c"}, {"foo": "foo"}]

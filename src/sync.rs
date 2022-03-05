@@ -1,7 +1,7 @@
 use crate::{execgraph::Cmd, logfile2};
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
-use logfile2::{LogEntry, LogFile};
+use logfile2::{LogEntry, LogFile, ValueMaps};
 use petgraph::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
@@ -169,7 +169,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 status: timeout_status,
                 stdout: "".to_string(),
                 stderr: "".to_string(),
-                values: HashMap::new(),
+                values: ValueMaps::new(),
             };
             self._finished_bookkeeping_1(&e)?;
             self.logfile
@@ -471,7 +471,7 @@ impl ReadyTrackerClient {
         status: i32,
         stdout: String,
         stderr: String,
-        values: HashMap<String, String>,
+        values: ValueMaps,
     ) {
         cmd.call_postamble();
         let r = self
@@ -510,7 +510,7 @@ struct FinishedEvent {
     status: i32,
     stdout: String,
     stderr: String,
-    values: HashMap<String, String>,
+    values: ValueMaps,
 }
 #[derive(Debug)]
 enum CompletedEvent {

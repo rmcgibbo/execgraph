@@ -11,7 +11,7 @@ use tokio::{io::AsyncReadExt, process::Command};
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 
-use crate::{execgraph::Cmd, sync::ReadyTrackerClient};
+use crate::{execgraph::Cmd, logfile2::ValueMaps, sync::ReadyTrackerClient};
 
 pub enum LocalQueueType {
     NormalLocalQueue,
@@ -87,7 +87,7 @@ pub async fn run_local_process_loop(
                         127,
                         "".to_owned(),
                         format!("No such command: {:#?}", &cmd.cmdline[0]),
-                        HashMap::new(),
+                        ValueMaps::new(),
                     )
                     .await;
                 continue;
@@ -134,7 +134,7 @@ pub async fn run_local_process_loop(
 pub async fn wait_for_child_output_and_another_file_descriptor(
     child: tokio::process::Child,
     fd3_file: tokio::fs::File,
-) -> Result<(std::process::Output, HashMap<String, String>), ChildProcessError> {
+) -> Result<(std::process::Output, ValueMaps), ChildProcessError> {
     async fn read_to_end(mut fd3_file: tokio::fs::File) -> std::io::Result<Vec<u8>> {
         let mut fd3_read_buffer = Vec::new();
         fd3_file.read_to_end(&mut fd3_read_buffer).await?;
@@ -145,19 +145,26 @@ pub async fn wait_for_child_output_and_another_file_descriptor(
     // concurrently, otherwise it might deadlock when the pipe gets full
     let (a, fd3_bytes) = futures::join!(child.wait_with_output(), read_to_end(fd3_file));
 
+    fn parse_line(line: &str) -> Result<HashMap<String, String>, shell_words::ParseError> {
+        shell_words::split(line).map(|fields| {
+            fields
+                .iter()
+                .flat_map(|s| {
+                    s.find('=')
+                        .map(|pos| (s[..pos].to_string(), s[pos + 1..].to_string()))
+                })
+                .collect::<HashMap<String, String>>()
+        })
+    }
+
     // Parse key-value pairs on fd3
     let values = std::str::from_utf8(&fd3_bytes?)
         .map(|s| {
             s.lines()
-                .flat_map(|line| shell_words::split(line))
-                .flatten()
-                .filter_map(|s| {
-                    s.find('=')
-                        .map(|pos| (s[..pos].to_string(), s[pos + 1..].to_string()))
-                })
-                .collect::<HashMap<_, _>>()
+                .filter_map(|line| parse_line(line).ok())
+                .collect::<ValueMaps>()
         })
-        .unwrap_or(HashMap::new());
+        .unwrap_or(ValueMaps::new());
 
     Ok((a?, values))
 }

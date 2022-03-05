@@ -8,13 +8,13 @@ use execgraph::{
     localrunner::{
         anon_pipe, wait_for_child_output_and_another_file_descriptor, ChildProcessError,
     },
+    logfile2::ValueMaps,
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
     os::unix::{prelude::FromRawFd, process::ExitStatusExt},
     time::Duration,
 };
@@ -218,7 +218,7 @@ async fn run_command(
                     status: 127,
                     stdout: "".to_owned(),
                     stderr: format!("No such command: {:#?}", &start.data.cmdline[0]),
-                    values: HashMap::new(),
+                    values: ValueMaps::new(),
                 })
                 .send() => {
                     value?.error_for_status()?;

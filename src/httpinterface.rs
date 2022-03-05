@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ffi::OsString};
 
+use crate::logfile2::ValueMaps;
+
 #[derive(Serialize, Deserialize)]
 pub struct Ping {
     pub transaction_id: u32,
@@ -50,7 +52,7 @@ pub struct EndRequest {
     pub status: i32,
     pub stdout: String,
     pub stderr: String,
-    pub values: HashMap<String, String>,
+    pub values: ValueMaps,
 }
 
 pub mod vectorize {

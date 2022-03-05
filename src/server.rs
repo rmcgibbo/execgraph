@@ -14,6 +14,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{sync::Mutex, time::timeout};
 use tokio_util::sync::CancellationToken;
 type RouteError = Box<dyn std::error::Error + Send + Sync + 'static>;
+use crate::logfile2::ValueMaps;
 
 static PING_INTERVAL_MSECS: u64 = 15_000;
 
@@ -170,7 +171,7 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
             timeout_status,
             "".to_owned(),
             "".to_owned(),
-            HashMap::new(),
+            ValueMaps::new(),
         )
         .await;
 }

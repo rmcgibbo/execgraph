@@ -9,6 +9,7 @@ use std::{
 use thiserror::Error;
 
 pub type Result<T> = core::result::Result<T, LogfileError>;
+pub type ValueMaps = Vec<HashMap<String, String>>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum LogEntry {
@@ -53,7 +54,7 @@ pub struct FinishedEntry {
     pub key: String,
     pub status: i32,
     #[serde(default)]
-    pub values: HashMap<String, String>,
+    pub values: ValueMaps, // If the value is not present when deserializing, use the Default::default().
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -93,7 +94,7 @@ impl LogEntry {
         })
     }
 
-    pub fn new_finished(key: &str, status: i32, values: HashMap<String, String>) -> LogEntry {
+    pub fn new_finished(key: &str, status: i32, values: ValueMaps) -> LogEntry {
         LogEntry::Finished(FinishedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
