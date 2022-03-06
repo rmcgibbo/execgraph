@@ -788,7 +788,7 @@ def test_fd3_2(tmp_path):
     eg.add_task(["sh", "-c", "echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == []
+    assert contents[-1]["Finished"]["values"] == [{}]
 
 
 def test_fd3_3(tmp_path):
