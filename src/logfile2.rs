@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env,
-    io::{BufRead, Write},
+    io::{BufRead, Seek, Write},
     time::SystemTime,
 };
 use thiserror::Error;
@@ -288,8 +288,11 @@ impl LogFileReadOnly {
     }
 
     pub fn read_current_and_outdated(&mut self) -> Result<(Vec<LogEntry>, Vec<LogEntry>)> {
+        let all_entries = self.read()?;
+        let count = all_entries.len();
+
         let mut result_current = Vec::new();
-        let mut rev_iter = self.read()?.into_iter().rev();
+        let mut rev_iter = all_entries.into_iter().rev();
         let mut pending_backrefs = std::collections::HashSet::new();
         let mut header = None;
 
@@ -308,13 +311,12 @@ impl LogFileReadOnly {
                 }
             };
         }
+        let nbackrefs = pending_backrefs.len();
+
         // keep iterating backward and adding LogEntries if they're in the pending_backrefs
         // until we clear all of the pending backrefs
         let mut result_outdated: Vec<LogEntry> = vec![];
         for item in rev_iter.by_ref() {
-            if pending_backrefs.is_empty() {
-                break;
-            }
             match &item {
                 LogEntry::Ready(v) => {
                     if pending_backrefs.contains(&v.key) {
@@ -342,6 +344,9 @@ impl LogFileReadOnly {
                     result_outdated.push(item);
                 }
             }
+            if pending_backrefs.is_empty() {
+                break;
+            }
         }
 
         // put the header on the front
@@ -352,13 +357,14 @@ impl LogFileReadOnly {
         // keep iterating backward and put everything else into the outdated list
         result_outdated.extend(rev_iter);
 
-        Ok((
-            result_current.into_iter().rev().collect(),
-            result_outdated.into_iter().rev().collect(),
-        ))
+        let x: Vec<LogEntry> = result_current.into_iter().rev().collect();
+        let y: Vec<LogEntry> = result_outdated.into_iter().rev().collect();
+        assert!(x.len() + y.len() + nbackrefs == count);
+        Ok((x, y))
     }
 
     pub fn read(&mut self) -> Result<Vec<LogEntry>> {
+        self.f.seek(std::io::SeekFrom::Start(0))?;
         let mut reader = std::io::BufReader::new(&self.f);
         let mut v = Vec::new();
         let mut line = String::new();
