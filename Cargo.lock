@@ -197,6 +197,7 @@ dependencies = [
  "bitvec",
  "derivative",
  "env_logger",
+ "event-listener",
  "futures",
  "gethostname",
  "hyper",

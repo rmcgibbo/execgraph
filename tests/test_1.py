@@ -398,7 +398,7 @@ def test_status_1(tmp_path):
         x = f.read()
         assert (
             x
-            == '{"status":"success","code":200,"data":{"queues":[[3,{"num_ready":2,"num_inflight":0}]]}}'
+            == '{"status":"success","code":200,"data":{"queues":[[3,{"num_ready":2,"num_inflight":0}]],"etag":1}}'
         )
 
     assert nfailed == 0
@@ -455,6 +455,7 @@ def test_queue(tmp_path):
             "status": "success",
             "code": 200,
             "data": {
+                "etag": 1,
                 "queues": sorted(
                     [
                         [

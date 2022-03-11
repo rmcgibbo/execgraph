@@ -10,8 +10,7 @@ pub struct Ping {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StatusRequest {
-    pub queue: Option<String>,
-    pub pending_greater_than: u32,
+    pub etag: u64,
     pub timeout: u64,
 }
 
@@ -19,6 +18,7 @@ pub struct StatusRequest {
 pub struct StatusReply {
     #[serde(with = "vectorize")]
     pub queues: HashMap<u64, StatusQueueReply>,
+    pub etag: u64,
 }
 #[derive(Serialize, Deserialize)]
 pub struct StatusQueueReply {

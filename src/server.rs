@@ -182,19 +182,21 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
 #[tracing::instrument]
 async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
-    let request = get_json_body::<StatusRequest>(req).await.ok();
+    let request = get_json_body::<StatusRequest>(req)
+        .await
+        .unwrap_or(StatusRequest {
+            timeout: 0,
+            etag: 0,
+        });
 
-    // if they sent in a request, they want us to wait for up to `timeout` seconds or until
-    // the number of pending tasks in a specific queue is greater than. Or maybe they sent in
-    // no request data, and in that case we just give the response back immediately.
-    async fn get_snapshot(
-        _request: &Option<StatusRequest>,
-        state: Arc<State<'_>>,
-    ) -> Result<HashMap<BitArray<u64>, Snapshot>, RouteError> {
-        Ok(state.tracker.get_queuestate())
-    }
+    let (etag, snapshot) = match request.timeout {
+        0 => state.tracker.get_queuestate(request.etag).await,
+        _ => {
+            let dur = std::time::Duration::from_secs(request.timeout);
+            tokio::time::timeout(dur, state.tracker.get_queuestate(request.etag)).await?
+        }
+    };
 
-    let snapshot = get_snapshot(&request, state.clone()).await?;
     let resp = snapshot
         .iter()
         .map(|(name, queue)| {
@@ -208,7 +210,7 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
         })
         .collect::<HashMap<u64, StatusQueueReply>>();
 
-    json_success_resp(&StatusReply { queues: resp })
+    json_success_resp(&StatusReply { queues: resp, etag })
 }
 
 // POST /ping

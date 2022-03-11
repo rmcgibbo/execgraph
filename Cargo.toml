@@ -19,6 +19,7 @@ advisory-lock = "^0.3"
 anyhow = "^1.0"
 async-channel = ">=1.6.1"
 async-priority-channel = ">=0.1"
+event-listener = "*"
 bitvec = "*"
 tokio-command-fds = {version = "*", git = "https://github.com/rmcgibbo/tokio-command-fds"}
 derivative = "^2"

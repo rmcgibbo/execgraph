@@ -1,4 +1,4 @@
-use crate::{execgraph::Cmd, logfile2};
+use crate::{execgraph::Cmd, logfile2, utils::AwaitableCounter};
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
 use logfile2::{LogEntry, LogFile, ValueMaps};
@@ -59,6 +59,7 @@ pub struct ReadyTrackerServer<'a> {
     completed: async_channel::Receiver<CompletedEvent>,
     n_success: u32,
     n_pending: u32,
+    pending_increased_event: Arc<AwaitableCounter>,
     count_offset: u32,
     failures_allowed: u32,
     queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
@@ -69,6 +70,7 @@ pub struct ReadyTrackerServer<'a> {
 #[derive(Debug)]
 pub struct ReadyTrackerClient {
     queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
+    pending_increased_event: Arc<AwaitableCounter>,
     s: async_channel::Sender<CompletedEvent>,
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
 }
@@ -111,6 +113,8 @@ pub fn new_ready_tracker<'a>(
         })
         .collect();
 
+    let pending_increased_event = Arc::new(AwaitableCounter::new());
+
     (
         ReadyTrackerServer {
             finished_order: vec![],
@@ -120,6 +124,7 @@ pub fn new_ready_tracker<'a>(
             n_failed: 0,
             n_success: 0,
             n_pending: 0,
+            pending_increased_event: pending_increased_event.clone(),
             count_offset,
             failures_allowed,
             queuestate: queuestate.clone(),
@@ -131,6 +136,7 @@ pub fn new_ready_tracker<'a>(
             r: ready_r.try_into().unwrap(),
             s: finished_s,
             queuestate,
+            pending_increased_event,
         },
     )
 }
@@ -345,7 +351,10 @@ impl<'a> ReadyTrackerServer<'a> {
         ready: Vec<NodeIndex>, // cmd index and priority
     ) -> Result<()> {
         let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
-        self.n_pending = u32checked_add!(self.n_pending, ready.len());
+        if ready.len() > 0 {
+            self.n_pending = u32checked_add!(self.n_pending, ready.len());
+            self.pending_increased_event.incr(); // fire an event
+        }
         let mut inserts = vec![vec![]; NUM_RUNNER_TYPES];
 
         for index in ready.into_iter() {
@@ -490,11 +499,15 @@ impl ReadyTrackerClient {
     }
 
     /// Retreive a snapshot of the state of the queue
-    pub fn get_queuestate(&self) -> HashMap<BitArray<u64>, Snapshot> {
-        self.queuestate
-            .lock()
-            .expect("Something must have panicked while holding this lock")
-            .clone()
+    pub async fn get_queuestate(&self, etag: u64) -> (u64, HashMap<BitArray<u64>, Snapshot>) {
+        let etag_new = self.pending_increased_event.changed(etag).await;
+        (
+            etag_new,
+            self.queuestate
+                .lock()
+                .expect("Something must have panicked while holding this lock")
+                .clone(),
+        )
     }
 }
 
