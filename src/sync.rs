@@ -501,8 +501,31 @@ impl ReadyTrackerClient {
     }
 
     /// Retreive a snapshot of the state of the queue
-    pub async fn get_queuestate(&self, etag: u64) -> (u64, HashMap<BitArray<u64>, Snapshot>) {
-        let etag_new = self.pending_increased_event.changed(etag).await;
+    /// etag: only return once the pending_increased_event
+    ///       has fired at least this number of times. the idea with this is that
+    ///       it lets a provisioner do long polling and get a response right after
+    ///       the number of pending tasks might have increased, which is probably
+    ///       a good time for it to get more compute resources.
+    /// timemin: sort of in the same vein as etag, but from the other side. don't return
+    ///       for at least this amount of time. Let's sat that pending_increased_event
+    ///       is firing very frequently, the provisioner might have some kind of rate
+    ///       limit so it's not going to take any action that frequently anyways, so it
+    ///       might want to communicate that rate limit here so that it can get the queue
+    ///       state after a minimum of a couple seconds.
+    pub async fn get_queuestate(
+        &self,
+        etag: u64,
+        timemin: std::time::Duration,
+    ) -> (u64, HashMap<BitArray<u64>, Snapshot>) {
+        let clock_start = tokio::time::Instant::now();
+        let mut etag_new = self.pending_increased_event.changed(etag).await;
+        let elapsed = tokio::time::Instant::now() - clock_start;
+
+        if elapsed < timemin {
+            tokio::time::sleep_until(clock_start + timemin).await;
+            etag_new = self.pending_increased_event.load();
+        }
+
         (
             etag_new,
             self.queuestate

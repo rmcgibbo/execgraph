@@ -11,7 +11,8 @@ pub struct Ping {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StatusRequest {
     pub etag: u64,
-    pub timeout: u64,
+    pub timemin_ms: u64,
+    pub timeout_ms: u64,
 }
 
 #[derive(Serialize, Deserialize)]

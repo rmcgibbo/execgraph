@@ -21,6 +21,10 @@ impl AwaitableCounter {
         self.event.notify(usize::MAX);
     }
 
+    pub fn load(&self) -> u64 {
+        self.value.load(Ordering::SeqCst)
+    }
+
     // Wait for the counter to go above the value `from`. Returns
     // the new value
     pub async fn changed(&self, from: u64) -> u64 {

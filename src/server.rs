@@ -180,15 +180,31 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
     let request = get_json_body::<StatusRequest>(req)
         .await
         .unwrap_or(StatusRequest {
-            timeout: 0,
+            timeout_ms: 0,
+            timemin_ms: 0,
             etag: 0,
         });
 
-    let (etag, snapshot) = match request.timeout {
-        0 => state.tracker.get_queuestate(request.etag).await,
+    let (etag, snapshot) = match request.timeout_ms {
+        0 => {
+            state
+                .tracker
+                .get_queuestate(
+                    request.etag,
+                    std::time::Duration::from_millis(request.timemin_ms),
+                )
+                .await
+        }
         _ => {
-            let dur = std::time::Duration::from_secs(request.timeout);
-            tokio::time::timeout(dur, state.tracker.get_queuestate(request.etag)).await?
+            let dur = std::time::Duration::from_millis(request.timeout_ms);
+            tokio::time::timeout(
+                dur,
+                state.tracker.get_queuestate(
+                    request.etag,
+                    std::time::Duration::from_millis(request.timemin_ms),
+                ),
+            )
+            .await?
         }
     };
 
