@@ -350,11 +350,11 @@ impl<'a> ReadyTrackerServer<'a> {
         &mut self,
         ready: Vec<NodeIndex>, // cmd index and priority
     ) -> Result<()> {
-        let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
-        if ready.len() > 0 {
-            self.n_pending = u32checked_add!(self.n_pending, ready.len());
-            self.pending_increased_event.incr(); // fire an event
+        if ready.len() == 0 {
+            return Ok(());
         }
+        self.n_pending = u32checked_add!(self.n_pending, ready.len());
+        let mut queuestate_lock = self.queuestate.lock().expect("Panic whole holding lock?");
         let mut inserts = vec![vec![]; NUM_RUNNER_TYPES];
 
         for index in ready.into_iter() {
@@ -401,6 +401,8 @@ impl<'a> ReadyTrackerServer<'a> {
                 }
             }
         }
+
+        self.pending_increased_event.incr(); // fire an event
 
         Ok(())
     }

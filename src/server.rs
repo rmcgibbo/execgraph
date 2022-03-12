@@ -1,10 +1,5 @@
-use crate::{
-    execgraph::Cmd,
-    httpinterface::*,
-    sync::{ReadyTrackerClient, Snapshot},
-};
+use crate::{execgraph::Cmd, httpinterface::*, sync::ReadyTrackerClient};
 use anyhow::Result;
-use bitvec::array::BitArray;
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
