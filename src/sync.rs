@@ -516,11 +516,17 @@ impl ReadyTrackerClient {
         &self,
         etag: u64,
         timemin: std::time::Duration,
+        timeout: std::time::Duration,
     ) -> (u64, HashMap<BitArray<u64>, Snapshot>) {
         let clock_start = tokio::time::Instant::now();
-        let mut etag_new = self.pending_increased_event.changed(etag).await;
-        let elapsed = tokio::time::Instant::now() - clock_start;
 
+        let mut etag_new =
+            match tokio::time::timeout(timeout, self.pending_increased_event.changed(etag)).await {
+                Ok(etag_new) => etag_new,
+                Err(_elapsed) => self.pending_increased_event.load(),
+            };
+
+        let elapsed = tokio::time::Instant::now() - clock_start;
         if elapsed < timemin {
             tokio::time::sleep_until(clock_start + timemin).await;
             etag_new = self.pending_increased_event.load();
