@@ -19,18 +19,20 @@ jobs:
      - name: Create Pull Request
        id: cpr
        uses: peter-evans/create-pull-request@v3
-       commit-message: Update flakes
-       committer: GitHub <noreply@github.com>
-       author: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
-       signoff: false
-       assignees: rmcgibbo
-       reviewers: rmcgibbo
-       branch: flake-updates
-       delete-branch: true
-       title: 'Upgrade Cargo.lock, flake.lock'
-       body: |
-         Update report
-         - Updated with *today's* date
+       env:
+         # See https://github.com/peter-evans/create-pull-request/issues/48#issuecomment-536204092
+         token: ${{ secrets.REPO_SCOPED_TOKEN }}
+       with:
+         commit-message: Update flakes
+         committer: GitHub <noreply@github.com>
+         author: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
+         signoff: false
+         branch: flake-updates
+         delete-branch: true
+         title: 'Upgrade Cargo.lock, flake.lock'
+         body: |
+           Update report
+           - Updated with *today's* date
      - name: Check outputs
        run: |
          echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
