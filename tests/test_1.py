@@ -832,3 +832,10 @@ def test_fd3_7(tmp_path):
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert contents[-1]["Finished"]["values"] == [{"a": "c"}, {"foo": "foo"}]
+
+
+def test_dup(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    assert eg.add_task(["sh", "-c", "echo 1"], key="foo") == 0
+    assert eg.add_task(["sh", "-c", "echo 1"], key="foo") == 0
+    assert len(eg.execute()[1]) == 1

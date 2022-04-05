@@ -178,7 +178,7 @@ impl ExecGraph {
 
     #[tracing::instrument(skip(self))]
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
-        if cmd.key.is_empty() {
+        if !cmd.key.is_empty() {
             if let Some(index) = self.key_to_nodeid.get(&cmd.key) {
                 return Ok(index.index() as u32);
             }
