@@ -180,7 +180,7 @@ def test_twice(num_parallel, tmp_path):
 
     del eg  # closes the log file to release the lock
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert len(log) == 16
+    assert len(log) == 4
 
 
 def test_order(num_parallel, tmp_path):
