@@ -1,20 +1,25 @@
-use crate::{execgraph::Cmd, logfile2, utils::AwaitableCounter};
+use crate::{
+    execgraph::Cmd,
+    logfile2,
+    utils::{AwaitableCounter, CancellationState, CancellationToken},
+};
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
 use logfile2::{LogEntry, LogFile, ValueMaps};
 use petgraph::prelude::*;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     convert::{TryFrom, TryInto},
     sync::{
         atomic::{AtomicBool, Ordering::SeqCst},
         Arc, Mutex,
     },
+    time::{Duration, Instant, SystemTime},
 };
 use thiserror::Error;
-use tokio_util::sync::CancellationToken;
 
 const FAIL_COMMAND_PREFIX: &str = "wrk/";
+const BOOTFAILED_TIME_CUTOFF: Duration = Duration::from_secs(5);
 
 macro_rules! u32checked_add {
     ($a:expr,$b:expr) => {{
@@ -52,6 +57,7 @@ struct TaskItem {
 pub struct ReadyTrackerServer<'a> {
     pub finished_order: Vec<NodeIndex>,
     pub n_failed: u32,
+    n_bootfailed: u32,
 
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile,
@@ -63,7 +69,7 @@ pub struct ReadyTrackerServer<'a> {
     count_offset: u32,
     failures_allowed: u32,
     queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
-    inflight: HashSet<NodeIndex>,
+    inflight: HashMap<NodeIndex, std::time::Instant>,
     statuses: HashMap<NodeIndex, TaskStatus>,
 }
 
@@ -122,13 +128,14 @@ pub fn new_ready_tracker<'a>(
             ready: Some(ready_s.try_into().unwrap()),
             completed: finished_r,
             n_failed: 0,
+            n_bootfailed: 0,
             n_success: 0,
             n_pending: 0,
             pending_increased_event: pending_increased_event.clone(),
             count_offset,
             failures_allowed,
             queuestate: queuestate.clone(),
-            inflight: HashSet::new(),
+            inflight: HashMap::new(),
             logfile,
             statuses,
         },
@@ -151,14 +158,14 @@ impl<'a> ReadyTrackerServer<'a> {
                     let cmd = self.g[e.id];
                     self.logfile
                         .write(LogEntry::new_started(&cmd.key, "host", 0))?;
-                    assert!(inflight.insert(e.id));
+                    assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(CompletedEvent::Finished(e)) => {
                     let cmd = self.g[e.id];
                     self._finished_bookkeeping_1(&e)?;
                     self.logfile
                         .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
-                    assert!(inflight.remove(&e.id));
+                    assert!(inflight.remove(&e.id).is_some());
                 }
                 Err(_) => {
                     break;
@@ -167,7 +174,7 @@ impl<'a> ReadyTrackerServer<'a> {
         }
 
         self.inflight.clear();
-        for k in inflight.iter() {
+        for (k, _) in inflight.iter() {
             let timeout_status = 130;
             let cmd = self.g[*k];
             let e = FinishedEvent {
@@ -186,6 +193,12 @@ impl<'a> ReadyTrackerServer<'a> {
 
     #[tracing::instrument(skip_all)]
     pub async fn background_serve(&mut self, token: CancellationToken) -> Result<()> {
+        #[derive(Eq, PartialEq)]
+        enum State {
+            Normal,
+            SoftShutdown,
+        }
+
         // trigger all of the tasks that have zero unmet dependencies
         self.add_to_ready_queue(
             self.statuses
@@ -195,6 +208,8 @@ impl<'a> ReadyTrackerServer<'a> {
         )
         .await
         .context("couldn't add to ready queue")?;
+
+        let mut state = State::Normal;
 
         // every time we put a task into the ready queue, we increment n_pending.
         // every time a task completes, we decrement n_pending.
@@ -219,7 +234,7 @@ impl<'a> ReadyTrackerServer<'a> {
                                 &e.host,
                                 e.pid,
                             ))?;
-                            assert!(self.inflight.insert(e.id));
+                            assert!(self.inflight.insert(e.id, Instant::now()).is_none());
                         }
                         CompletedEvent::Finished(e) => {
                             let cmd = self.g[e.id];
@@ -230,19 +245,31 @@ impl<'a> ReadyTrackerServer<'a> {
                                 e.status,
                                 e.values,
                             ))?;
-                            assert!(self.inflight.remove(&e.id));
+                            assert!(self.inflight.remove(&e.id).is_some());
 
-                            if self.n_failed >= self.failures_allowed || self.n_pending == 0 {
+
+                            if self.n_bootfailed >= self.failures_allowed {
+                                tracing::debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
+                                self.n_bootfailed, self.failures_allowed, self.n_pending);
+                                token.cancel(CancellationState::CancelledAfterTime(SystemTime::now() - BOOTFAILED_TIME_CUTOFF));
+                                self.ready = None;
+                                state = State::SoftShutdown;
+                            }
+
+                            if self.n_pending == 0 || (state == State::SoftShutdown && self.inflight.is_empty()) {
                                 // drop the send side of the channel. this will cause the receive side
                                 // to start returning errors, which is exactly what we want and will
-                                // break the other threads out of the loop.
+                                // break the run_local_process_loop runners at the point where they're
+                                // waiting to get a task from the ready task receiver
                                 self.ready = None;
+                                tracing::debug!("background_serve breaking on n_failed={} failures_allowed={} n_pending={}",
+                                    self.n_failed, self.failures_allowed, self.n_pending);
                                 break;
                             }
                         }
                     }
                 },
-                _ = token.cancelled() => {
+                _ = token.hard_cancelled() => {
                     tracing::debug!("background_serve breaking on token cancellation");
                     self.ready = None;
                     break;
@@ -265,11 +292,18 @@ impl<'a> ReadyTrackerServer<'a> {
 
     fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent) -> Result<()> {
         let is_success = e.status == 0;
-        let total = self.statuses.len() as u32;
+        let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
 
+        // elapsed is none if the task never started, which happens if we're being
+        // called during the drain() shutdown phase on tasks that never began.
+        let elapsed = self
+            .inflight
+            .get(&e.id)
+            .map(|&started| Instant::now() - started);
+
         {
-            self.n_pending -= 1;
+            self.n_pending = self.n_pending.saturating_sub(1);
             let mut locked = self
                 .queuestate
                 .lock()
@@ -291,14 +325,22 @@ impl<'a> ReadyTrackerServer<'a> {
             );
         } else {
             self.n_failed += 1;
+
+            // todo: better as a let chain but that doesn't seem to be allowed on stable rust
+            if let Some(elapsed) = elapsed {
+                if elapsed < BOOTFAILED_TIME_CUTOFF {
+                    self.n_bootfailed += 1;
+                }
+            }
+
             if cmd.key.is_empty() {
-                println!(
+                eprintln!(
                     "\x1b[1;31mFAILED:\x1b[0m {}{}",
                     FAIL_COMMAND_PREFIX,
                     cmd.display()
                 );
             } else {
-                println!(
+                eprintln!(
                     "\x1b[1;31mFAILED:\x1b[0m {}{}.{:x}: {}",
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
@@ -350,7 +392,7 @@ impl<'a> ReadyTrackerServer<'a> {
         &mut self,
         ready: Vec<NodeIndex>, // cmd index and priority
     ) -> Result<()> {
-        if ready.len() == 0 {
+        if ready.is_empty() {
             return Ok(());
         }
         self.n_pending = u32checked_add!(self.n_pending, ready.len());
@@ -515,8 +557,8 @@ impl ReadyTrackerClient {
     pub async fn get_queuestate(
         &self,
         etag: u64,
-        timemin: std::time::Duration,
-        timeout: std::time::Duration,
+        timemin: Duration,
+        timeout: Duration,
     ) -> (u64, HashMap<BitArray<u64>, Snapshot>) {
         let clock_start = tokio::time::Instant::now();
 

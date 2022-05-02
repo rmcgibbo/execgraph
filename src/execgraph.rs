@@ -4,6 +4,7 @@ use crate::{
     logfile2::{LogEntry, LogFile},
     server::{router, State as ServerState},
     sync::new_ready_tracker,
+    utils::{CancellationState, CancellationToken},
 };
 use anyhow::{anyhow, Result};
 use bitvec::array::BitArray;
@@ -15,14 +16,14 @@ use pyo3::AsPyPointer;
 use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
+    convert::TryInto,
     ffi::OsString,
     net::SocketAddr,
     process::Stdio,
     sync::Arc,
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 
 // TODO: remove clone?
 #[derive(Derivative)]
@@ -180,7 +181,7 @@ impl ExecGraph {
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
         if !cmd.key.is_empty() {
             if let Some(index) = self.key_to_nodeid.get(&cmd.key) {
-                return Ok(index.index() as u32);
+                return Ok(index.index().try_into().unwrap());
             }
         }
         if cmd.cmdline.is_empty() {
@@ -199,7 +200,7 @@ impl ExecGraph {
 
         self.key_to_nodeid.insert(key, new_node);
         trace!("Added command to task graph");
-        Ok(new_node.index() as u32)
+        Ok(new_node.index().try_into().unwrap())
     }
 
     #[tracing::instrument(skip(self))]
@@ -220,7 +221,7 @@ impl ExecGraph {
             unsafe { std::mem::transmute::<_, _>(x) }
         }
 
-        let count_offset = self.completed.len() as u32;
+        let count_offset = self.completed.len().try_into().unwrap();
         let subgraph = Arc::new(get_subgraph(
             &mut self.deps,
             &mut self.completed,
@@ -297,19 +298,19 @@ impl ExecGraph {
                     let server = Server::bind(&addr).serve(service);
                     let bound_addr = server.local_addr();
                     trace!("Bound server to {}", bound_addr);
-                    let graceful = server.with_graceful_shutdown(token1.cancelled());
+                    let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
                     let (server_start_tx, server_start_rx) = oneshot::channel();
 
                     tokio::spawn(async move {
                         server_start_rx.await.expect("failed to recv");
-                        trace!("Spawning remote provisioner {}", provisioner.cmd);
+                        debug!("Spawning remote provisioner {}", provisioner.cmd);
                         if let Err(e) =
                             spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2).await
                         {
                             error!("Provisioner failed: {}", e);
                         }
-                        token3.cancel();
-                        trace!("Remote provisioner exited");
+                        token3.cancel(CancellationState::HardCancelled);
+                        debug!("Remote provisioner exited");
                         provisioner_exited_tx
                             .send(())
                             .expect("could not send to channel");
@@ -333,7 +334,7 @@ impl ExecGraph {
             .background_serve(token.clone())
             .await
             .expect("background_serve failed");
-        token.cancel();
+        token.cancel(CancellationState::HardCancelled);
         join_all(handles).await;
         servicer.drain().expect("failed to drain queue");
 
@@ -358,7 +359,7 @@ impl ExecGraph {
     }
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 async fn spawn_and_wait_for_provisioner(
     provisioner: &RemoteProvisionerSpec,
     bound_addr: SocketAddr,
@@ -388,8 +389,7 @@ async fn spawn_and_wait_for_provisioner(
 
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
-        _ = token.cancelled() => {
-
+        _ = token.hard_cancelled() => {
             drop(child_stdin); // drop stdin so that it knows to exit
             let duration = std::time::Duration::from_millis(1000);
             if tokio::time::timeout(duration, child.wait()).await.is_err() {
@@ -419,7 +419,8 @@ fn get_subgraph<'a, 'b: 'a>(
     // keeps everything in the Cmd struct
     let priority = crate::graphtheory::blevel_dag(deps)?;
     for (i, p) in priority.iter().enumerate() {
-        deps[NodeIndex::from(i as u32)].priority = *p;
+        let i_u32: u32 = i.try_into().unwrap();
+        deps[NodeIndex::from(i_u32)].priority = *p;
     }
 
     // Get the subgraph containing all cmds in the transitive closure of target.

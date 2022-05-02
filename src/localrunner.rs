@@ -1,3 +1,4 @@
+use crate::utils::{CancellationState, CancellationToken};
 use anyhow::{anyhow, Result};
 use petgraph::graph::DiGraph;
 use std::{
@@ -9,7 +10,7 @@ use std::{
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command};
 use tokio_command_fds::{CommandFdExt, FdMapping};
-use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use crate::{execgraph::Cmd, logfile2::ValueMaps, sync::ReadyTrackerClient};
 
@@ -73,6 +74,7 @@ pub async fn run_local_process_loop(
         }
         // SAFETY: this takes ownership over the file descriptor and will close it.
         let fd3_file = unsafe { tokio::fs::File::from_raw_fd(read_fd3.into_raw_fd()) };
+        let start_time = std::time::SystemTime::now();
 
         let child = match maybe_child {
             Ok(child) => child,
@@ -103,7 +105,14 @@ pub async fn run_local_process_loop(
             .await;
 
         let (output, fd3_values) = tokio::select! {
-            _ = token.cancelled() => {
+            cancel = token.soft_cancelled(start_time) => {
+                if let CancellationState::CancelledAfterTime(_) = cancel {
+                    // if we were soft canceled, send a finished notification.
+                    tracker
+                        .send_finished(subgraph_node_id, cmd, 130, "".to_string(), "".to_string(), vec![])
+                        .await;
+                }
+                debug!("Received cancellation");
                 return Err(anyhow!("cancelled"));
             },
             wait_with_output = wait_for_child_output_and_another_file_descriptor(child, fd3_file) => {
@@ -123,11 +132,13 @@ pub async fn run_local_process_loop(
                 (stdout, stderr)
             }
         };
+        tracing::debug!("Finished cmd");
         tracker
             .send_finished(subgraph_node_id, cmd, status, stdout, stderr, fd3_values)
             .await;
     }
 
+    debug!("Exiting loop at 141");
     Ok(())
 }
 
@@ -141,10 +152,6 @@ pub async fn wait_for_child_output_and_another_file_descriptor(
         Ok(fd3_read_buffer)
     }
 
-    // we need to read from the fd3 pipe and wait for the normal stdout/stderr
-    // concurrently, otherwise it might deadlock when the pipe gets full
-    let (a, fd3_bytes) = futures::join!(child.wait_with_output(), read_to_end(fd3_file));
-
     fn parse_line(line: &str) -> Result<HashMap<String, String>, shell_words::ParseError> {
         shell_words::split(line).map(|fields| {
             fields
@@ -157,6 +164,10 @@ pub async fn wait_for_child_output_and_another_file_descriptor(
         })
     }
 
+    // we need to read from the fd3 pipe and wait for the normal stdout/stderr
+    // concurrently, otherwise it might deadlock when the pipe gets full
+    let (a, fd3_bytes) = futures::join!(child.wait_with_output(), read_to_end(fd3_file));
+
     // Parse key-value pairs on fd3
     let values = std::str::from_utf8(&fd3_bytes?)
         .map(|s| {
@@ -164,7 +175,7 @@ pub async fn wait_for_child_output_and_another_file_descriptor(
                 .filter_map(|line| parse_line(line).ok())
                 .collect::<ValueMaps>()
         })
-        .unwrap_or(ValueMaps::new());
+        .unwrap_or_default();
 
     Ok((a?, values))
 }
@@ -207,7 +218,7 @@ pub fn anon_pipe() -> (FileDesc, FileDesc) {
 
 impl FileDesc {
     unsafe fn from_raw_fd(fd: i32) -> Self {
-        return Self { fd };
+        Self { fd }
     }
     pub fn as_raw_fd(&self) -> i32 {
         self.fd

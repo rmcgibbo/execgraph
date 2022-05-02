@@ -70,7 +70,7 @@ pub fn blevel_dag<N, V>(graph: &DiGraph<N, V>) -> Result<Vec<u32>> {
     let toposort =
         toposort(&graph, None).map_err(|e| anyhow!("Graph contains a cycle: {:?}", e))?;
 
-    let mut blevel = vec![0u32; graph.node_count()];
+    let mut blevel = vec![0_u32; graph.node_count()];
     for &v in toposort.iter().rev() {
         let downstream = graph.neighbors_directed(v, petgraph::Direction::Outgoing);
         blevel[v.index()] = downstream.map(|x| 1 + blevel[x.index()]).max().unwrap_or(0);
