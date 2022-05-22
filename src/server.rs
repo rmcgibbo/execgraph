@@ -5,13 +5,11 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
 use routerify_json_response::json_success_resp;
 use serde::de::DeserializeOwned;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::SystemTime};
 use tokio::{sync::Mutex, time::timeout};
 use tokio_util::sync::CancellationToken;
 type RouteError = Box<dyn std::error::Error + Send + Sync + 'static>;
-use crate::logfile2::ValueMaps;
-
-static PING_INTERVAL_MSECS: u64 = 15_000;
+use crate::{constants::PING_INTERVAL_MSECS, logfile2::ValueMaps};
 
 #[derive(Debug)]
 struct ConnectionState {
@@ -19,20 +17,41 @@ struct ConnectionState {
     cancel: CancellationToken,
     cmd: Cmd,
     node_id: NodeIndex,
+    joinhandle: tokio::task::JoinHandle<()>,
 }
 #[derive(Debug)]
 pub struct State<'a> {
     connections: Mutex<HashMap<u32, ConnectionState>>,
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
     tracker: &'a ReadyTrackerClient,
+    token: crate::utils::CancellationToken,
 }
 
 impl<'a> State<'a> {
-    pub fn new(subgraph: Arc<DiGraph<&'a Cmd, ()>>, tracker: &'a ReadyTrackerClient) -> State<'a> {
+    pub fn new(
+        subgraph: Arc<DiGraph<&'a Cmd, ()>>,
+        tracker: &'a ReadyTrackerClient,
+        token: crate::utils::CancellationToken,
+    ) -> State<'a> {
         State {
             connections: Mutex::new(HashMap::new()),
             subgraph,
             tracker,
+            token,
+        }
+    }
+
+    pub async fn join(&self) -> () {
+        let mut connections = self.connections.lock().await;
+        let keys: Vec<_> = connections.iter().map(|(k, _)| k.clone()).collect();
+        for k in keys {
+            match connections.remove(&k) {
+                Some(cs) => {
+                    cs.cancel.cancel();
+                    cs.joinhandle.await.expect("Unable to join");
+                }
+                None => {}
+            };
         }
     }
 }
@@ -144,11 +163,10 @@ async fn middleware_before(req: Request<Body>) -> Result<Request<Body>, RouteErr
     Ok(req)
 }
 
-#[tracing::instrument]
 async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
     let cstate = {
-        let mut lock = state.connections.lock().await;
-        let cstate = match lock.remove(&transaction_id) {
+        let mut connections = state.connections.lock().await;
+        let cstate = match connections.remove(&transaction_id) {
             Some(cs) => cs,
             None => return,
         };
@@ -249,35 +267,52 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
             crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => unreachable!(),
         })?;
 
+    // Create a new channel to handle keepalive pings. The client will send us pings every
+    // 15 seconds or so, and each ping will be associated with a transaction ID. We'll make
+    // 1 channel per transaction ID, and the HTTP endpoint will dump the message into the
+    // channel by transaction ID. Then, we'll create a task below which will consume pings
+    // from that channel. If they don't come fast enough we'll call ping_timeout_handler
+    // which will drop the ConnectionState (causing future pings to return errors) and notify
+    // the task tracker that the task failed.
+
     let (ping_tx, ping_rx) = async_channel::bounded::<()>(1);
     let token = CancellationToken::new();
-    let token1 = token.clone();
-    let state1 = state.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
-                    match to {
-                        Err(_) => {
-                            ping_timeout_handler(transaction_id, state1).await;
-                            break;
-                        }, Ok(Err(e)) => {
-                            // send side of the ping channel has been dropped. server probably shutting down?
-                            log::debug!("{}", e);
-                            break;
-                        },
-                        _ => {
-                            log::debug!("Got ping within timeout");
+    let joinhandle = {
+        let token = token.clone();
+        let state = state.clone();
+        let task_start_time_approx = SystemTime::now();
+        tokio::spawn(async move {
+            loop {
+                log::debug!("Loop at srver:273 {}", transaction_id);
+                tokio::select! {
+                            to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
+                                match to {
+                                    Err(_) => {
+                                        log::info!("Ping timeout. Task dead?");
+                                        ping_timeout_handler(transaction_id, state).await;
+                                        break;
+                                    }, Ok(Err(e)) => {
+                                        // send side of the ping channel has been dropped. server probably shutting down?
+                                        log::warn!("{}", e);
+                                        break;
+                                    },
+                                    _ => {
+                                        log::debug!("Received ping. All good.");
+                                    }
+                                }
+                }
+                            _ = state.token.soft_cancelled(task_start_time_approx) => {
+                    ping_timeout_handler(transaction_id, state).await;
+                                break
+                            }
+                            _ = token.cancelled() => {
+                                break;
+                            }
                         }
-                    }
-
-                }
-                _ = token1.cancelled() => {
-                    break;
-                }
             }
-        }
-    });
+            log::debug!("Ping loop task finished {}", transaction_id);
+        })
+    };
 
     let cmd = state.subgraph[node_id];
     cmd.call_preamble();
@@ -290,6 +325,7 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
                 cancel: token,
                 cmd: cmd.clone(),
                 node_id,
+                joinhandle,
             },
         );
     }
@@ -352,10 +388,10 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     Ok(Response::builder().status(200).body("".into()).unwrap())
 }
 
-pub fn router(state: State<'static>) -> Router<Body, RouteError> {
+pub fn router(state: Arc<State<'static>>) -> Router<Body, RouteError> {
     Router::builder()
         // Attach the handlers.
-        .data(Arc::new(state))
+        .data(state)
         .middleware(Middleware::pre(middleware_before))
         .middleware(Middleware::post_with_info(middleware_after))
         .get("/status", status_handler)

@@ -234,14 +234,16 @@ def test_simple_remote(num_parallel, tmp_path):
 def test_murder_remote(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
 
+    # Chain of 5 tasks in a linear sequence, each take 1 second
     eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="task0")
     for i in range(1, 5):
         eg.add_task(
-            ["sh", "-c", "echo foo; sleep 1; echo foo"],
+            ["sh", "-c", f"echo started {i}; sleep 1; echo finished {i}"],
             key=f"{i}",
             dependencies=[i - 1],
         )
 
+    # Run 1 or 2 tasks and then have the remote get killed
     with open(tmp_path / "simple-provisioner", "w") as f:
         print(
             """#!/bin/sh
@@ -256,9 +258,7 @@ def test_murder_remote(num_parallel, tmp_path):
     os.chmod(tmp_path / "simple-provisioner", 0o744)
 
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
-    with open(tmp_path / "foo") as f:
-        print(f.read())
-    assert nfailed > 0
+    assert nfailed in (0, 1)
 
 
 def test_poisoned(tmp_path):
@@ -378,6 +378,27 @@ if __name__ == "__main__":
     with open(tmp_path / "finished") as f:
         assert f.read() == "1"
     assert nfailed == 0
+
+
+def test_shutdown_3(tmp_path):
+    assert find_executable("execgraph-remote") is not None
+    with open(tmp_path / "multi-provisioner", "w") as f:
+        print("#!/bin/sh", file=f)
+        print("set -e -x", file=f)
+        print("execgraph-remote $1 0 &", file=f)
+        print("execgraph-remote $1 0 &", file=f)
+        print("wait", file=f)
+    os.chmod(tmp_path / "multi-provisioner", 0o744)
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+    eg.add_task(["sh", "-c", "sleep 60"], key="1")
+    eg.add_task(["false"], key="2")
+
+    start = time.time()
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    end = time.time()
+    assert end-start < 5
+    assert nfailed in (1, 2)
 
 
 def test_status_1(tmp_path):
@@ -854,4 +875,3 @@ def test_cancellation_2(tmp_path):
     eg.add_task(["sh", "-c", "exit 1"], key="crash", dependencies=[k])
     # 1 failure, not more
     assert eg.execute()[0] == 1
-

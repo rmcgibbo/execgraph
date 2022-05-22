@@ -4,7 +4,6 @@ use std::{
     time::SystemTime,
 };
 
-#[derive(Debug)]
 pub struct AwaitableCounter {
     value: AtomicU64,
     event: Event,
@@ -147,5 +146,17 @@ impl CancellationToken {
 impl Default for CancellationToken {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl core::fmt::Debug for CancellationToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellationToken").finish()
+    }
+}
+
+impl core::fmt::Debug for AwaitableCounter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwaitableCounter").finish()
     }
 }

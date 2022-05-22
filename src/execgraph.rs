@@ -289,10 +289,17 @@ impl ExecGraph {
                 let token1 = token.clone();
                 let token2 = token.clone();
                 let token3 = token.clone();
+                let token4 = token.clone();
 
                 tokio::spawn(async move {
-                    let state = ServerState::new(subgraph, transmute_lifetime(&tracker));
-                    let router = router(state);
+                    let state = Arc::new(ServerState::new(
+                        subgraph,
+                        transmute_lifetime(&tracker),
+                        token4,
+                    ));
+                    let state2 = state.clone();
+                    let state3 = state.clone();
+                    let router = router(state2);
                     let service = RouterService::new(router).expect("Failed to constuct Router");
                     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                     let server = Server::bind(&addr).serve(service);
@@ -309,6 +316,7 @@ impl ExecGraph {
                         {
                             error!("Provisioner failed: {}", e);
                         }
+                        state3.join().await;
                         token3.cancel(CancellationState::HardCancelled);
                         debug!("Remote provisioner exited");
                         provisioner_exited_tx
@@ -320,6 +328,7 @@ impl ExecGraph {
                     if let Err(err) = graceful.await {
                         log::error!("Server error: {}", err);
                     }
+                    state.join().await;
                 });
             }
             None => {

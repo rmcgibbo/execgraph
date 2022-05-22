@@ -1,4 +1,5 @@
 use crate::{
+    constants::{BOOTFAILED_TIME_CUTOFF, FAIL_COMMAND_PREFIX},
     execgraph::Cmd,
     logfile2,
     utils::{AwaitableCounter, CancellationState, CancellationToken},
@@ -17,9 +18,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use thiserror::Error;
-
-const FAIL_COMMAND_PREFIX: &str = "wrk/";
-const BOOTFAILED_TIME_CUTOFF: Duration = Duration::from_secs(5);
 
 macro_rules! u32checked_add {
     ($a:expr,$b:expr) => {{
@@ -152,6 +150,7 @@ impl<'a> ReadyTrackerServer<'a> {
     #[tracing::instrument(skip_all)]
     pub fn drain(&mut self) -> Result<()> {
         let mut inflight = self.inflight.clone();
+        log::debug!("Draining {} inflight tasks", inflight.len());
         loop {
             match self.completed.try_recv() {
                 Ok(CompletedEvent::Started(e)) => {
