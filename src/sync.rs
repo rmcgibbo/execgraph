@@ -160,11 +160,15 @@ impl<'a> ReadyTrackerServer<'a> {
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(CompletedEvent::Finished(e)) => {
-                    let cmd = self.g[e.id];
-                    self._finished_bookkeeping_1(&e)?;
-                    self.logfile
-                        .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
-                    assert!(inflight.remove(&e.id).is_some());
+                    // with remote provisioner it's actually possible to get a finished
+                    // entry without a started because of the ping_timeout shutdown
+                    // cancelation sequence running without a /begun record
+                    if let Some(_) = inflight.remove(&e.id) {
+                        let cmd = self.g[e.id];
+                        self._finished_bookkeeping_1(&e)?;
+                        self.logfile
+                            .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
+                    }
                 }
                 Err(_) => {
                     break;
@@ -173,6 +177,7 @@ impl<'a> ReadyTrackerServer<'a> {
         }
 
         self.inflight.clear();
+        log::debug!("Writing {} FinishedEvents", inflight.len());
         for (k, _) in inflight.iter() {
             let timeout_status = 130;
             let cmd = self.g[*k];
@@ -187,6 +192,7 @@ impl<'a> ReadyTrackerServer<'a> {
             self.logfile
                 .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
         }
+        log::debug!("Finished drain");
         Ok(())
     }
 

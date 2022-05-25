@@ -290,7 +290,9 @@ impl PyExecGraph {
             arg2: remote_provisioner_arg2,
         });
 
+        use tokio::runtime::Builder;
         py.allow_threads(move || {
+            //let rt = Builder::new_multi_thread().worker_threads(100).build().expect("Failed to build tokio runtime");
             let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
                 self.g

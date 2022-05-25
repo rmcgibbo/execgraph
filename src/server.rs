@@ -41,18 +41,25 @@ impl<'a> State<'a> {
         }
     }
 
+    /// Ensure that all tasks spawned by the server are done
     pub async fn join(&self) -> () {
-        let mut connections = self.connections.lock().await;
-        let keys: Vec<_> = connections.iter().map(|(k, _)| k.clone()).collect();
-        for k in keys {
-            match connections.remove(&k) {
-                Some(cs) => {
-                    cs.cancel.cancel();
-                    cs.joinhandle.await.expect("Unable to join");
-                }
-                None => {}
-            };
+        let cstates: Vec<_> = {
+            let mut connections = self.connections.lock().await;
+            let keys: Vec<_> = connections
+                .iter()
+                .map(|(k, v)| {
+                    v.cancel.cancel();
+                    k.clone()
+                })
+                .collect();
+            keys.iter().filter_map(|k| connections.remove(&k)).collect()
+        };
+
+        let n_joined = cstates.len();
+        for cs in cstates {
+            cs.joinhandle.await.expect("Unable to join");
         }
+        log::debug!("Joined all {} ping threads", n_joined);
     }
 }
 
@@ -164,17 +171,16 @@ async fn middleware_before(req: Request<Body>) -> Result<Request<Body>, RouteErr
 }
 
 async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
+    log::debug!("Ping timeout hanler");
     let cstate = {
         let mut connections = state.connections.lock().await;
-        let cstate = match connections.remove(&transaction_id) {
+        match connections.remove(&transaction_id) {
             Some(cs) => cs,
             None => return,
-        };
-
-        cstate.cancel.cancel();
-        cstate
+        }
     };
 
+    log::debug!("I think I don't hold the lock anymore");
     let timeout_status = 130;
     state
         .tracker
@@ -187,6 +193,7 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
             ValueMaps::new(),
         )
         .await;
+    log::debug!("I definitely don't hold the lock anymore");
 }
 
 // ------------------------------------------------------------------ //
@@ -285,30 +292,41 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
             loop {
                 log::debug!("Loop at srver:273 {}", transaction_id);
                 tokio::select! {
-                            to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
-                                match to {
-                                    Err(_) => {
-                                        log::info!("Ping timeout. Task dead?");
-                                        ping_timeout_handler(transaction_id, state).await;
-                                        break;
-                                    }, Ok(Err(e)) => {
-                                        // send side of the ping channel has been dropped. server probably shutting down?
-                                        log::warn!("{}", e);
-                                        break;
-                                    },
-                                    _ => {
-                                        log::debug!("Received ping. All good.");
+                                to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
+                                    match to {
+                                        Err(_) => {
+                                            log::info!("Ping timeout. Task dead?");
+                                            ping_timeout_handler(transaction_id, state).await;
+                                            break;
+                                        }, Ok(Err(e)) => {
+                                            // send side of the ping channel has been dropped. server probably shutting down?
+                                            log::warn!("{}", e);
+                                            break;
+                                        },
+                                        _ => {
+                                            log::debug!("Received ping. All good.");
+                                        }
                                     }
+                    }
+                                _ = token.cancelled() => {
+                    // called from /end handler and ping timeout
+                                    break;
                                 }
-                }
-                            _ = state.token.soft_cancelled(task_start_time_approx) => {
-                    ping_timeout_handler(transaction_id, state).await;
-                                break
-                            }
-                            _ = token.cancelled() => {
-                                break;
-                            }
+                                cancel_state = state.token.soft_cancelled(task_start_time_approx) => {
+                    match cancel_state {
+                        crate::utils::CancellationState::CancelledAfterTime(_) => {
+                                            ping_timeout_handler(transaction_id, state).await;
                         }
+                        _ => {
+                // Not necessary here, but seems to cause more errors. TODO
+                // debug errors, then remove this call
+                    ping_timeout_handler(transaction_id, state).await;
+                }
+                    }
+                                    break
+                                }
+
+                            }
             }
             log::debug!("Ping loop task finished {}", transaction_id);
         })

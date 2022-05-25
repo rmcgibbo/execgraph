@@ -304,11 +304,9 @@ impl ExecGraph {
                     let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                     let server = Server::bind(&addr).serve(service);
                     let bound_addr = server.local_addr();
-                    trace!("Bound server to {}", bound_addr);
                     let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
                     let (server_start_tx, server_start_rx) = oneshot::channel();
-
-                    tokio::spawn(async move {
+                    let h = tokio::spawn(async move {
                         server_start_rx.await.expect("failed to recv");
                         debug!("Spawning remote provisioner {}", provisioner.cmd);
                         if let Err(e) =
@@ -316,7 +314,6 @@ impl ExecGraph {
                         {
                             error!("Provisioner failed: {}", e);
                         }
-                        state3.join().await;
                         token3.cancel(CancellationState::HardCancelled);
                         debug!("Remote provisioner exited");
                         provisioner_exited_tx
@@ -329,6 +326,7 @@ impl ExecGraph {
                         log::error!("Server error: {}", err);
                     }
                     state.join().await;
+                    h.await.expect("Unable to join thread");
                 });
             }
             None => {
@@ -345,8 +343,10 @@ impl ExecGraph {
             .expect("background_serve failed");
         token.cancel(CancellationState::HardCancelled);
         join_all(handles).await;
+        debug!("Draining servicer");
         servicer.drain().expect("failed to drain queue");
 
+        debug!("Waiting for provisioner to exit");
         provisioner_exited_rx
             .await
             .expect("failed to close provisioner");
@@ -364,6 +364,7 @@ impl ExecGraph {
         for item in completed.iter() {
             self.completed.insert(item.clone());
         }
+        debug!("nfailed={}, ncompleted={}", n_failed, completed.len());
         Ok((n_failed, completed))
     }
 }
