@@ -163,7 +163,7 @@ impl<'a> ReadyTrackerServer<'a> {
                     // with remote provisioner it's actually possible to get a finished
                     // entry without a started because of the ping_timeout shutdown
                     // cancelation sequence running without a /begun record
-                    if let Some(_) = inflight.remove(&e.id) {
+                    if inflight.remove(&e.id).is_some() {
                         let cmd = self.g[e.id];
                         self._finished_bookkeeping_1(&e)?;
                         self.logfile

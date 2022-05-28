@@ -1,5 +1,5 @@
 use crate::utils::{CancellationState, CancellationToken};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use petgraph::graph::DiGraph;
 use std::{
     collections::HashMap,
@@ -19,13 +19,12 @@ pub enum LocalQueueType {
     ConsoleQueue,
 }
 
-#[tracing::instrument(skip_all)]
 pub async fn run_local_process_loop(
     subgraph: Arc<DiGraph<&Cmd, ()>>,
     tracker: &ReadyTrackerClient,
     token: CancellationToken,
     local_queue_type: LocalQueueType,
-) -> Result<()> {
+) {
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
     let runnertypeid = match &local_queue_type {
         LocalQueueType::NormalLocalQueue => 0,
@@ -98,7 +97,7 @@ pub async fn run_local_process_loop(
 
         let pid = child
             .id()
-            .ok_or_else(|| anyhow!("child hasn't been waited for yet, so its pid should exist"))?;
+            .expect("child hasn't been waited for yet, so its pid should exist");
 
         tracker
             .send_started(subgraph_node_id, cmd, &hostname, pid)
@@ -113,7 +112,7 @@ pub async fn run_local_process_loop(
                         .await;
                 }
                 debug!("Received cancellation");
-                return Err(anyhow!("cancelled"));
+                return;
             },
             wait_with_output = wait_for_child_output_and_another_file_descriptor(child, fd3_file) => {
                 wait_with_output.expect("sh wasn't running")
@@ -139,7 +138,6 @@ pub async fn run_local_process_loop(
     }
 
     debug!("Exiting loop at 141");
-    Ok(())
 }
 
 pub async fn wait_for_child_output_and_another_file_descriptor(

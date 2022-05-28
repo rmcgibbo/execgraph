@@ -102,7 +102,7 @@ impl Cmd {
                 .collect::<Vec<String>>()
                 .join(" ")
                 .replace("\\\n", " ")
-                .replace("\t", "\\t"),
+                .replace('\t', "\\t"),
         }
     }
 
@@ -247,8 +247,11 @@ impl ExecGraph {
         );
 
         // Run local processes
-        trace!("Spawning {} local process loops", num_parallel);
-        let handles = {
+        trace!(
+            "Spawning {} local process loops",
+            num_parallel + (if num_parallel > 0 { 1 } else { 0 })
+        );
+        let mut handles: Vec<tokio::task::JoinHandle<_>> = {
             let local = (0..num_parallel).map(|_| {
                 let subgraph = extend_graph_lifetime(subgraph.clone());
                 let token = token.clone();
@@ -271,85 +274,72 @@ impl ExecGraph {
                             LocalQueueType::ConsoleQueue, // 1 for console queue
                         ))
                     }))
-                    .collect::<Vec<tokio::task::JoinHandle<_>>>()
+                    .collect()
             } else {
-                local.collect::<Vec<tokio::task::JoinHandle<_>>>()
+                local.collect()
             }
         };
 
-        //
-        // Create the server that can manage farming off tasks to remote machines over http
-        //
-        let (provisioner_exited_tx, provisioner_exited_rx) = oneshot::channel();
+        if let Some(provisioner) = provisioner {
+            let subgraph = extend_graph_lifetime(subgraph.clone());
+            let token1 = token.clone();
+            let token2 = token.clone();
+            let (server_start_tx, server_start_rx) = oneshot::channel();
 
-        match provisioner {
-            Some(provisioner) => {
-                let subgraph = extend_graph_lifetime(subgraph.clone());
-                // let p2 = provisioner_arg2.clone();
-                let token1 = token.clone();
-                let token2 = token.clone();
-                let token3 = token.clone();
-                let token4 = token.clone();
+            handles.push(tokio::spawn(async move {
+                let span = tracing::info_span!("[server]");
+                let _enter = span.enter();
 
-                tokio::spawn(async move {
-                    let state = Arc::new(ServerState::new(
-                        subgraph,
-                        transmute_lifetime(&tracker),
-                        token4,
-                    ));
-                    let state2 = state.clone();
-                    let state3 = state.clone();
-                    let router = router(state2);
-                    let service = RouterService::new(router).expect("Failed to constuct Router");
-                    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
-                    let server = Server::bind(&addr).serve(service);
-                    let bound_addr = server.local_addr();
-                    let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
-                    let (server_start_tx, server_start_rx) = oneshot::channel();
-                    let h = tokio::spawn(async move {
-                        server_start_rx.await.expect("failed to recv");
-                        debug!("Spawning remote provisioner {}", provisioner.cmd);
-                        if let Err(e) =
-                            spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2).await
-                        {
-                            error!("Provisioner failed: {}", e);
-                        }
-                        token3.cancel(CancellationState::HardCancelled);
-                        debug!("Remote provisioner exited");
-                        provisioner_exited_tx
-                            .send(())
-                            .expect("could not send to channel");
-                    });
+                let state = Arc::new(ServerState::new(
+                    subgraph,
+                    transmute_lifetime(&tracker),
+                    token1.clone(),
+                ));
+                let router = router(state.clone());
+                let service = RouterService::new(router).expect("Failed to constuct Router");
+                let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+                let server = Server::bind(&addr).serve(service);
+                let bound_addr = server.local_addr();
+                let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
 
-                    server_start_tx.send(()).expect("failed to send");
-                    if let Err(err) = graceful.await {
-                        log::error!("Server error: {}", err);
-                    }
-                    state.join().await;
-                    h.await.expect("Unable to join thread");
-                });
-            }
-            None => {
-                trace!("Not spawning remote provisioner or server");
-                provisioner_exited_tx.send(()).expect("Could not send");
-            }
-        };
+                server_start_tx.send(bound_addr).expect("failed to send");
+                if let Err(err) = graceful.await {
+                    log::error!("Server error: {}", err);
+                }
+                debug!("Joining server tasks");
+                state.join().await;
+                token1.cancel(CancellationState::HardCancelled);
+                debug!("Server exited");
+            }));
+            handles.push(tokio::spawn(async move {
+                let span = tracing::info_span!("[provisioner]");
+                let _enter = span.enter();
 
-        // run the background service that will send commands to the ready channel to be picked up by the
-        // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
+                let bound_addr = server_start_rx.await.expect("failed to recv");
+                debug!("Spawning remote provisioner {}", provisioner.cmd);
+                if let Err(e) =
+                    spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2.clone()).await
+                {
+                    error!("Provisioner failed: {}", e);
+                }
+                token2.cancel(CancellationState::HardCancelled);
+                debug!("provisioner task exited");
+            }));
+        }
+
+        // run the background service that will send commands to the ready channel
+        // to be picked up by the tasks spawned above. background_serve should wait for
+        // sigint
         servicer
             .background_serve(token.clone())
             .await
             .expect("background_serve failed");
         token.cancel(CancellationState::HardCancelled);
+
+        debug!("Joining handles");
         join_all(handles).await;
         debug!("Draining servicer");
         servicer.drain().expect("failed to drain queue");
-
-        debug!("Waiting for provisioner to exit");
-        provisioner_exited_rx
-            .await
-            .expect("failed to close provisioner");
 
         let n_failed = servicer.n_failed;
 

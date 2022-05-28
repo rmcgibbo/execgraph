@@ -34,7 +34,7 @@ def random_dag(seed):
         # before we run u
         dependencies = [v for (_u, v) in g.edges(u)]
         value.append({"dependencies": dependencies, "id": str(u)})
-    
+
     return value
 
 def workflow_py(tmp_path):
@@ -46,8 +46,8 @@ def workflow_py(tmp_path):
     """
     with open(tmp_path / "provisioner", "w") as f:
         f.write(script1)
-    os.chmod(tmp_path / "provisioner", 0o744)        
-    
+    os.chmod(tmp_path / "provisioner", 0o744)
+
     script2 = """
 import sys, json, os
 sys.path.insert(0, ".")
@@ -68,18 +68,19 @@ sys.exit(0)
 """
     with open(tmp_path / "workflow", "w") as f:
         f.write(script2)
-    os.chmod(tmp_path / "workflow", 0o744)        
+    os.chmod(tmp_path / "workflow", 0o744)
 
 def assert_time_greater(x, y):
     assert ((x["time"]["secs_since_epoch"], x["time"]["nanos_since_epoch"]) > (y["time"]["secs_since_epoch"], y["time"]["nanos_since_epoch"]))
 
 
-@pytest.mark.parametrize("seed", range(100))
-def test_1(tmp_path, seed):
-    assert find_executable("execgraph-remote") is not None    
+@pytest.mark.parametrize("seed", range(1000))
+@pytest.mark.parametrize("killmode", ["pg", "workflow", "provisioner"])
+def test_1(tmp_path, seed, killmode):
+    assert find_executable("execgraph-remote") is not None
     dag = random_dag(0)
     with open(tmp_path / "dag.json", "w") as f:
-        json.dump(dag,f)         
+        json.dump(dag,f)
 
     workflow_py(tmp_path)
 
@@ -91,9 +92,25 @@ def test_1(tmp_path, seed):
         # Start the workflow, wait a little while for some
         # stuff to happen, and then simulate sending ctrl-c
         time.sleep(0.2)
-        pgrp = os.getpgid(p.pid)
-        kill_time = time.perf_counter()
-        os.killpg(pgrp, signal.SIGINT)
+
+        if killmode == "pg":
+            pgrp = os.getpgid(p.pid)
+            print("[test_2] sending SIGINT to process group")
+            kill_time = time.perf_counter()
+            os.killpg(pgrp, signal.SIGINT)
+        elif killmode == "workflow":
+            kill_time = time.perf_counter()
+            os.kill(p.pid, signal.SIGINT)
+        elif killmode == "provisioner":
+            prov_pid = int(subprocess.run(f"ps --ppid {p.pid} | grep provisioner", shell=True, capture_output=True, text=True).stdout.splitlines()[0].split()[0])
+            kill_time = time.perf_counter()
+            try:
+                os.kill(prov_pid, signal.SIGINT)
+            except:
+                return
+        else:
+            raise NotImplementedError(killmode)
+
         try:
             status = p.wait(timeout=60)
         except subprocess.TimeoutExpired:
@@ -102,7 +119,7 @@ def test_1(tmp_path, seed):
         # to exit
         waiting_time = time.perf_counter() - kill_time
         assert waiting_time < 0.5
-        if status not in (1, 2):
+        if status not in (0, 1, 2):
             err = True
         else:
             err = False
@@ -122,4 +139,4 @@ def test_1(tmp_path, seed):
     # for item in dag:
     #     for d in item["dependencies"]:
     #         assert_time_greater(ready[item["id"]], finished[str(d)])
-        
+

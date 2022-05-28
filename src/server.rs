@@ -41,18 +41,20 @@ impl<'a> State<'a> {
         }
     }
 
-    /// Ensure that all tasks spawned by the server are done
-    pub async fn join(&self) -> () {
+    /// Ensure that all tasks spawned by the server are done. Rust doesn't allow
+    /// async drop, so this can't be in the drop. But you really should call this before
+    /// dropping the server.
+    pub async fn join(&self) {
         let cstates: Vec<_> = {
             let mut connections = self.connections.lock().await;
             let keys: Vec<_> = connections
                 .iter()
                 .map(|(k, v)| {
                     v.cancel.cancel();
-                    k.clone()
+                    *k
                 })
                 .collect();
-            keys.iter().filter_map(|k| connections.remove(&k)).collect()
+            keys.iter().filter_map(|k| connections.remove(k)).collect()
         };
 
         let n_joined = cstates.len();
