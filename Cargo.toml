@@ -15,42 +15,42 @@ incremental = true
 lto = "off"
 
 [dependencies]
-advisory-lock = "^0.3"
-anyhow = "^1.0"
-async-channel = ">=1.6.1"
-async-priority-channel = ">=0.1"
-event-listener = "*"
-bitvec = "*"
+advisory-lock = "0.3.0"
+anyhow = "1.0.57"
+async-channel = "1.6.1"
+async-priority-channel = "0.1.0"
+event-listener = "2.5.2"
+bitvec = "1.0.0"
 tokio-command-fds = {version = "*", git = "https://github.com/rmcgibbo/tokio-command-fds"}
-derivative = "^2"
-env_logger = "^0.9"
-lazy_static = "*"
-futures = "^0.3"
-gethostname = "^0.2"
-hyper = "^0.14"
-log = "^0.4"
-libc = "*"
-nix = "*"
-num_cpus = "^1"
-petgraph = { version = "^0.6", features = ["graphmap"], default-features = false }
-pyo3 = "^0.14"
-pythonize = "^0.14"
-rand = "^0.8"
-regex = "*"
-reqwest = { version = ">=0.11", features = ["json"],  default-features = false }
-routerify = "^2"
-routerify-json-response = "^2"
-serde = { version = "^1", features = ["derive"] }
-serde_json = "^1"
-tokio = { version = "^1", features = ["full", "tracing"] }
-tokio-util = {version = ">=0.6.8"}
-shell-words = "^1"
-structopt = { version = ">=0.3", default-features = false }
-thiserror = "^1"
-url = "^2"
-whoami = "^1"
-tracing = "^0.1"
-tracing-subscriber = "^0.3"
+derivative = "2.2.0"
+env_logger = "0.9.0"
+lazy_static = "1.4.0"
+futures = "0.3.21"
+gethostname = "0.2.3"
+hyper = "0.14.19"
+log = "0.4.17"
+libc = "0.2.126"
+nix = "0.24.1"
+num_cpus = "1.13.1"
+petgraph = { version = "0.6.1", features = ["graphmap"], default-features = false }
+pyo3 = "0.16.5"
+pythonize = "0.16.0"
+rand = "0.8.5"
+regex = "1.5.6"
+reqwest = { version = "0.11.10", features = ["json"], default-features = false }
+routerify = "3.0.0"
+routerify-json-response = "3.0.0"
+serde = { version = "1.0.137", features = ["derive"] }
+serde_json = "1.0.81"
+tokio = { version = "1.18.2", features = ["full", "tracing"] }
+tokio-util = "0.7.2"
+shell-words = "1.1.0"
+structopt = { version = "0.3.26", default-features = false }
+thiserror = "1.0.31"
+url = "2.2.2"
+whoami = "1.2.1"
+tracing = "0.1.34"
+tracing-subscriber = "0.3.11"
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
 # to run rust tests, need to do ``$ cargo test --no-default-features``
