@@ -4,6 +4,7 @@ use crate::{
     logfile2::{LogEntry, LogFile},
     server::{router, State as ServerState},
     sync::new_ready_tracker,
+    utils::{CancellationState, CancellationToken},
 };
 use anyhow::{anyhow, Result};
 use bitvec::array::BitArray;
@@ -15,14 +16,14 @@ use pyo3::AsPyPointer;
 use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
+    convert::TryInto,
     ffi::OsString,
     net::SocketAddr,
     process::Stdio,
     sync::Arc,
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
-use tokio_util::sync::CancellationToken;
-use tracing::{error, trace};
+use tracing::{debug, error, trace};
 
 // TODO: remove clone?
 #[derive(Derivative)]
@@ -101,7 +102,7 @@ impl Cmd {
                 .collect::<Vec<String>>()
                 .join(" ")
                 .replace("\\\n", " ")
-                .replace("\t", "\\t"),
+                .replace('\t', "\\t"),
         }
     }
 
@@ -180,7 +181,7 @@ impl ExecGraph {
     pub fn add_task(&mut self, cmd: Cmd, dependencies: Vec<u32>) -> Result<u32> {
         if !cmd.key.is_empty() {
             if let Some(index) = self.key_to_nodeid.get(&cmd.key) {
-                return Ok(index.index() as u32);
+                return Ok(index.index().try_into().unwrap());
             }
         }
         if cmd.cmdline.is_empty() {
@@ -199,7 +200,7 @@ impl ExecGraph {
 
         self.key_to_nodeid.insert(key, new_node);
         trace!("Added command to task graph");
-        Ok(new_node.index() as u32)
+        Ok(new_node.index().try_into().unwrap())
     }
 
     #[tracing::instrument(skip(self))]
@@ -220,7 +221,7 @@ impl ExecGraph {
             unsafe { std::mem::transmute::<_, _>(x) }
         }
 
-        let count_offset = self.completed.len() as u32;
+        let count_offset = self.completed.len().try_into().unwrap();
         let subgraph = Arc::new(get_subgraph(
             &mut self.deps,
             &mut self.completed,
@@ -246,8 +247,11 @@ impl ExecGraph {
         );
 
         // Run local processes
-        trace!("Spawning {} local process loops", num_parallel);
-        let handles = {
+        trace!(
+            "Spawning {} local process loops",
+            num_parallel + (if num_parallel > 0 { 1 } else { 0 })
+        );
+        let mut handles: Vec<tokio::task::JoinHandle<_>> = {
             let local = (0..num_parallel).map(|_| {
                 let subgraph = extend_graph_lifetime(subgraph.clone());
                 let token = token.clone();
@@ -270,76 +274,72 @@ impl ExecGraph {
                             LocalQueueType::ConsoleQueue, // 1 for console queue
                         ))
                     }))
-                    .collect::<Vec<tokio::task::JoinHandle<_>>>()
+                    .collect()
             } else {
-                local.collect::<Vec<tokio::task::JoinHandle<_>>>()
+                local.collect()
             }
         };
 
-        //
-        // Create the server that can manage farming off tasks to remote machines over http
-        //
-        let (provisioner_exited_tx, provisioner_exited_rx) = oneshot::channel();
+        if let Some(provisioner) = provisioner {
+            let subgraph = extend_graph_lifetime(subgraph.clone());
+            let token1 = token.clone();
+            let token2 = token.clone();
+            let (server_start_tx, server_start_rx) = oneshot::channel();
 
-        match provisioner {
-            Some(provisioner) => {
-                let subgraph = extend_graph_lifetime(subgraph.clone());
-                // let p2 = provisioner_arg2.clone();
-                let token1 = token.clone();
-                let token2 = token.clone();
-                let token3 = token.clone();
+            handles.push(tokio::spawn(async move {
+                let span = tracing::info_span!("[server]");
+                let _enter = span.enter();
 
-                tokio::spawn(async move {
-                    let state = ServerState::new(subgraph, transmute_lifetime(&tracker));
-                    let router = router(state);
-                    let service = RouterService::new(router).expect("Failed to constuct Router");
-                    let addr = SocketAddr::from(([0, 0, 0, 0], 0));
-                    let server = Server::bind(&addr).serve(service);
-                    let bound_addr = server.local_addr();
-                    trace!("Bound server to {}", bound_addr);
-                    let graceful = server.with_graceful_shutdown(token1.cancelled());
-                    let (server_start_tx, server_start_rx) = oneshot::channel();
+                let state = Arc::new(ServerState::new(
+                    subgraph,
+                    transmute_lifetime(&tracker),
+                    token1.clone(),
+                ));
+                let router = router(state.clone());
+                let service = RouterService::new(router).expect("Failed to constuct Router");
+                let addr = SocketAddr::from(([0, 0, 0, 0], 0));
+                let server = Server::bind(&addr).serve(service);
+                let bound_addr = server.local_addr();
+                let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
 
-                    tokio::spawn(async move {
-                        server_start_rx.await.expect("failed to recv");
-                        trace!("Spawning remote provisioner {}", provisioner.cmd);
-                        if let Err(e) =
-                            spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2).await
-                        {
-                            error!("Provisioner failed: {}", e);
-                        }
-                        token3.cancel();
-                        trace!("Remote provisioner exited");
-                        provisioner_exited_tx
-                            .send(())
-                            .expect("could not send to channel");
-                    });
+                server_start_tx.send(bound_addr).expect("failed to send");
+                if let Err(err) = graceful.await {
+                    log::error!("Server error: {}", err);
+                }
+                debug!("Joining server tasks");
+                state.join().await;
+                token1.cancel(CancellationState::HardCancelled);
+                debug!("Server exited");
+            }));
+            handles.push(tokio::spawn(async move {
+                let span = tracing::info_span!("[provisioner]");
+                let _enter = span.enter();
 
-                    server_start_tx.send(()).expect("failed to send");
-                    if let Err(err) = graceful.await {
-                        log::error!("Server error: {}", err);
-                    }
-                });
-            }
-            None => {
-                trace!("Not spawning remote provisioner or server");
-                provisioner_exited_tx.send(()).expect("Could not send");
-            }
-        };
+                let bound_addr = server_start_rx.await.expect("failed to recv");
+                debug!("Spawning remote provisioner {}", provisioner.cmd);
+                if let Err(e) =
+                    spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2.clone()).await
+                {
+                    error!("Provisioner failed: {}", e);
+                }
+                token2.cancel(CancellationState::HardCancelled);
+                debug!("provisioner task exited");
+            }));
+        }
 
-        // run the background service that will send commands to the ready channel to be picked up by the
-        // tasks spawned above. background_serve should wait for sigint and exit when it hits a sigintt too.
+        // run the background service that will send commands to the ready channel
+        // to be picked up by the tasks spawned above. background_serve should wait for
+        // sigint
         servicer
             .background_serve(token.clone())
             .await
             .expect("background_serve failed");
-        token.cancel();
-        join_all(handles).await;
-        servicer.drain().expect("failed to drain queue");
+        token.cancel(CancellationState::HardCancelled);
 
-        provisioner_exited_rx
-            .await
-            .expect("failed to close provisioner");
+        debug!("Joining handles");
+        join_all(handles).await;
+        debug!("Draining servicer");
+        servicer.drain().expect("failed to drain queue");
 
         let n_failed = servicer.n_failed;
 
@@ -354,11 +354,12 @@ impl ExecGraph {
         for item in completed.iter() {
             self.completed.insert(item.clone());
         }
+        debug!("nfailed={}, ncompleted={}", n_failed, completed.len());
         Ok((n_failed, completed))
     }
 }
 
-#[tracing::instrument]
+#[tracing::instrument(skip_all)]
 async fn spawn_and_wait_for_provisioner(
     provisioner: &RemoteProvisionerSpec,
     bound_addr: SocketAddr,
@@ -388,8 +389,7 @@ async fn spawn_and_wait_for_provisioner(
 
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
-        _ = token.cancelled() => {
-
+        _ = token.hard_cancelled() => {
             drop(child_stdin); // drop stdin so that it knows to exit
             let duration = std::time::Duration::from_millis(1000);
             if tokio::time::timeout(duration, child.wait()).await.is_err() {
@@ -419,7 +419,8 @@ fn get_subgraph<'a, 'b: 'a>(
     // keeps everything in the Cmd struct
     let priority = crate::graphtheory::blevel_dag(deps)?;
     for (i, p) in priority.iter().enumerate() {
-        deps[NodeIndex::from(i as u32)].priority = *p;
+        let i_u32: u32 = i.try_into().unwrap();
+        deps[NodeIndex::from(i_u32)].priority = *p;
     }
 
     // Get the subgraph containing all cmds in the transitive closure of target.

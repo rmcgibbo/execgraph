@@ -2,7 +2,6 @@ import json
 import multiprocessing
 import os
 import random
-from getpass import getuser
 import shutil
 import signal
 import sys
@@ -235,14 +234,16 @@ def test_simple_remote(num_parallel, tmp_path):
 def test_murder_remote(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
 
+    # Chain of 5 tasks in a linear sequence, each take 1 second
     eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="task0")
     for i in range(1, 5):
         eg.add_task(
-            ["sh", "-c", "echo foo; sleep 1; echo foo"],
+            ["sh", "-c", f"echo started {i}; sleep 1; echo finished {i}"],
             key=f"{i}",
             dependencies=[i - 1],
         )
 
+    # Run 1 or 2 tasks and then have the remote get killed
     with open(tmp_path / "simple-provisioner", "w") as f:
         print(
             """#!/bin/sh
@@ -257,9 +258,7 @@ def test_murder_remote(num_parallel, tmp_path):
     os.chmod(tmp_path / "simple-provisioner", 0o744)
 
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
-    with open(tmp_path / "foo") as f:
-        print(f.read())
-    assert nfailed > 0
+    assert nfailed in (0, 1)
 
 
 def test_poisoned(tmp_path):
@@ -379,6 +378,27 @@ if __name__ == "__main__":
     with open(tmp_path / "finished") as f:
         assert f.read() == "1"
     assert nfailed == 0
+
+
+def test_shutdown_3(tmp_path):
+    assert find_executable("execgraph-remote") is not None
+    with open(tmp_path / "multi-provisioner", "w") as f:
+        print("#!/bin/sh", file=f)
+        print("set -e -x", file=f)
+        print("execgraph-remote $1 0 &", file=f)
+        print("execgraph-remote $1 0 &", file=f)
+        print("wait", file=f)
+    os.chmod(tmp_path / "multi-provisioner", 0o744)
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+    eg.add_task(["sh", "-c", "sleep 60"], key="1")
+    eg.add_task(["false"], key="2")
+
+    start = time.time()
+    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    end = time.time()
+    assert end-start < 5
+    assert nfailed in (1, 2)
 
 
 def test_status_1(tmp_path):
@@ -516,11 +536,11 @@ def test_copy_reused_keys_logfile(tmp_path):
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
 
-    assert log[0]["Header"]["user"] == getuser()
+    assert "user" in log[0]["Header"]
     assert log[1]["Ready"]["key"] == "foo"
     assert log[2]["Started"]["key"] == "foo"
     assert log[3]["Finished"]["key"] == "foo"
-    assert log[4]["Header"]["user"] == getuser()
+    assert "user" in log[4]["Header"]
     assert log[5]["Backref"]["key"] == "foo"
     assert log[6]["Ready"]["key"] == "bar"
     assert log[7]["Started"]["key"] == "bar"
@@ -531,7 +551,7 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert len(log) == 12
 
     clog = _execgraph.load_logfile(tmp_path / "foo", "current")
-    assert clog[0]["Header"]["user"] == getuser()
+    assert "user" in clog[0]["Header"]
     assert clog[1]["Ready"]["key"] == "foo"
     assert clog[2]["Started"]["key"] == "foo"
     assert clog[3]["Finished"]["key"] == "foo"
@@ -546,7 +566,7 @@ def test_copy_reused_keys_logfile(tmp_path):
 
 def test_stdout(tmp_path):
     # this should only print 'foooo' once rather than 10 times
-    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg = _execgraph.ExecGraph(2, logfile=tmp_path / "foo")
     for i in range(10):
         eg.add_task(["sh", "-c", "echo foooo && sleep 1 && false"], key=f"{i}")
     eg.execute()
@@ -653,7 +673,7 @@ eg.execute()
     p.wait(timeout=1)
 
     log = _execgraph.load_logfile(tmp_path / "wrk_log", "all")
-    assert log[0]["Header"]["user"] == getuser()
+    assert "user" in log[0]["Header"]
     assert log[1]["Ready"]["key"] == "key"
     assert log[2]["Started"]["key"] == "key"
     assert log[3]["Finished"]["status"] == 130
@@ -839,3 +859,19 @@ def test_dup(tmp_path):
     assert eg.add_task(["sh", "-c", "echo 1"], key="foo") == 0
     assert eg.add_task(["sh", "-c", "echo 1"], key="foo") == 0
     assert len(eg.execute()[1]) == 1
+
+
+# def test_cancellation(tmp_path):
+#     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+#     # running in the background makes it ignore sigint
+#     eg.add_task(["sh", "-c", "sleep 60 &"], key="foo")
+#     eg.execute()
+
+
+def test_cancellation_2(tmp_path):
+    eg = _execgraph.ExecGraph(2, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "sleep 10"], key="long")
+    k = eg.add_task(["sh", "-c", "sleep 6"], key=f"short")
+    eg.add_task(["sh", "-c", "exit 1"], key="crash", dependencies=[k])
+    # 1 failure, not more
+    assert eg.execute()[0] == 1

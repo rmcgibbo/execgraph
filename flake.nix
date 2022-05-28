@@ -1,6 +1,6 @@
 {
   description = "Parallel execution of shell commands with DAG dependencies";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-21.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.05";
   inputs.py-utils.url = "github:rmcgibbo/python-flake-utils";
   inputs.utils.url = "github:numtide/flake-utils";
   inputs.crane.url = "github:ipetkov/crane";
@@ -22,17 +22,13 @@
       defaultPackage = pkgs.python3.pkgs.execgraph;
 
       devShell = pkgs.mkShell rec {
-        name = "execgraph";
-        shellHook = ''
-          export PS1="\n(${name}) \[\033[1;32m\][\[\e]0;\u@\h: \w\a\]\u@\h:\w]\[\033[0m\]\n$ "
-        '';
-
         buildInputs = with pkgs; with python39Packages; [
           cargo
           rustc
           clippy
           maturin
           cargo-udeps
+          cargo-edit
           cargo-tarpaulin
 
           rustfmt
