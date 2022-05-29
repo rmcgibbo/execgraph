@@ -14,7 +14,7 @@ import scipy.sparse
 os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"
 
 def random_dag(seed):
-    N = 20
+    N = 50
     random_state = np.random.RandomState(seed)
     A = (
         scipy.sparse.random(N, N, density=0.1, random_state=random_state)
@@ -74,7 +74,7 @@ def assert_time_greater(x, y):
     assert ((x["time"]["secs_since_epoch"], x["time"]["nanos_since_epoch"]) > (y["time"]["secs_since_epoch"], y["time"]["nanos_since_epoch"]))
 
 
-@pytest.mark.parametrize("seed", range(1000))
+@pytest.mark.parametrize("seed", range(2))
 @pytest.mark.parametrize("killmode", [
     "pg",
     "workflow",
@@ -107,12 +107,13 @@ def test_1(tmp_path, seed, killmode):
             kill_time = time.perf_counter()
             os.kill(p.pid, signal.SIGINT)
         elif killmode == "provisioner":
-            prov_pid = int(subprocess.run(f"ps --ppid {p.pid} | grep provisioner", shell=True, capture_output=True, text=True).stdout.splitlines()[0].split()[0])
+            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps --ppid {p.pid} | grep provisioner", shell=True, capture_output=True, text=True).stdout.splitlines()]
             kill_time = time.perf_counter()
-            try:
-                os.kill(prov_pid, signal.SIGINT)
-            except:
-                return
+            for prov_pid in prov_pids:
+                try:
+                    os.kill(prov_pid, signal.SIGINT)
+                except:
+                    return
         elif killmode == "remote":
             prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps --ppid {p.pid} | grep execgraph-remote", shell=True, capture_output=True, text=True).stdout.splitlines()]
             kill_time = time.perf_counter()
