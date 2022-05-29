@@ -11,7 +11,7 @@
       execgraph = pkgs.callPackage ./. { inherit crane; };
     });
   } //
-  utils.lib.eachDefaultSystem (system:
+  utils.lib.eachSystem ["x86_64-linux"] (system:
     let
       pkgs = import nixpkgs {
         inherit system;

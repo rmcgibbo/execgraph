@@ -330,23 +330,28 @@ impl<'a> ReadyTrackerServer<'a> {
             );
         } else {
             self.n_failed += 1;
+            let mut fizzled = false;
 
-            // todo: better as a let chain but that doesn't seem to be allowed on stable rust
+            // TODO: better as a let chain but that doesn't seem to be allowed on stable rust
             if let Some(elapsed) = elapsed {
                 if elapsed < BOOTFAILED_TIME_CUTOFF {
                     self.n_bootfailed += 1;
+                    fizzled = true;
                 }
             }
 
+
             if cmd.key.is_empty() {
                 eprintln!(
-                    "\x1b[1;31mFAILED:\x1b[0m {}{}",
+                    "\x1b[1;31m{}:\x1b[0m {}{}",
+                    (if fizzled { "FIZZLED" } else { "FAILED" }),
                     FAIL_COMMAND_PREFIX,
                     cmd.display()
                 );
             } else {
                 eprintln!(
-                    "\x1b[1;31mFAILED:\x1b[0m {}{}.{:x}: {}",
+                    "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
+                    (if fizzled { "FIZZLED" } else { "FAILED" }),
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
                     cmd.runcount,
