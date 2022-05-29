@@ -290,10 +290,10 @@ impl PyExecGraph {
             arg2: remote_provisioner_arg2,
         });
 
-        py.allow_threads(move || {
+        let out = py.allow_threads(move || {
             let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
-                self.g
+                let out = self.g
                     .execute(
                         target,
                         self.num_parallel,
@@ -301,10 +301,14 @@ impl PyExecGraph {
                         self.rerun_failures,
                         x,
                     )
-                    .await
+                    .await;
+                log::debug!("Finished g.execute(");
+                out
             })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
+        });
+        log::debug!("Finished py.allow_threads");
+        out
     }
 }
 
