@@ -32,7 +32,7 @@ log = "0.4.17"
 libc = "0.2.126"
 nix = "0.24.1"
 num_cpus = "1.13.1"
-petgraph = { version = "0.6.1", features = ["graphmap"], default-features = false }
+petgraph = { version = "0.6.2", features = ["graphmap"], default-features = false }
 pyo3 = "0.16.5"
 pythonize = "0.16.0"
 rand = "0.8.5"
