@@ -14,6 +14,7 @@ use tracing::debug;
 
 use crate::{execgraph::Cmd, logfile2::ValueMaps, sync::ReadyTrackerClient};
 
+#[derive(Debug)]
 pub enum LocalQueueType {
     NormalLocalQueue,
     ConsoleQueue,
@@ -137,7 +138,7 @@ pub async fn run_local_process_loop(
             .await;
     }
 
-    debug!("Exiting loop at 141");
+    debug!("Exiting loop at 141 (LocalQueueType={:#?}", local_queue_type);
 }
 
 pub async fn wait_for_child_output_and_another_file_descriptor(

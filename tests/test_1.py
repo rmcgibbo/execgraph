@@ -876,3 +876,13 @@ def test_cancellation_2(tmp_path):
     eg.add_task(["sh", "-c", "exit 1"], key="crash", dependencies=[k])
     # 1 failure, not more
     assert eg.execute()[0] == 1
+
+
+def test_cancellation_3(tmp_path):
+    eg = _execgraph.ExecGraph(2, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "sleep 6"], key="long")
+    eg.add_task(["sh", "-c", "false && echo $VARIABLE"], key=f"short", env=[("VARIABLE", "VALUE")])
+    start = time.perf_counter()
+    assert eg.execute()[0] == 2
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1
