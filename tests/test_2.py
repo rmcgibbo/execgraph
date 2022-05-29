@@ -75,7 +75,12 @@ def assert_time_greater(x, y):
 
 
 @pytest.mark.parametrize("seed", range(1000))
-@pytest.mark.parametrize("killmode", ["pg", "workflow", "provisioner"])
+@pytest.mark.parametrize("killmode", [
+    "pg",
+    "workflow",
+    "provisioner",
+    "remote"
+])
 def test_1(tmp_path, seed, killmode):
     assert find_executable("execgraph-remote") is not None
     dag = random_dag(0)
@@ -108,6 +113,14 @@ def test_1(tmp_path, seed, killmode):
                 os.kill(prov_pid, signal.SIGINT)
             except:
                 return
+        elif killmode == "remote":
+            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps --ppid {p.pid} | grep execgraph-remote", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            kill_time = time.perf_counter()
+            for prov_pids in prov_pids:
+                try:
+                    os.kill(prov_pid, signal.SIGINT)
+                except:
+                    return
         else:
             raise NotImplementedError(killmode)
 

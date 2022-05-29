@@ -231,7 +231,8 @@ def test_simple_remote(num_parallel, tmp_path):
     assert nfailed == 0
 
 
-def test_murder_remote(num_parallel, tmp_path):
+@pytest.mark.parametrize("_seed", range(1))
+def test_murder_remote(num_parallel, tmp_path, _seed):
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
 
     # Chain of 5 tasks in a linear sequence, each take 1 second

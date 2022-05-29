@@ -173,16 +173,43 @@ async fn middleware_before(req: Request<Body>) -> Result<Request<Body>, RouteErr
 }
 
 async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
-    log::debug!("Ping timeout hanler");
-    let cstate = {
-        let mut connections = state.connections.lock().await;
-        match connections.remove(&transaction_id) {
-            Some(cs) => cs,
-            None => return,
-        }
+    // Uhh, this is actually unsafe and segfault-prone and should be refactored.
+    // Here's the problem: in execgraph, we transmute the State that's used in this
+    // server.rs file to have static lifetime, even though it actually does _not_
+    // have static lifetime. This is not good. In particular it means that every
+    // tokio task spawned inside this file needs to get cleaned up before the state
+    // struct gets destroyed, and since tokio tasks outlive their parents we need to
+    // manually make extra sure they all get joined, or else we can segfault. The way
+    // we do that is by having a join() method on state. The join() method iterates
+    // over all of the items in the connections HashMap, pulls out the joinhandles, and
+    // joins them.
+    // This works, as long as everything we need to join is actually _in_ the connections
+    // hashmap. But here in this function, we're removing stuff from the connections hashmap,
+    // and we're removing things before the thread actually finishes, because after the
+    // remove() is done, we call dereference the command and call send_finished(), which
+    // could take a little while. So it might be possible, during a shutdown sequence, for
+    // this code to remove this transaction from the connections hashmap, for join() to never
+    // thus join this very thread, for state to then get deallocated out from underneath us,
+    // and then for send_finished to segfault.
+    //
+    // In order to prevent that, we hold the connections lock for the entire duration of this
+    // function. Since join() also acquires this lock, that means that we should be good.
+    // But this is fragile and as you can probably tell from this long comment, I didn't
+    // implement it light this at the beginning, because the connections lock really ought
+    // not to be guarding anyhing more than the hashmap. So this should be refactored to be
+    // more clearly safe.
+    // The invariant that we absolutely must hold in order for the unsafe
+    // transmute of the state into 'static is: every task spawned from inside this server
+    // must be guarenteed to be fully completed once State::join() finishes, which means that
+    // every time a background task is spawned with tokio::spawn, we must carefully guard the
+    // JoinHandle and make sure it's joined.
+
+    let mut connections = state.connections.lock().await;
+    let cstate = match connections.remove(&transaction_id) {
+        Some(cs) => cs,
+        None => return,
     };
 
-    log::debug!("I think I don't hold the lock anymore");
     let timeout_status = 130;
     state
         .tracker
@@ -195,7 +222,48 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
             ValueMaps::new(),
         )
         .await;
-    log::debug!("I definitely don't hold the lock anymore");
+}
+
+fn spawn_ping_collector_thread(
+    state: Arc<State<'static>>,
+    token: CancellationToken,
+    transaction_id: u32,
+    ping_rx: async_channel::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    let task_start_time_approx = SystemTime::now();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
+                    match to {
+                        Err(_) => {
+                            log::info!("Ping timeout. Task dead?");
+                            ping_timeout_handler(transaction_id, state).await;
+                            break;
+                        }, Ok(Err(e)) => {
+                            // send side of the ping channel has been dropped. server probably shutting down?
+                            log::warn!("{}", e);
+                            break;
+                        },
+                        _ => {
+                            log::debug!("Received ping. All good.");
+                        }
+                    }
+                }
+                _ = token.cancelled() => {
+                    // called from /end handler and ping timeout
+                    break;
+                }
+                cancel_state = state.token.soft_cancelled(task_start_time_approx) => {
+                    if let crate::utils::CancellationState::CancelledAfterTime(_) = cancel_state {
+                        ping_timeout_handler(transaction_id, state).await;
+                    }
+                    break;
+                }
+            }
+        }
+        log::debug!("Ping loop task finished {}", transaction_id);
+    })
 }
 
 // ------------------------------------------------------------------ //
@@ -285,71 +353,27 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
     // the task tracker that the task failed.
 
     let (ping_tx, ping_rx) = async_channel::bounded::<()>(1);
-    let token = CancellationToken::new();
-    let joinhandle = {
-        let token = token.clone();
-        let state = state.clone();
-        let task_start_time_approx = SystemTime::now();
-        tokio::spawn(async move {
-            loop {
-                log::debug!("Loop at srver:273 {}", transaction_id);
-                tokio::select! {
-                                to = timeout(std::time::Duration::from_millis(2*PING_INTERVAL_MSECS), ping_rx.recv()) => {
-                                    match to {
-                                        Err(_) => {
-                                            log::info!("Ping timeout. Task dead?");
-                                            ping_timeout_handler(transaction_id, state).await;
-                                            break;
-                                        }, Ok(Err(e)) => {
-                                            // send side of the ping channel has been dropped. server probably shutting down?
-                                            log::warn!("{}", e);
-                                            break;
-                                        },
-                                        _ => {
-                                            log::debug!("Received ping. All good.");
-                                        }
-                                    }
-                    }
-                                _ = token.cancelled() => {
-                    // called from /end handler and ping timeout
-                                    break;
-                                }
-                                cancel_state = state.token.soft_cancelled(task_start_time_approx) => {
-                    match cancel_state {
-                        crate::utils::CancellationState::CancelledAfterTime(_) => {
-                                            ping_timeout_handler(transaction_id, state).await;
-                        }
-                        _ => {
-                // Not necessary here, but seems to cause more errors. TODO
-                // debug errors, then remove this call
-                    ping_timeout_handler(transaction_id, state).await;
-                }
-                    }
-                                    break
-                                }
-
-                            }
-            }
-            log::debug!("Ping loop task finished {}", transaction_id);
-        })
-    };
-
     let cmd = state.subgraph[node_id];
     cmd.call_preamble();
     {
         let mut lock = state.connections.lock().await;
+        let token = CancellationToken::new();
         lock.insert(
             transaction_id,
             ConnectionState {
                 pings: ping_tx,
-                cancel: token,
+                cancel: token.clone(),
                 cmd: cmd.clone(),
                 node_id,
-                joinhandle,
+                joinhandle: spawn_ping_collector_thread(
+                    state.clone(),
+                    token,
+                    transaction_id,
+                    ping_rx,
+                ),
             },
         );
     }
-
     json_success_resp(&StartResponse {
         transaction_id,
         cmdline: cmd.cmdline.clone(),

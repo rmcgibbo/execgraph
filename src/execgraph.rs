@@ -287,9 +287,6 @@ impl ExecGraph {
             let (server_start_tx, server_start_rx) = oneshot::channel();
 
             handles.push(tokio::spawn(async move {
-                let span = tracing::info_span!("[server]");
-                let _enter = span.enter();
-
                 let state = Arc::new(ServerState::new(
                     subgraph,
                     transmute_lifetime(&tracker),
@@ -309,12 +306,9 @@ impl ExecGraph {
                 debug!("Joining server tasks");
                 state.join().await;
                 token1.cancel(CancellationState::HardCancelled);
-                debug!("Server exited");
+                debug!("Server task exited");
             }));
             handles.push(tokio::spawn(async move {
-                let span = tracing::info_span!("[provisioner]");
-                let _enter = span.enter();
-
                 let bound_addr = server_start_rx.await.expect("failed to recv");
                 debug!("Spawning remote provisioner {}", provisioner.cmd);
                 if let Err(e) =
@@ -323,7 +317,7 @@ impl ExecGraph {
                     error!("Provisioner failed: {}", e);
                 }
                 token2.cancel(CancellationState::HardCancelled);
-                debug!("provisioner task exited");
+                debug!("Provisioner task exited");
             }));
         }
 
@@ -336,7 +330,7 @@ impl ExecGraph {
             .expect("background_serve failed");
         token.cancel(CancellationState::HardCancelled);
 
-        debug!("Joining handles");
+        debug!("Joining {} handles", handles.len());
         join_all(handles).await;
         debug!("Draining servicer");
         servicer.drain().expect("failed to drain queue");
