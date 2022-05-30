@@ -215,6 +215,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-command-fds",
+ "tokio-pipe",
  "tokio-util 0.7.2",
  "tracing",
  "tracing-subscriber",
@@ -1170,6 +1171,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tokio-pipe"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bcfba5650b64bdf040d5df44885d71fe193ec28c267477ee03217d51ffb1b30f"
+dependencies = [
+ "libc",
+ "tokio",
 ]
 
 [[package]]

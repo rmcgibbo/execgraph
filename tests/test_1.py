@@ -677,7 +677,7 @@ eg.execute()
     assert "user" in log[0]["Header"]
     assert log[1]["Ready"]["key"] == "key"
     assert log[2]["Started"]["key"] == "key"
-    assert log[3]["Finished"]["status"] == 130
+    assert log[3]["Finished"]["status"] == 127
 
 
 @pytest.mark.parametrize("rerun_failures, expected", [(True, 1), (False, 0)])
@@ -880,8 +880,15 @@ def test_cancellation_2(tmp_path):
 
 def test_cancellation_3(tmp_path):
     eg = _execgraph.ExecGraph(2, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", "sleep 6"], key="long")
-    eg.add_task(["sh", "-c", "false && echo $VARIABLE"], key=f"short", env=[("VARIABLE", "VALUE")])
+    with open(tmp_path / "script.py", "w") as f:
+        f.write("""
+import subprocess
+subprocess.run("sleep 60", shell=True)
+  """)
+
+
+    eg.add_task([sys.executable, str(tmp_path / "script.py")], key="long")
+    eg.add_task(["sh", "-c", "sleep 0.2 && false"], key=f"short")
     start = time.perf_counter()
     assert eg.execute()[0] == 2
     elapsed = time.perf_counter() - start

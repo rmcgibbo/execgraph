@@ -5,19 +5,14 @@ extern crate reqwest;
 use async_channel::bounded;
 use execgraph::{
     httpinterface::*,
-    localrunner::{
-        anon_pipe, wait_for_child_output_and_another_file_descriptor, ChildProcessError,
-    },
+    localrunner::{wait_with_output, ChildOutput, ChildProcessError},
     logfile2::ValueMaps,
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use serde::Deserialize;
-use std::{
-    os::unix::{prelude::FromRawFd, process::ExitStatusExt},
-    time::Duration,
-};
+use std::{os::unix::prelude::AsRawFd, time::Duration};
 use structopt::StructOpt;
 use thiserror::Error;
 use tokio_command_fds::{CommandFdExt, FdMapping};
@@ -163,7 +158,7 @@ async fn run_command(
         }
     });
 
-    let (read_fd3, write_fd3) = anon_pipe();
+    let (read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
 
     // Run the command and record the pid
     let mut command = tokio::process::Command::new(&start.data.cmdline[0]);
@@ -185,11 +180,7 @@ async fn run_command(
 
     // Deadlock potential: After spawning the command and passing it the
     // write end of the pipe we need to close it ourselves
-    if unsafe { libc::close(write_fd3.as_raw_fd()) } != 0 {
-        panic!("Cannot close: {}", std::io::Error::last_os_error());
-    }
-    // SAFETY: this takes ownership over the file descriptor and will close it.
-    let fd3_file = unsafe { tokio::fs::File::from_raw_fd(read_fd3.into_raw_fd()) };
+    drop(write_fd3);
 
     let child = match maybe_child {
         Ok(child) => child,
@@ -253,35 +244,22 @@ async fn run_command(
     };
 
     // Wait for the command to finish
-    let (status, stdout, stderr, fd3_values) = tokio::select! {
-        child_result = wait_for_child_output_and_another_file_descriptor(child, fd3_file) => {
-            let (output, fd3_values) = child_result?;
-            let status_obj = output.status;
-            let status = match status_obj.code() {
-                Some(code) => code,
-                None => status_obj.signal().expect("No exit code and no signal?"),
-            };
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            (status, stdout, stderr, fd3_values)
-        }
+    let output: ChildOutput = tokio::select! {
+        output = wait_with_output(child, read_fd3) => output.unwrap(),
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
         }
     };
-
-    // let foo = client.post(base.join("status")?).send().await?.text().await?;
-    // println!("{}", foo);
 
     // Tell the server that we've finished the command
     tokio::select! {
         value = client.post(end_route)
         .json(&EndRequest{
             transaction_id,
-            status,
-            stdout,
-            stderr,
-            values: fd3_values,
+            status: output.code().as_i32(),
+            stdout: output.stdout_str(),
+            stderr: output.stderr_str(),
+            values: output.fd3_values(),
         })
         .send() => {
             value?.error_for_status()?;

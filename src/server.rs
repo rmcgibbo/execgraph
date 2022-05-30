@@ -1,4 +1,8 @@
-use crate::{execgraph::Cmd, httpinterface::*, sync::ReadyTrackerClient};
+use crate::{
+    execgraph::Cmd,
+    httpinterface::*,
+    sync::{ExitStatus, ReadyTrackerClient},
+};
 use anyhow::Result;
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -210,13 +214,12 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
         None => return,
     };
 
-    let timeout_status = 130;
     state
         .tracker
         .send_finished(
             cstate.node_id,
             &cstate.cmd,
-            timeout_status,
+            ExitStatus::Disconnected,
             "".to_owned(),
             "".to_owned(),
             ValueMaps::new(),
@@ -422,7 +425,7 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
         .send_finished(
             cstate.node_id,
             &cstate.cmd,
-            request.status,
+            ExitStatus::Code(request.status),
             request.stdout,
             request.stderr,
             request.values,

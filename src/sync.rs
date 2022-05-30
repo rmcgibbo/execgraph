@@ -1,5 +1,5 @@
 use crate::{
-    constants::{BOOTFAILED_TIME_CUTOFF, FAIL_COMMAND_PREFIX},
+    constants::{FAIL_COMMAND_PREFIX, FIZZLED_TIME_CUTOFF},
     execgraph::Cmd,
     logfile2,
     utils::{AwaitableCounter, CancellationState, CancellationToken},
@@ -55,7 +55,7 @@ struct TaskItem {
 pub struct ReadyTrackerServer<'a> {
     pub finished_order: Vec<NodeIndex>,
     pub n_failed: u32,
-    n_bootfailed: u32,
+    n_fizzled: u32,
 
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile,
@@ -126,7 +126,7 @@ pub fn new_ready_tracker<'a>(
             ready: Some(ready_s.try_into().unwrap()),
             completed: finished_r,
             n_failed: 0,
-            n_bootfailed: 0,
+            n_fizzled: 0,
             n_success: 0,
             n_pending: 0,
             pending_increased_event: pending_increased_event.clone(),
@@ -166,8 +166,11 @@ impl<'a> ReadyTrackerServer<'a> {
                     if inflight.remove(&e.id).is_some() {
                         let cmd = self.g[e.id];
                         self._finished_bookkeeping_1(&e)?;
-                        self.logfile
-                            .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
+                        self.logfile.write(LogEntry::new_finished(
+                            &cmd.key,
+                            e.status.as_i32(),
+                            e.values,
+                        ))?;
                     }
                 }
                 Err(_) => {
@@ -179,18 +182,20 @@ impl<'a> ReadyTrackerServer<'a> {
         self.inflight.clear();
         log::debug!("Writing {} FinishedEvents", inflight.len());
         for (k, _) in inflight.iter() {
-            let timeout_status = 130;
             let cmd = self.g[*k];
             let e = FinishedEvent {
                 id: k.to_owned(),
-                status: timeout_status,
+                status: ExitStatus::Disconnected,
                 stdout: "".to_string(),
                 stderr: "".to_string(),
                 values: ValueMaps::new(),
             };
             self._finished_bookkeeping_1(&e)?;
-            self.logfile
-                .write(LogEntry::new_finished(&cmd.key, e.status, e.values))?;
+            self.logfile.write(LogEntry::new_finished(
+                &cmd.key,
+                e.status.as_i32(),
+                e.values,
+            ))?;
         }
         log::debug!("Finished drain");
         Ok(())
@@ -247,16 +252,16 @@ impl<'a> ReadyTrackerServer<'a> {
                             self._finished_bookkeeping(&e).await?;
                             self.logfile.write(LogEntry::new_finished(
                                 &cmd.key,
-                                e.status,
+                                e.status.as_i32(),
                                 e.values,
                             ))?;
                             assert!(self.inflight.remove(&e.id).is_some());
 
 
-                            if self.n_bootfailed >= self.failures_allowed {
+                            if self.n_fizzled >= self.failures_allowed {
                                 tracing::debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
-                                self.n_bootfailed, self.failures_allowed, self.n_pending);
-                                token.cancel(CancellationState::CancelledAfterTime(SystemTime::now() - BOOTFAILED_TIME_CUTOFF));
+                                self.n_fizzled, self.failures_allowed, self.n_pending);
+                                token.cancel(CancellationState::CancelledAfterTime(SystemTime::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
                                 state = State::SoftShutdown;
                             }
@@ -296,7 +301,7 @@ impl<'a> ReadyTrackerServer<'a> {
     }
 
     fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent) -> Result<()> {
-        let is_success = e.status == 0;
+        let is_success = e.status.is_success();
         let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
 
@@ -330,28 +335,22 @@ impl<'a> ReadyTrackerServer<'a> {
             );
         } else {
             self.n_failed += 1;
-            let mut fizzled = false;
-
-            // TODO: better as a let chain but that doesn't seem to be allowed on stable rust
-            if let Some(elapsed) = elapsed {
-                if elapsed < BOOTFAILED_TIME_CUTOFF {
-                    self.n_bootfailed += 1;
-                    fizzled = true;
-                }
+            let fizzled = matches!(elapsed, Some(elapsed) if elapsed < FIZZLED_TIME_CUTOFF);
+            if fizzled {
+                self.n_fizzled += 1;
             }
-
 
             if cmd.key.is_empty() {
                 eprintln!(
                     "\x1b[1;31m{}:\x1b[0m {}{}",
-                    (if fizzled { "FIZZLED" } else { "FAILED" }),
+                    e.status.fail_description(fizzled),
                     FAIL_COMMAND_PREFIX,
                     cmd.display()
                 );
             } else {
                 eprintln!(
                     "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
-                    (if fizzled { "FIZZLED" } else { "FAILED" }),
+                    e.status.fail_description(fizzled),
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
                     cmd.runcount,
@@ -371,7 +370,7 @@ impl<'a> ReadyTrackerServer<'a> {
     }
 
     async fn _finished_bookkeeping_2(&mut self, e: &FinishedEvent) -> Result<()> {
-        let is_success = e.status == 0;
+        let is_success = e.status.is_success();
         let statuses = &mut self.statuses;
         let ready = self
             .g
@@ -531,7 +530,7 @@ impl ReadyTrackerClient {
         &self,
         v: NodeIndex,
         cmd: &Cmd,
-        status: i32,
+        status: ExitStatus,
         stdout: String,
         stderr: String,
         values: ValueMaps,
@@ -603,7 +602,7 @@ struct StartedEvent {
 #[derive(Debug)]
 struct FinishedEvent {
     id: NodeIndex,
-    status: i32,
+    status: ExitStatus,
     stdout: String,
     stderr: String,
     values: ValueMaps,
@@ -612,6 +611,36 @@ struct FinishedEvent {
 enum CompletedEvent {
     Started(StartedEvent),
     Finished(FinishedEvent),
+}
+
+#[derive(Debug)]
+pub enum ExitStatus {
+    Code(i32),
+    Cancelled,
+    Disconnected,
+}
+
+impl ExitStatus {
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            ExitStatus::Code(c) => *c,
+            ExitStatus::Cancelled => 130,
+            ExitStatus::Disconnected => 127,
+        }
+    }
+    fn is_success(&self) -> bool {
+        matches!(self, ExitStatus::Code(0))
+    }
+
+    fn fail_description(&self, fizzled: bool) -> &str {
+        assert!(!self.is_success());
+        match self {
+            ExitStatus::Code(_) if fizzled => "FIZZLED",
+            ExitStatus::Code(_) => "FAILED",
+            ExitStatus::Cancelled => "CANCELLED",
+            ExitStatus::Disconnected => "DISCONNECTED",
+        }
+    }
 }
 
 #[derive(Debug, Error)]
