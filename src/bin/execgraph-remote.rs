@@ -12,22 +12,32 @@ use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use serde::Deserialize;
-use std::{os::unix::prelude::AsRawFd, time::Duration};
+use std::{
+    convert::TryInto,
+    os::unix::prelude::AsRawFd,
+    time::Duration,
+};
 use structopt::StructOpt;
 use thiserror::Error;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use whoami::username;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
     env_logger::init();
+    let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
     let opt = Opt::from_args();
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "X-EXECGRAPH-USERNAME",
         reqwest::header::HeaderValue::from_bytes(username().as_bytes())?,
+    );
+    headers.insert(
+        "SLURM_JOB_ID",
+        reqwest::header::HeaderValue::from_bytes(slurm_jobid.as_bytes())?,
     );
     headers.insert(
         "X-EXECGRAPH-HOSTNAME",
@@ -55,9 +65,20 @@ async fn main() -> Result<(), RemoteError> {
         None => true,
         Some(t) => (std::time::Instant::now() - start) < t,
     };
+    // An infinite stream of SIGERM signals.
+    //let mut sigterms = Arc::new(Mutex::new(signal(SignalKind::terminate())?));
+    let mut sigterms = signal(SignalKind::terminate())?;
 
     while still_accepting_tasks() {
-        match run_command(&base, &client, opt.runnertypeid).await {
+        match run_command(
+            &base,
+            &client,
+            opt.runnertypeid,
+            &mut sigterms,
+            opt.slurm_error_logfile.clone(),
+        )
+        .await
+        {
             Err(RemoteError::Connection(e)) => {
                 // break with no error message
                 debug!("{:#?}", e);
@@ -74,6 +95,8 @@ async fn run_command(
     base: &reqwest::Url,
     client: &reqwest::Client,
     runnertypeid: u32,
+    sigterms: &mut tokio::signal::unix::Signal,
+    slurm_error_logfile: Option<std::path::PathBuf>,
 ) -> Result<(), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
@@ -248,6 +271,26 @@ async fn run_command(
         output = wait_with_output(child, read_fd3) => output.unwrap(),
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+        },
+        _ = sigterms.recv() => {
+            // propagate sigterm to child process
+            unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
+            // read the slurm logfile, which might contant some informationg
+            let slurm_error_logfile_contents = match slurm_error_logfile {
+                Some(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
+                None => "".to_string()
+            };
+            // send a notification back to the controller if possible
+            client.post(end_route)
+                .json(&EndRequest {
+                    transaction_id,
+                    status: 15,
+                    stdout: "".to_string(),
+                    stderr: slurm_error_logfile_contents,
+                    values: vec![]
+                }).send().await.unwrap();
+
+            return Err(RemoteError::SIGTERM)
         }
     };
 
@@ -284,12 +327,18 @@ struct Opt {
     /// Stop accepting new tasks after this amount of time, in seconds.
     #[structopt(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
     max_time_accepting_tasks: Option<std::time::Duration>,
+
+    #[structopt(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
+    slurm_error_logfile: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Error)]
 enum RemoteError {
     #[error("Ping timeout: {0}")]
     PingTimeout(String),
+
+    #[error("SIGTERM")]
+    SIGTERM,
 
     #[error("Connection error: {0}")]
     Connection(
@@ -344,4 +393,12 @@ struct StartResponseFull {
 fn parse_seconds(s: &str) -> Result<std::time::Duration, Box<dyn std::error::Error>> {
     let x = s.parse::<u64>()?;
     Ok(std::time::Duration::new(x, 0))
+}
+
+
+fn parse_slurm_error_logfile(s: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let out = s
+        .replace("%u", &username())
+        .replace("%j", &std::env::var("SLURM_JOB_ID").expect("Unable to get SLURM_JOB_ID"));
+    Ok(std::path::PathBuf::from(out))
 }
