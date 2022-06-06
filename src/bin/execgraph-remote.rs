@@ -66,7 +66,11 @@ async fn main() -> Result<(), RemoteError> {
         Some(t) => (std::time::Instant::now() - start) < t,
     };
     // An infinite stream of SIGERM signals.
-    //let mut sigterms = Arc::new(Mutex::new(signal(SignalKind::terminate())?));
+    // TODO: there are short sections of the run_command function below where we're not
+    // listening on the SIGTERM channel. That's not ideal. The best thing would be to
+    // always be listening on the channel and trigger the shutdown sequence immediately
+    // in all cases. It's not a big deal if we miss some because we'll probably get
+    // SIGKILLed afterwards anyways, but it would be preferable.
     let mut sigterms = signal(SignalKind::terminate())?;
 
     while still_accepting_tasks() {
@@ -284,7 +288,7 @@ async fn run_command(
             client.post(end_route)
                 .json(&EndRequest {
                     transaction_id,
-                    status: 15,
+                    status: 128+15,
                     stdout: "".to_string(),
                     stderr: slurm_error_logfile_contents,
                     values: vec![]
