@@ -26,7 +26,7 @@ use whoami::username;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
     let opt = Opt::from_args();
