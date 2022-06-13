@@ -21,7 +21,7 @@ async-channel = "1.6.1"
 async-priority-channel = "0.1.0"
 event-listener = "2.5.2"
 bitvec = "1.0.0"
-tokio-command-fds = {version = "*", git = "https://github.com/rmcgibbo/tokio-command-fds"}
+tokio-command-fds = "0.2.1"
 derivative = "2.2.0"
 lazy_static = "1.4.0"
 futures = "0.3.21"
