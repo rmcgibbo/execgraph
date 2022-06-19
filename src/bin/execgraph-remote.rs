@@ -3,6 +3,7 @@
 extern crate reqwest;
 // use anyhow::Result;
 use async_channel::bounded;
+use clap::Parser;
 use execgraph::{
     httpinterface::*,
     localrunner::{wait_with_output, ChildOutput, ChildProcessError},
@@ -12,12 +13,7 @@ use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use serde::Deserialize;
-use std::{
-    convert::TryInto,
-    os::unix::prelude::AsRawFd,
-    time::Duration,
-};
-use structopt::StructOpt;
+use std::{convert::TryInto, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_command_fds::{CommandFdExt, FdMapping};
@@ -319,8 +315,8 @@ async fn run_command(
     Ok(())
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "execgraph-remote")]
+#[derive(Debug, Parser)]
+#[clap(name = "execgraph-remote")]
 struct Opt {
     /// Url of controller
     url: String,
@@ -329,10 +325,10 @@ struct Opt {
     runnertypeid: u32,
 
     /// Stop accepting new tasks after this amount of time, in seconds.
-    #[structopt(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
+    #[clap(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
     max_time_accepting_tasks: Option<std::time::Duration>,
 
-    #[structopt(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
+    #[clap(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
     slurm_error_logfile: Option<std::path::PathBuf>,
 }
 
@@ -394,15 +390,15 @@ struct StartResponseFull {
     data: StartResponse,
 }
 
-fn parse_seconds(s: &str) -> Result<std::time::Duration, Box<dyn std::error::Error>> {
+fn parse_seconds(s: &str) -> anyhow::Result<std::time::Duration> {
     let x = s.parse::<u64>()?;
     Ok(std::time::Duration::new(x, 0))
 }
 
-
-fn parse_slurm_error_logfile(s: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let out = s
-        .replace("%u", &username())
-        .replace("%j", &std::env::var("SLURM_JOB_ID").expect("Unable to get SLURM_JOB_ID"));
+fn parse_slurm_error_logfile(s: &str) -> anyhow::Result<std::path::PathBuf> {
+    let out = s.replace("%u", &username()).replace(
+        "%j",
+        &std::env::var("SLURM_JOB_ID").expect("Unable to get SLURM_JOB_ID"),
+    );
     Ok(std::path::PathBuf::from(out))
 }

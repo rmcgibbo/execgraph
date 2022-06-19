@@ -16,11 +16,12 @@ lto = "off"
 
 [dependencies]
 advisory-lock = "0.3.0"
-anyhow = "1.0.57"
+anyhow = "1.0.58"
 async-channel = "1.6.1"
 async-priority-channel = "0.1.0"
 event-listener = "2.5.2"
 bitvec = "1.0.0"
+clap = { version = "3.2.5", features = ["derive"] }
 tokio-command-fds = "0.2.1"
 derivative = "2.2.0"
 lazy_static = "1.4.0"
@@ -36,7 +37,7 @@ pyo3 = "0.16.5"
 pythonize = "0.16.0"
 rand = "0.8.5"
 regex = "1.5.6"
-reqwest = { version = "0.11.10", features = ["json"], default-features = false }
+reqwest = { version = "0.11.11", features = ["json"], default-features = false }
 routerify = "3.0.0"
 routerify-json-response = "3.0.0"
 serde = { version = "1.0.137", features = ["derive"] }
@@ -45,7 +46,6 @@ tokio = { version = "1.19.2", features = ["full", "tracing"] }
 tokio-pipe = "0.2.11"
 tokio-util = "0.7.3"
 shell-words = "1.1.0"
-structopt = { version = "0.3.26", default-features = false }
 thiserror = "1.0.31"
 url = "2.2.2"
 whoami = "1.2.1"

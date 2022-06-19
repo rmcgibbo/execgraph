@@ -14,7 +14,7 @@ jobs:
      - name: Make changes to pull request
        run: |
          nix flake update
-         nix shell nixpkgs#cargo -c cargo update
+         nix shell nixpkgs#cargo-edit nixpkgs#cargo -c sh -c 'cargo upgrade && cargo update'
 
      - name: Create Pull Request
        id: cpr
