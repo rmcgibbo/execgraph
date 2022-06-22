@@ -21,7 +21,7 @@ async-channel = "1.6.1"
 async-priority-channel = "0.1.0"
 event-listener = "2.5.2"
 bitvec = "1.0.0"
-clap = { version = "3.2.5", features = ["derive"] }
+clap = { version = "3.2.6", features = ["derive"] }
 tokio-command-fds = "0.2.1"
 derivative = "2.2.0"
 lazy_static = "1.4.0"
@@ -32,6 +32,7 @@ log = "0.4.17"
 libc = "0.2.126"
 nix = "0.24.1"
 num_cpus = "1.13.1"
+notify = "5.0.0-pre.15"
 petgraph = { version = "0.6.2", features = ["graphmap"], default-features = false }
 pyo3 = "0.16.5"
 pythonize = "0.16.0"

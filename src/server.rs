@@ -263,7 +263,7 @@ fn spawn_ping_collector_thread(
                             break;
                         }, Ok(Err(e)) => {
                             // send side of the ping channel has been dropped. server probably shutting down?
-                            log::info!("Unable to receive from ping timeout channel. {}", e);
+                            log::debug!("Unable to receive from ping timeout channel. {}", e);
                             break;
                         },
                         _ => {

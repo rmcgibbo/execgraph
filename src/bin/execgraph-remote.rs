@@ -1,7 +1,5 @@
 #![cfg(feature = "extension-module")]
 
-extern crate reqwest;
-// use anyhow::Result;
 use async_channel::bounded;
 use clap::Parser;
 use execgraph::{
@@ -12,8 +10,9 @@ use execgraph::{
 use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
+use notify::Watcher;
 use serde::Deserialize;
-use std::{convert::TryInto, os::unix::prelude::AsRawFd, time::Duration};
+use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_command_fds::{CommandFdExt, FdMapping};
@@ -69,6 +68,9 @@ async fn main() -> Result<(), RemoteError> {
     // SIGKILLed afterwards anyways, but it would be preferable.
     let mut sigterms = signal(SignalKind::terminate())?;
 
+    // Slurm error logfile events Notify
+    let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
+
     while still_accepting_tasks() {
         match run_command(
             &base,
@@ -76,6 +78,7 @@ async fn main() -> Result<(), RemoteError> {
             opt.runnertypeid,
             &mut sigterms,
             opt.slurm_error_logfile.clone(),
+            &mut rx,
         )
         .await
         {
@@ -88,6 +91,7 @@ async fn main() -> Result<(), RemoteError> {
         };
     }
 
+    drop(watcher);
     Ok(())
 }
 
@@ -97,6 +101,7 @@ async fn run_command(
     runnertypeid: u32,
     sigterms: &mut tokio::signal::unix::Signal,
     slurm_error_logfile: Option<std::path::PathBuf>,
+    notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
 ) -> Result<(), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
@@ -272,6 +277,31 @@ async fn run_command(
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
         },
+        maybe_slurm_error_message = notify_rx.recv() => {
+            let slurm_error_message = maybe_slurm_error_message.unwrap_or("Logic error. This channel should not have been dropped.".to_string());
+            // This channel is giving us events from inotify when someone (likely slurmstepd)
+            // writes to the `slurm_error_logfile`. The assumption is that this happens when
+            // SLURM decides to cancel our allocation due to overuse of some resource (time,
+            // memory), or because of some user- or administrator- triggered event like
+            // scancel or taking the node offline for maintainance. In this case slurmstepd
+            // will send us a SIGKILL (and maybe a sigterm, if we're lucky), but it will also
+            // write the reason (which is more useful) to its error log, which hopefully is
+            // being sent to a file on the local filesystem, so we can watch it with inotify.
+
+            // propagate sigterm to child process
+            unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
+
+            // send a notification back to the controller if possible
+            client.post(end_route)
+                .json(&EndRequest {
+                    transaction_id,
+                    status: 128+16,
+                    stdout: "".to_string(),
+                    stderr: slurm_error_message,
+                    values: vec![]
+                }).send().await.unwrap();
+            return Err(RemoteError::SIGTERM)
+        },
         _ = sigterms.recv() => {
             // propagate sigterm to child process
             unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
@@ -328,6 +358,9 @@ struct Opt {
     #[clap(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
     max_time_accepting_tasks: Option<std::time::Duration>,
 
+    /// Path to the log file where slurmstepd will write errors. This should be a file
+    /// on a local disk, so that we can watch it with inotify and report back any errors
+    /// to the controller.
     #[clap(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
     slurm_error_logfile: Option<std::path::PathBuf>,
 }
@@ -374,7 +407,15 @@ enum RemoteError {
         #[source]
         std::io::Error,
     ),
+
+    #[error("NotifyError: {0}")]
+    NotifyError(
+        #[from]
+        #[source]
+        notify::Error,
+    ),
 }
+
 impl From<ChildProcessError> for RemoteError {
     fn from(e: ChildProcessError) -> Self {
         e.into()
@@ -401,4 +442,51 @@ fn parse_slurm_error_logfile(s: &str) -> anyhow::Result<std::path::PathBuf> {
         &std::env::var("SLURM_JOB_ID").expect("Unable to get SLURM_JOB_ID"),
     );
     Ok(std::path::PathBuf::from(out))
+}
+
+// https://github.com/notify-rs/notify/blob/d7e22791faffb7bd9bd10f031c260ae019d7f474/examples/async_monitor.rs
+fn async_watcher(
+    filename: Option<std::path::PathBuf>,
+) -> notify::Result<(notify::INotifyWatcher, tokio::sync::mpsc::Receiver<String>)> {
+    use notify::EventKind;
+    use notify::{Event, Result};
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+    let watcher = match filename {
+        Some(p) => {
+            // Open the file we're going to watch, and create a buffer to hold its contents
+            let mut file = std::fs::OpenOptions::new().read(true).open(&p)?;
+            let mut buffer = Vec::new();
+
+            let mut watcher = notify::INotifyWatcher::new(move |res: Result<Event>| {
+                let event = res.unwrap();
+
+                // When the file is modified, read it into the buffer
+                let is_modify = matches!(event.kind, EventKind::Any | EventKind::Modify(_));
+                if is_modify {
+                    // This appends to the current buffer
+                    file.read_to_end(&mut buffer).unwrap();
+
+                    // Okay, now look in the buffer for the string "CANCELLED". It seems like in
+                    // general, slurmstepd will write multiple lines to the file for certain kinds
+                    // of errors, and all of them are interesting. So if we fire off an event after
+                    // the first modification, then we'll miss the later ones. It appears that
+                    // "CANCELLED AT" is the last line in the file, so let's wait for that and then
+                    // fire it off.
+                    let s =
+                        std::str::from_utf8(&buffer).unwrap_or("Unable to read slurm error file. Utf8 issue?");
+                    if s.contains("CANCELLED") || s.contains("Unable to read") {
+                        futures::executor::block_on(async {
+                            tx.send(s.to_string()).await.unwrap();
+                        })
+                    }
+                }
+            })?;
+            watcher.watch(&p, notify::RecursiveMode::NonRecursive)?;
+            watcher
+        }
+        // just create a dummy object so things typecheck
+        None => notify::INotifyWatcher::new(move |_| {})?,
+    };
+    Ok((watcher, rx))
 }
