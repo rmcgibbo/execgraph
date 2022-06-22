@@ -32,7 +32,7 @@ async fn main() -> Result<(), RemoteError> {
         reqwest::header::HeaderValue::from_bytes(username().as_bytes())?,
     );
     headers.insert(
-        "SLURM_JOB_ID",
+        "X-EXECGRAPH-SLURM-JOB-ID",
         reqwest::header::HeaderValue::from_bytes(slurm_jobid.as_bytes())?,
     );
     headers.insert(
