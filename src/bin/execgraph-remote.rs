@@ -486,7 +486,11 @@ fn async_watcher(
             watcher
         }
         // just create a dummy object so things typecheck
-        None => notify::INotifyWatcher::new(move |_| {})?,
+        None => notify::INotifyWatcher::new(move |_event: Result<Event>| {
+            // take a reference to `tx` to prevent it from getting dropped, so that the recv
+            // side of the channel remains in a valid state.
+            drop(&tx);
+        })?,
     };
     Ok((watcher, rx))
 }
