@@ -457,6 +457,10 @@ fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
         .replace(
             "%c",
             &std::env::var("SLURM_CLUSTER_NAME").unwrap_or("%c".to_string()),
+        )
+        .replace(
+            "%h",
+            &gethostname().to_string_lossy()
         );
     Ok(out)
 }
