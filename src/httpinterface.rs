@@ -30,6 +30,7 @@ pub struct StatusQueueReply {
 #[derive(Serialize, Deserialize)]
 pub struct StartRequest {
     pub runnertypeid: u32,
+    pub disconnect_error_message: String,
 }
 
 #[derive(Serialize, Deserialize)]

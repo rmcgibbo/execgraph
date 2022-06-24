@@ -19,12 +19,38 @@ use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use whoami::username;
 
+#[derive(Debug, Parser)]
+#[clap(name = "execgraph-remote")]
+struct CommandLineArguments {
+    /// Url of controller
+    url: String,
+
+    /// "Runner type", a number between 0 and 63 signifying the features of this node
+    runnertypeid: u32,
+
+    /// Stop accepting new tasks after this amount of time, in seconds.
+    #[clap(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
+    max_time_accepting_tasks: Option<std::time::Duration>,
+
+    /// Path to the log file where slurmstepd will write errors. This should be a file
+    /// on a local disk, so that we can watch it with inotify and report back any errors
+    /// to the controller.
+    #[clap(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
+    slurm_error_logfile: Option<std::path::PathBuf>,
+
+    /// Error message to be echoed on the controller side in leu of our tasks's standard error
+    /// if the controller looses contact with this runner due to a network partition or node
+    /// failure.
+    #[clap(long = "disconnect-err-msg", parse(try_from_str = parse_disconnect_error_message), default_value="")]
+    disconnect_error_message: String,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
     tracing_subscriber::fmt::init();
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
-    let opt = Opt::from_args();
+    let opt = CommandLineArguments::from_args();
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "X-EXECGRAPH-USERNAME",
@@ -72,16 +98,7 @@ async fn main() -> Result<(), RemoteError> {
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
 
     while still_accepting_tasks() {
-        match run_command(
-            &base,
-            &client,
-            opt.runnertypeid,
-            &mut sigterms,
-            opt.slurm_error_logfile.clone(),
-            &mut rx,
-        )
-        .await
-        {
+        match run_command(&opt, &base, &client, &mut sigterms, &mut rx).await {
             Err(RemoteError::Connection(e)) => {
                 // break with no error message
                 debug!("{:#?}", e);
@@ -96,11 +113,10 @@ async fn main() -> Result<(), RemoteError> {
 }
 
 async fn run_command(
+    opt: &CommandLineArguments,
     base: &reqwest::Url,
     client: &reqwest::Client,
-    runnertypeid: u32,
     sigterms: &mut tokio::signal::unix::Signal,
-    slurm_error_logfile: Option<std::path::PathBuf>,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
 ) -> Result<(), RemoteError> {
     let start_route = base.join("start")?;
@@ -110,7 +126,10 @@ async fn run_command(
 
     let start = client
         .get(start_route)
-        .json(&StartRequest { runnertypeid })
+        .json(&StartRequest {
+            runnertypeid: opt.runnertypeid,
+            disconnect_error_message: opt.disconnect_error_message.clone(),
+        })
         .send()
         .await?
         .error_for_status()?
@@ -306,7 +325,7 @@ async fn run_command(
             // propagate sigterm to child process
             unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
             // read the slurm logfile, which might contant some informationg
-            let slurm_error_logfile_contents = match slurm_error_logfile {
+            let slurm_error_logfile_contents = match &opt.slurm_error_logfile {
                 Some(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
                 None => "".to_string()
             };
@@ -343,26 +362,6 @@ async fn run_command(
     };
 
     Ok(())
-}
-
-#[derive(Debug, Parser)]
-#[clap(name = "execgraph-remote")]
-struct Opt {
-    /// Url of controller
-    url: String,
-
-    /// "Runner type", a number between 0 and 63 signifying the features of this node
-    runnertypeid: u32,
-
-    /// Stop accepting new tasks after this amount of time, in seconds.
-    #[clap(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
-    max_time_accepting_tasks: Option<std::time::Duration>,
-
-    /// Path to the log file where slurmstepd will write errors. This should be a file
-    /// on a local disk, so that we can watch it with inotify and report back any errors
-    /// to the controller.
-    #[clap(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
-    slurm_error_logfile: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -444,6 +443,24 @@ fn parse_slurm_error_logfile(s: &str) -> anyhow::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(out))
 }
 
+fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
+    let out = s
+        .replace("%u", &username())
+        .replace(
+            "%j",
+            &std::env::var("SLURM_JOB_ID").unwrap_or("%j".to_string()),
+        )
+        .replace(
+            "%x",
+            &std::env::var("SLURM_JOB_NAME").unwrap_or("%x".to_string()),
+        )
+        .replace(
+            "%c",
+            &std::env::var("SLURM_CLUSTER_NAME").unwrap_or("%c".to_string()),
+        );
+    Ok(out)
+}
+
 // https://github.com/notify-rs/notify/blob/d7e22791faffb7bd9bd10f031c260ae019d7f474/examples/async_monitor.rs
 fn async_watcher(
     filename: Option<std::path::PathBuf>,
@@ -473,8 +490,8 @@ fn async_watcher(
                     // the first modification, then we'll miss the later ones. It appears that
                     // "CANCELLED AT" is the last line in the file, so let's wait for that and then
                     // fire it off.
-                    let s =
-                        std::str::from_utf8(&buffer).unwrap_or("Unable to read slurm error file. Utf8 issue?");
+                    let s = std::str::from_utf8(&buffer)
+                        .unwrap_or("Unable to read slurm error file. Utf8 issue?");
                     if s.contains("CANCELLED") || s.contains("Unable to read") {
                         futures::executor::block_on(async {
                             tx.send(s.to_string()).await.unwrap();

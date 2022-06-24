@@ -4,7 +4,7 @@ use crate::{
     sync::{ExitStatus, ReadyTrackerClient},
 };
 use anyhow::Result;
-use hyper::{Body, HeaderMap, Request, Response, StatusCode};
+use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
 use routerify_json_response::json_success_resp;
@@ -22,7 +22,7 @@ struct ConnectionState {
     cmd: Cmd,
     node_id: NodeIndex,
     joinhandle: tokio::task::JoinHandle<()>,
-    runner_headers: HeaderMap,
+    disconnect_error_message: String,
 }
 #[derive(Debug)]
 pub struct State<'a> {
@@ -215,23 +215,6 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
         None => return,
     };
 
-    let slurm_job_id = cstate
-        .runner_headers
-        .get("X-EXECGRAPH-SLURM-JOB-ID")
-        .map(|x| x.to_str().unwrap());
-
-    let runner_hostname = cstate
-        .runner_headers
-        .get("X-EXECGRAPH-HOSTNAME")
-        .map(|x| x.to_str().unwrap());
-
-    log::warn!(
-        "Lost contact with runner inside SLURM allocation {} on {}. This could be due to user or administrator cancellation, preemption by higher-priority jobs, cancellation due to memory overuse, timeout, node failure, or other reasons. Try running ``sacct -j {} --format JobID%24,AllocTRES%40,MaxRSS,State%15 --units M``",
-        slurm_job_id.unwrap_or("{Unknown}"),
-        runner_hostname.unwrap_or("Unknown host"),
-        slurm_job_id.unwrap_or("{Unknown}"),
-    );
-
     state
         .tracker
         .send_finished(
@@ -239,7 +222,7 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
             &cstate.cmd,
             ExitStatus::Disconnected,
             "".to_owned(),
-            "".to_owned(),
+            cstate.disconnect_error_message,
             ValueMaps::new(),
         )
         .await;
@@ -347,7 +330,6 @@ async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> 
 #[tracing::instrument]
 async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
-    let headers = req.headers().clone();
     let request = get_json_body::<StartRequest>(req).await?;
     let transaction_id = rand::random::<u32>();
 
@@ -387,7 +369,7 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
                 cancel: token.clone(),
                 cmd: cmd.clone(),
                 node_id,
-                runner_headers: headers,
+                disconnect_error_message: request.disconnect_error_message,
                 joinhandle: spawn_ping_collector_thread(
                     state.clone(),
                     token,
