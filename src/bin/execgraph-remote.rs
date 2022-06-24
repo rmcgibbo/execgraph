@@ -19,6 +19,9 @@ use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use whoami::username;
 
+// https://github.com/SchedMD/slurm/blob/791f9c39e0db919e02ef8857be0faff09a3656b2/src/slurmd/slurmstepd/req.c#L724
+const FINAL_SLURM_ERROR_MESSAGE_STRINGS: &str = "CANCELLED|FAILED|ERROR";
+
 #[derive(Debug, Parser)]
 #[clap(name = "execgraph-remote")]
 struct CommandLineArguments {
@@ -472,6 +475,7 @@ fn async_watcher(
     use notify::EventKind;
     use notify::{Event, Result};
     let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let re = regex::Regex::new(FINAL_SLURM_ERROR_MESSAGE_STRINGS).unwrap();
 
     let watcher = match filename {
         Some(p) => {
@@ -496,7 +500,7 @@ fn async_watcher(
                     // fire it off.
                     let s = std::str::from_utf8(&buffer)
                         .unwrap_or("Unable to read slurm error file. Utf8 issue?");
-                    if s.contains("CANCELLED") || s.contains("Unable to read") {
+                    if re.is_match(s) || s.contains("Unable to read") {
                         futures::executor::block_on(async {
                             tx.send(s.to_string()).await.unwrap();
                         })
