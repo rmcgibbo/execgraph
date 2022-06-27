@@ -102,7 +102,7 @@ def test_2(seed, tmp_path):
 
 def test_3(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, tmp_path / "foo")
-    eg.add_task(["false"], "")
+    eg.add_task(["false"], "a")
     nfailed, _ = eg.execute()
     assert nfailed == 1
 
@@ -163,8 +163,8 @@ def test_key(num_parallel, tmp_path):
 def test_inward(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(num_parallel, tmp_path / "foo")
 
-    tasks = [eg.add_task(["sh", "-c", "sleep 0.5 && false"], "") for i in range(5)]
-    eg.add_task(["true"], "", tasks)
+    tasks = [eg.add_task(["sh", "-c", "sleep 0.5 && false"], f"{i}") for i in range(5)]
+    eg.add_task(["true"], "x", tasks)
     eg.execute()
 
 
@@ -268,8 +268,8 @@ def test_poisoned(tmp_path):
     for i in range(10):
         cmd = ["true"] if i % 2 == 0 else [f"false"]
         first.append(eg.add_task(cmd, key=f"{i}"))
-    final = eg.add_task(["true"], key="", dependencies=first)
-    final2 = eg.add_task(["true"], key="", dependencies=[final])
+    final = eg.add_task(["true"], key="f1", dependencies=first)
+    final2 = eg.add_task(["true"], key="f2", dependencies=[final])
     nfailed, order = eg.execute()
     assert nfailed == 5
     assert len(order) == 10
@@ -306,7 +306,7 @@ def test_shutdown(tmp_path):
 
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
-    eg.add_task(["false"], key="")
+    eg.add_task(["false"], key="0")
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
     assert nfailed == 1
 
@@ -398,7 +398,7 @@ def test_shutdown_3(tmp_path):
     start = time.time()
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
     end = time.time()
-    assert end-start < 5
+    assert end - start < 5
     assert nfailed in (1, 2)
 
 
@@ -495,7 +495,7 @@ def test_queue(tmp_path):
                         ],
                     ],
                     key=lambda x: str(x[0]),
-                )
+                ),
             },
         }
 
@@ -639,14 +639,14 @@ def test_failcounts_1(tmp_path):
     del eg
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    assert eg.logfile_runcount("key") == 1
-    assert eg.logfile_runcount("nothing") == 0
+    assert eg.logfile_runcount("key")[0] == 1
+    assert eg.logfile_runcount("nothing")[0] == 0
     eg.add_task(["false"], key="key")
     eg.execute()
     del eg
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    assert eg.logfile_runcount("key") == 2
+    assert eg.logfile_runcount("key")[0] == 2
 
 
 def test_sigint_1(tmp_path):
@@ -700,10 +700,10 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
     n_failed, executed = eg.execute()
     assert n_failed == expected
 
-    assert eg.logfile_runcount("a") == 1
-    assert eg.logfile_runcount("b") == 0
-    assert eg.logfile_runcount("c") == 0
-    assert eg.logfile_runcount("d") == 0
+    assert eg.logfile_runcount("a")[0] == 2 if rerun_failures else 1
+    assert eg.logfile_runcount("b")[0] == 0
+    assert eg.logfile_runcount("c")[0] == 0
+    assert eg.logfile_runcount("d")[0] == 0
     del eg
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
@@ -881,11 +881,12 @@ def test_cancellation_2(tmp_path):
 def test_cancellation_3(tmp_path):
     eg = _execgraph.ExecGraph(2, logfile=tmp_path / "foo")
     with open(tmp_path / "script.py", "w") as f:
-        f.write("""
+        f.write(
+            """
 import subprocess
 subprocess.run("sleep 60", shell=True)
-  """)
-
+  """
+        )
 
     eg.add_task([sys.executable, str(tmp_path / "script.py")], key="long")
     eg.add_task(["sh", "-c", "sleep 0.2 && false"], key=f"short")
@@ -893,3 +894,43 @@ subprocess.run("sleep 60", shell=True)
     assert eg.execute()[0] == 2
     elapsed = time.perf_counter() - start
     assert elapsed < 1
+
+
+def test_fork_1(tmp_path):
+    eg1 = _execgraph.ExecGraph(
+        2, logfile=tmp_path / "foo", storage_roots=["foo", "bar"]
+    )
+    eg1.add_task(["true"], key="1")
+    eg1.execute()
+    del eg1
+
+    eg2 = _execgraph.ExecGraph(
+        2,
+        logfile=tmp_path / "bar",
+        readonly_logfiles=[tmp_path / "foo"],
+        storage_roots=["a", "b"],
+    )
+    eg2.add_task(["true"], key="2")
+    eg2.execute()
+    assert eg2.logfile_runcount("1") == (0, str(tmp_path / "foo/1.0"))
+    assert eg2.logfile_runcount("2") == (0, str(tmp_path / "a/2.0"))
+    assert eg2.logfile_runcount("3") == (0, None)
+    del eg2
+
+    eg3 = _execgraph.ExecGraph(
+        2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "bar"]
+    )
+    assert eg3.logfile_runcount("1") == (0, str(tmp_path / "foo/1.0"))
+
+    assert sorted(map(os.path.abspath, eg3.all_storage_roots())) == sorted(
+        map(
+            os.path.abspath,
+            [
+                tmp_path / "foo",
+                tmp_path / "bar",
+                tmp_path,
+                tmp_path / "a",
+                tmp_path / "b",
+            ],
+        )
+    )

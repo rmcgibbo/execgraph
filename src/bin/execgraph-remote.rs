@@ -300,7 +300,7 @@ async fn run_command(
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
         },
         maybe_slurm_error_message = notify_rx.recv() => {
-            let slurm_error_message = maybe_slurm_error_message.unwrap_or("Logic error. This channel should not have been dropped.".to_string());
+            let slurm_error_message = maybe_slurm_error_message.unwrap_or_else(||"Logic error. This channel should not have been dropped.".to_string());
             // This channel is giving us events from inotify when someone (likely slurmstepd)
             // writes to the `slurm_error_logfile`. The assumption is that this happens when
             // SLURM decides to cancel our allocation due to overuse of some resource (time,
@@ -451,20 +451,17 @@ fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
         .replace("%u", &username())
         .replace(
             "%j",
-            &std::env::var("SLURM_JOB_ID").unwrap_or("%j".to_string()),
+            &std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "%j".to_string()),
         )
         .replace(
             "%x",
-            &std::env::var("SLURM_JOB_NAME").unwrap_or("%x".to_string()),
+            &std::env::var("SLURM_JOB_NAME").unwrap_or_else(|_| "%x".to_string()),
         )
         .replace(
             "%c",
-            &std::env::var("SLURM_CLUSTER_NAME").unwrap_or("%c".to_string()),
+            &std::env::var("SLURM_CLUSTER_NAME").unwrap_or_else(|_| "%c".to_string()),
         )
-        .replace(
-            "%h",
-            &gethostname().to_string_lossy()
-        );
+        .replace("%h", &gethostname().to_string_lossy());
     Ok(out)
 }
 

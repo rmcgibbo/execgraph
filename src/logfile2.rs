@@ -1,9 +1,11 @@
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     io::{BufRead, Seek, Write},
+    marker::PhantomData,
+    path::PathBuf,
     time::SystemTime,
 };
 use thiserror::Error;
@@ -20,7 +22,7 @@ pub enum LogEntry {
     Backref(BackrefEntry),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HeaderEntry {
     pub version: u32,
     pub time: SystemTime,
@@ -30,6 +32,11 @@ pub struct HeaderEntry {
     pub cmdline: Vec<String>,
     pub workdir: String,
     pub pid: u32,
+
+    #[serde(default)]
+    pub upstreams: Vec<PathBuf>,
+    #[serde(default)]
+    pub storage_roots: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -38,6 +45,9 @@ pub struct ReadyEntry {
     pub key: String,
     pub runcount: u32,
     pub command: String,
+
+    #[serde(default, rename = "r")]
+    pub storage_root: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,24 +73,31 @@ pub struct BackrefEntry {
 }
 
 impl LogEntry {
-    pub fn new_header(workflow_key: &str) -> Result<LogEntry> {
+    pub fn new_header(
+        workflow_key: &str,
+        upstreams: Vec<PathBuf>,
+        storage_roots: Vec<PathBuf>,
+    ) -> Result<LogEntry> {
         Ok(LogEntry::Header(HeaderEntry {
-            version: 3,
+            version: 4,
             time: SystemTime::now(),
             user: whoami::username(),
             hostname: gethostname::gethostname().to_string_lossy().to_string(),
             workflow_key: workflow_key.to_owned(),
             cmdline: env::args().collect(),
             workdir: env::current_dir()?.to_string_lossy().to_string(),
+            upstreams,
+            storage_roots,
             pid: std::process::id(),
         }))
     }
 
-    pub fn new_ready(key: &str, runcount: u32, command: &str) -> LogEntry {
+    pub fn new_ready(key: &str, runcount: u32, command: &str, storage_root: u32) -> LogEntry {
         LogEntry::Ready(ReadyEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             runcount,
+            storage_root,
             command: command.to_owned(),
         })
     }
@@ -130,36 +147,39 @@ impl LogEntry {
     }
 }
 
+pub struct LogFileRO;
+pub struct LogFileRW;
 #[derive(Debug)]
-pub struct LogFile {
+pub struct LogFile<T> {
     f: std::fs::File,
-    #[allow(dead_code)]
-    lockf: std::fs::File,
-    lockf_path: std::path::PathBuf,
-    workflow_key: Option<String>,
+    path: std::path::PathBuf,
+    lockf: Option<(std::fs::File, std::path::PathBuf)>,
+    header: Option<HeaderEntry>,
     runcounts: HashMap<String, RuncountStatus>,
+    mode: PhantomData<T>,
 }
-pub struct LogFileReadOnly {
+pub struct LogFileSnapshotReader {
     f: std::fs::File,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub enum RuncountStatus {
-    Ready(u32),
-    Started(u32),
-    Finished(u32, i32),
-}
-impl RuncountStatus {
-    fn to_runcount(self) -> u32 {
-        match self {
-            RuncountStatus::Ready(x) => x,
-            RuncountStatus::Started(x) => x,
-            RuncountStatus::Finished(x, _) => x,
-        }
-    }
+    Ready {
+        runcount: u32,
+        storage_root: u32,
+    },
+    Started {
+        runcount: u32,
+        storage_root: u32,
+    },
+    Finished {
+        runcount: u32,
+        storage_root: u32,
+        success: bool,
+    },
 }
 
-impl LogFile {
+impl LogFile<LogFileRW> {
     #[tracing::instrument]
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
         // acquire the lock file and write something to it
@@ -169,19 +189,147 @@ impl LogFile {
             .write(true)
             .open(&lockf_path)?;
         lockf.try_lock(FileLockMode::Exclusive)?;
-        serde_json::to_writer(&lockf, &LogEntry::new_header("")?)?;
+        serde_json::to_writer(&lockf, &LogEntry::new_header("", vec![], vec![])?)?;
         lockf.flush()?;
 
-        let f = std::fs::OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .read(true)
             .create(true)
             .write(true)
-            .open(path)?;
+            .open(&path)?;
+        let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        Ok(LogFile {
+            f,
+            path: path.as_ref().to_path_buf().canonicalize()?,
+            header,
+            runcounts,
+            lockf: Some((lockf, lockf_path)),
+            mode: PhantomData::<LogFileRW>,
+        })
+    }
 
+    pub fn write(&mut self, e: LogEntry) -> Result<()> {
+        tracing::debug!("write: {:#?}", e);
+        match e {
+            LogEntry::Header(ref h) => {
+                // TODO: check for consistency with prior header?
+                self.header = Some(h.clone())
+            }
+            LogEntry::Ready(ref r) => {
+                self.runcounts.insert(
+                    r.key.clone(),
+                    RuncountStatus::Ready {
+                        runcount: r.runcount,
+                        storage_root: r.storage_root,
+                    },
+                );
+            }
+            LogEntry::Started(ref s) => {
+                let r = self
+                    .runcounts
+                    .remove(&s.key)
+                    .expect("I see a Started entry, but no Ready entry");
+                if let RuncountStatus::Ready {
+                    runcount: c,
+                    storage_root: srt,
+                } = r
+                {
+                    self.runcounts.insert(
+                        s.key.clone(),
+                        RuncountStatus::Started {
+                            runcount: c,
+                            storage_root: srt,
+                        },
+                    );
+                } else {
+                    panic!("Malformed?");
+                }
+            }
+            LogEntry::Finished(ref f) => {
+                let r = self
+                    .runcounts
+                    .remove(&f.key)
+                    .expect("I see a Finished entry, but no prior entry");
+                if let RuncountStatus::Started {
+                    runcount: c,
+                    storage_root: srt,
+                } = r
+                {
+                    self.runcounts.insert(
+                        f.key.clone(),
+                        RuncountStatus::Finished {
+                            runcount: c,
+                            storage_root: srt,
+                            success: f.status == 0,
+                        },
+                    );
+                } else {
+                    panic!("Malformed");
+                }
+            }
+            LogEntry::Backref(_) => {}
+        }
+
+        serde_json::to_writer(&mut self.f, &e)?;
+        self.f.write_all(&[b'\n'])?;
+        Ok(())
+    }
+}
+
+pub fn load_ro_logfiles_recursive(mut paths: Vec<PathBuf>) -> Result<Vec<LogFile<LogFileRO>>> {
+    let mut loaded = HashSet::new();
+    let mut result = vec![];
+    loop {
+        match paths.pop() {
+            Some(path) => {
+                if loaded.contains(&path) {
+                    panic!("Infinite loop");
+                }
+                let p = LogFile::<LogFileRO>::new(&path)?;
+                loaded.insert(path);
+
+                if let Some(ref h) = p.header {
+                    for pp in h.upstreams.iter() {
+                        paths.push(pp.clone());
+                    }
+                }
+
+                result.push(p);
+            }
+            None => return Ok(result),
+        }
+    }
+}
+
+impl LogFile<LogFileRO> {
+    #[tracing::instrument]
+    fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .create(true)
+            .write(true)
+            .open(&path)?;
+        let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        Ok(LogFile {
+            f,
+            path: path.as_ref().to_path_buf().canonicalize()?,
+            header,
+            runcounts,
+            lockf: None,
+            mode: PhantomData::<LogFileRO>,
+        })
+    }
+}
+
+impl<T> LogFile<T> {
+    fn load_runcounts(
+        f: &mut std::fs::File,
+    ) -> Result<(HashMap<String, RuncountStatus>, Option<HeaderEntry>)> {
         let mut runcounts = HashMap::new();
+        let mut header = None;
         let mut workflow_key = None;
 
-        let mut reader = std::io::BufReader::new(&f);
+        let mut reader = std::io::BufReader::new(f);
         let mut line = String::new();
         loop {
             line.clear();
@@ -196,92 +344,134 @@ impl LogFile {
                 e
             })?;
             match value {
-                LogEntry::Header(h) => match workflow_key {
-                    None => workflow_key = Some(h.workflow_key),
-                    Some(ref existing) => {
-                        if existing != &h.workflow_key {
-                            return Err(LogfileError::WorkflowKeyMismatch);
+                LogEntry::Header(h) => {
+                    match workflow_key {
+                        None => workflow_key = Some(h.workflow_key.clone()),
+                        Some(ref existing) => {
+                            if existing != &h.workflow_key {
+                                return Err(LogfileError::WorkflowKeyMismatch);
+                            }
                         }
-                    }
-                },
+                    };
+                    header = Some(h);
+                }
                 LogEntry::Ready(r) => {
-                    runcounts.insert(r.key, RuncountStatus::Ready(r.runcount));
+                    runcounts.insert(
+                        r.key,
+                        RuncountStatus::Ready {
+                            runcount: r.runcount,
+                            storage_root: r.storage_root,
+                        },
+                    );
                 }
                 LogEntry::Started(s) => {
                     let r = runcounts
                         .remove(&s.key)
                         .expect("I see a Started entry, but no Ready entry");
-                    runcounts.insert(s.key, RuncountStatus::Started(r.to_runcount()));
+                    if let RuncountStatus::Ready {
+                        runcount: c,
+                        storage_root: srt,
+                    } = r
+                    {
+                        runcounts.insert(
+                            s.key,
+                            RuncountStatus::Started {
+                                runcount: c,
+                                storage_root: srt,
+                            },
+                        );
+                    } else {
+                        panic!("Malformed?");
+                    }
                 }
                 LogEntry::Finished(f) => {
                     let r = runcounts
                         .remove(&f.key)
                         .expect("I see a Finished entry, but no prior entry");
-                    runcounts.insert(f.key, RuncountStatus::Finished(r.to_runcount(), f.status));
+                    if let RuncountStatus::Started {
+                        runcount: c,
+                        storage_root: srt,
+                    } = r
+                    {
+                        runcounts.insert(
+                            f.key,
+                            RuncountStatus::Finished {
+                                runcount: c,
+                                storage_root: srt,
+                                success: f.status == 0,
+                            },
+                        );
+                    } else {
+                        panic!("Malformed");
+                    }
                 }
                 _ => {}
             }
         }
 
-        Ok(LogFile {
-            f,
-            workflow_key,
-            runcounts,
-            lockf,
-            lockf_path,
-        })
+        Ok((runcounts, header))
     }
 
     pub fn workflow_key(&self) -> Option<String> {
-        self.workflow_key.clone()
+        self.header.as_ref().map(|h| h.workflow_key.clone())
+    }
+
+    pub fn storage_roots(&self) -> Vec<PathBuf> {
+        let n = self.header.as_ref().map(|h| h.storage_roots.len()).unwrap_or(0) as u32;
+        (0..n).map(|id| self.storage_root(id)).collect::<Option<Vec<_>>>().unwrap()
+    }
+
+    pub fn storage_root(&self, id: u32) -> Option<PathBuf> {
+        self.header
+            .as_ref()
+            .and_then(|h| h.storage_roots.get(id as usize))
+            .map(|p| {
+                if p.is_absolute() {
+                    p.clone()
+                } else {
+                    self.path.parent().unwrap().join(p)
+                }
+            })
     }
 
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
         self.f.flush()
     }
 
-    pub fn write(&mut self, e: LogEntry) -> Result<()> {
-        serde_json::to_writer(&mut self.f, &e)?;
-        self.f.write_all(&[b'\n'])?;
-        Ok(())
-    }
-
     pub fn runcount(&self, key: &str) -> Option<RuncountStatus> {
-        self.runcounts.get(key).copied()
+        self.runcounts.get(key).cloned()
     }
 
     pub fn has_success(&self, key: &str) -> bool {
-        !key.is_empty()
-            && self
-                .runcounts
-                .get(key)
-                .map(|status| match status {
-                    RuncountStatus::Finished(_runcount, status) => *status == 0,
-                    _ => false,
-                })
-                .unwrap_or(false)
+        self.runcounts
+            .get(key)
+            .map(|status| match status {
+                RuncountStatus::Finished { success, .. } => *success,
+                _ => false,
+            })
+            .unwrap_or(false)
     }
 
     pub fn has_failure(&self, key: &str) -> bool {
-        !key.is_empty()
-            && self
-                .runcounts
-                .get(key)
-                .map(|status| match status {
-                    RuncountStatus::Finished(_runcount, status) => *status != 0,
-                    _ => false,
-                })
-                .unwrap_or(false)
+        self.runcounts
+            .get(key)
+            .map(|status| match status {
+                RuncountStatus::Finished { success, .. } => !(*success),
+                _ => false,
+            })
+            .unwrap_or(false)
     }
 }
 
-impl Drop for LogFile {
+impl<T> Drop for LogFile<T> {
     fn drop(&mut self) {
-        drop(std::fs::remove_file(&self.lockf_path));
+        if let Some((_f, lockf_path)) = self.lockf.as_ref() {
+            drop(std::fs::remove_file(lockf_path));
+        }
     }
 }
 
-impl LogFileReadOnly {
+impl LogFileSnapshotReader {
     pub fn open(path: std::path::PathBuf) -> Result<Self> {
         let f = std::fs::OpenOptions::new().read(true).open(path)?;
         Ok(Self { f })

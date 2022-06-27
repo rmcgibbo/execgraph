@@ -1,7 +1,7 @@
 use crate::{
     constants::{FAIL_COMMAND_PREFIX, FIZZLED_TIME_CUTOFF},
     execgraph::Cmd,
-    logfile2,
+    logfile2::{self, LogFileRW},
     utils::{AwaitableCounter, CancellationState, CancellationToken},
 };
 use anyhow::{Context, Result};
@@ -58,7 +58,7 @@ pub struct ReadyTrackerServer<'a> {
     n_fizzled: u32,
 
     g: Arc<Graph<&'a Cmd, (), Directed>>,
-    logfile: &'a mut LogFile,
+    logfile: &'a mut LogFile<LogFileRW>,
     ready: Option<[async_priority_channel::Sender<TaskItem, u32>; NUM_RUNNER_TYPES]>,
     completed: async_channel::Receiver<CompletedEvent>,
     n_success: u32,
@@ -86,7 +86,7 @@ struct TaskStatus {
 
 pub fn new_ready_tracker<'a>(
     g: Arc<DiGraph<&'a Cmd, ()>>,
-    logfile: &'a mut LogFile,
+    logfile: &'a mut LogFile<LogFileRW>,
     count_offset: u32,
     failures_allowed: u32,
 ) -> (ReadyTrackerServer<'a>, ReadyTrackerClient) {
@@ -340,23 +340,14 @@ impl<'a> ReadyTrackerServer<'a> {
                 self.n_fizzled += 1;
             }
 
-            if cmd.key.is_empty() {
-                eprintln!(
-                    "\x1b[1;31m{}:\x1b[0m {}{}",
-                    e.status.fail_description(fizzled),
-                    FAIL_COMMAND_PREFIX,
-                    cmd.display()
-                );
-            } else {
-                eprintln!(
-                    "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
-                    e.status.fail_description(fizzled),
-                    FAIL_COMMAND_PREFIX,
-                    cmd.key,
-                    cmd.runcount,
-                    cmd.display()
-                );
-            }
+            eprintln!(
+                "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
+                e.status.fail_description(fizzled),
+                FAIL_COMMAND_PREFIX,
+                cmd.key,
+                cmd.runcount,
+                cmd.display()
+            );
         }
 
         if !e.stdout.is_empty() {
@@ -411,8 +402,12 @@ impl<'a> ReadyTrackerServer<'a> {
         for index in ready.into_iter() {
             let cmd = self.g[index];
             let priority = cmd.priority;
-            self.logfile
-                .write(LogEntry::new_ready(&cmd.key, cmd.runcount, &cmd.display()))?;
+            self.logfile.write(LogEntry::new_ready(
+                &cmd.key,
+                cmd.runcount,
+                &cmd.display(),
+                cmd.storage_root,
+            ))?;
             queuestate_lock
                 .entry(cmd.affinity)
                 .or_insert_with(|| Snapshot {

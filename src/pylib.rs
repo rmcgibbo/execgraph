@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bitvec::array::BitArray;
 use pyo3::{
     exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
@@ -5,12 +6,13 @@ use pyo3::{
     types::PyTuple,
 };
 use std::ffi::OsString;
+use std::path::PathBuf;
 use tokio::runtime::Runtime;
 use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
-    logfile2::{self, LogEntry, LogFile},
+    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW},
 };
 
 /// Parallel execution of shell commands with DAG dependencies.
@@ -47,15 +49,19 @@ impl PyExecGraph {
     #[new]
     #[args(
         num_parallel = -1,
+	    readonly_logfiles = "vec![]",
         failures_allowed = 1,
         newkeyfn = "None",
-        rerun_failures=true
+        rerun_failures=true,
+        storage_roots = "vec![PathBuf::from(\"\")]"
     )]
     #[tracing::instrument(skip(py))]
     fn new(
         py: Python,
         mut num_parallel: i32,
-        logfile: std::path::PathBuf,
+        logfile: PathBuf,
+        readonly_logfiles: Vec<PathBuf>,
+        storage_roots: Vec<PathBuf>,
         failures_allowed: u32,
         newkeyfn: Option<PyObject>,
         rerun_failures: bool,
@@ -64,7 +70,9 @@ impl PyExecGraph {
             num_parallel = num_cpus::get() as i32 + 2;
         }
 
-        let mut log = LogFile::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let mut log =
+            LogFile::<LogFileRW>::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let readonly_logs = load_ro_logfiles_recursive(readonly_logfiles.clone())?;
         let key = match log.workflow_key() {
             Some(key) => key,
             None => match newkeyfn {
@@ -73,10 +81,14 @@ impl PyExecGraph {
             },
         };
         debug!("Writing new log header key={}", key);
-        log.write(LogEntry::new_header(&key)?)?;
+        log.write(LogEntry::new_header(
+            &key,
+            readonly_logfiles,
+            storage_roots,
+        )?)?;
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(log),
+            g: ExecGraph::new(log, readonly_logs),
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -88,37 +100,90 @@ impl PyExecGraph {
         })
     }
 
+    fn all_storage_roots(&self) -> Vec<PathBuf> {
+        let mut result = self.g.logfile.storage_roots();
+        result.extend(self.g.readonly_logfiles.iter().flat_map(|l| l.storage_roots()));
+        result
+    }
+
     /// Get the number of tasks in the graph
     fn ntasks(&self) -> usize {
         self.g.ntasks()
     }
 
     /// Get the runcount that should be used for a task with this key.
-    #[tracing::instrument(skip(self))]
-    fn logfile_runcount(&self, key: &str) -> u32 {
-        match self.g.logfile.runcount(key) {
-            // the task is new and has never been executed before.
-            // obviously this calls for a runcount of zero.
-            None => 0,
-            // during the last round, the task was added to the task graph,
+    fn logfile_runcount(&self, key: &str) -> (u32, Option<PathBuf>) {
+        let from_current_logfile = match self.g.logfile.runcount(key) {
+            // The task is new and has never been executed before.
+            // obviously this calls for a runcount of zero, and we don't
+            // know the task directory yet -- caller will be able to choose.
+            None => (0, None),
+            // During the last round, the task was added to the task graph,
             // became ready, but was not started. so no directory would have
             // been created, and we can reuse the prior run count.
-            Some(logfile2::RuncountStatus::Ready(r)) => r,
-            // the task was previously started, but not finished. this shouldn't
+            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => (runcount, None),
+            // The task was previously started, but not finished. this shouldn't
             // happen, because we should create a "fake" finished record with a
-            // fake timeout_status, but maybe we got sigkilled or something. anyways,
-            // we're going to need a new directory. this is basically like a failure.
-            Some(logfile2::RuncountStatus::Started(r)) => {
-                // log::error!("task has a started record but no finished record?");
-                r + 1
-            }
-            // the task previously finished successfully. we reuse the old run count
+            // fake timeout_status, but maybe we got sigkilled or something. Anyways,
+            // we're going to need a new directory. This is basically like a failure.
+            Some(logfile2::RuncountStatus::Started { runcount, .. }) => (runcount + 1, None),
+            // The task previously finished successfully. We reuse the old run count
             // because we're not going to actually run it again -- this lets us refer
             // to the assets in the correct directory.
-            Some(logfile2::RuncountStatus::Finished(r, status)) if status == 0 => r,
-            // new directory for the next run, as above.
-            Some(logfile2::RuncountStatus::Finished(r, _status)) => r + 1,
+            Some(logfile2::RuncountStatus::Finished {
+                runcount,
+                storage_root,
+                success,
+            }) if success => (
+                runcount,
+                Some(
+                    self.g
+                        .logfile
+                        .storage_root(storage_root)
+                        .with_context(|| {
+                            format!("getting {}th entry from this logfile", storage_root)
+                        })
+                        .expect("Unable to find storage root")
+                        .join(format!("{}.{}", key, runcount)),
+                ),
+            ),
+            // New directory for the next run, as above.
+            Some(logfile2::RuncountStatus::Finished { runcount, .. }) => (runcount + 1, None),
+        };
+        // if the current logfile gave a cache hit, go with that.
+        if from_current_logfile.1.is_some() {
+            return from_current_logfile;
         }
+
+        // if any of the prior log files gave a cache hit, go with that
+        for l in self.g.readonly_logfiles.iter() {
+            if let Some(logfile2::RuncountStatus::Finished {
+                runcount,
+                storage_root,
+                success,
+            }) = l.runcount(key)
+            {
+                if success {
+                    return (
+                        runcount,
+                        Some(
+                            l.storage_root(storage_root)
+                                .with_context(|| {
+                                    format!(
+                                        "getting {}th entry from upstream logfile",
+                                        storage_root
+                                    )
+                                })
+                                .expect("Unable to find storage root")
+                                .join(format!("{}.{}", key, runcount)),
+                        ),
+                    );
+                }
+            }
+        }
+
+        // otherwise vall back to the cache miss from the current log file.
+        from_current_logfile
     }
 
     /// Get the workflow-level key, created by the ``newkeyfn``
@@ -201,7 +266,8 @@ impl PyExecGraph {
         affinity = "1",
         env = "vec![]",
         preamble = "None",
-        postamble = "None"
+        postamble = "None",
+        storage_root = "0"
     )]
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all)]
@@ -215,13 +281,15 @@ impl PyExecGraph {
         env: Vec<(OsString, OsString)>,
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
+        storage_root: u32,
     ) -> PyResult<u32> {
-        let runcount = self.logfile_runcount(&key as &str);
+        let runcount = self.logfile_runcount(&key as &str).0;
         let cmd = Cmd {
             cmdline,
             key,
             display,
             env,
+            storage_root,
             runcount,
             priority: 0,
             affinity: BitArray::<u64>::new(affinity),
@@ -341,7 +409,7 @@ fn test_make_capsule(py: Python) -> PyResult<PyObject> {
 #[pyfunction]
 #[tracing::instrument(skip(py))]
 fn load_logfile(py: Python, path: std::path::PathBuf, mode: String) -> PyResult<PyObject> {
-    let mut log = logfile2::LogFileReadOnly::open(path)?;
+    let mut log = logfile2::LogFileSnapshotReader::open(path)?;
     let value = match &mode as &str {
         "current,outdated" => pythonize::pythonize(py, &log.read_current_and_outdated()?),
         "current" => pythonize::pythonize(py, &log.read_current_and_outdated()?.0),
@@ -355,7 +423,7 @@ fn load_logfile(py: Python, path: std::path::PathBuf, mode: String) -> PyResult<
 #[pyfunction]
 #[tracing::instrument(skip(value))]
 fn write_logfile(path: std::path::PathBuf, value: &PyAny) -> PyResult<()> {
-    let mut log = logfile2::LogFile::new(path)?;
+    let mut log = logfile2::LogFile::<logfile2::LogFileRW>::new(path)?;
     let v: Vec<LogEntry> = pythonize::depythonize(value)?;
     for item in v {
         log.write(item)?;
