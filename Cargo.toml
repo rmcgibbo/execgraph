@@ -21,7 +21,7 @@ async-channel = "1.6.1"
 async-priority-channel = "0.1.0"
 event-listener = "2.5.2"
 bitvec = "1.0.0"
-clap = { version = "3.2.6", features = ["derive"] }
+clap = { version = "3.2.8", features = ["derive"] }
 tokio-command-fds = "0.2.1"
 derivative = "2.2.0"
 lazy_static = "1.4.0"
@@ -41,17 +41,17 @@ regex = "1.5.6"
 reqwest = { version = "0.11.11", features = ["json"], default-features = false }
 routerify = "3.0.0"
 routerify-json-response = "3.0.0"
-serde = { version = "1.0.137", features = ["derive"] }
-serde_json = "1.0.81"
+serde = { version = "1.0.138", features = ["derive"] }
+serde_json = "1.0.82"
 tokio = { version = "1.19.2", features = ["full", "tracing"] }
-tokio-pipe = "0.2.11"
+tokio-pipe = "0.2.12"
 tokio-util = "0.7.3"
 shell-words = "1.1.0"
 thiserror = "1.0.31"
 url = "2.2.2"
 whoami = "1.2.1"
 tracing = "0.1.35"
-tracing-subscriber = "0.3.11"
+tracing-subscriber = "0.3.14"
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
 # to run rust tests, need to do ``$ cargo test --no-default-features``
