@@ -346,11 +346,13 @@ impl<'a> ReadyTrackerServer<'a> {
             }
         }
 
-        if !e.stdout.is_empty() {
-            print!("{}", e.stdout);
-        }
-        if !e.stderr.is_empty() {
-            eprint!("{}", e.stderr);
+        if self.shutdown_state != ShutdownState::SoftShutdown {
+            if !e.stdout.is_empty() {
+                print!("{}", e.stdout);
+            }
+            if !e.stderr.is_empty() {
+                eprint!("{}", e.stderr);
+            }
         }
 
         Ok(())
