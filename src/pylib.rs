@@ -1,5 +1,6 @@
 use anyhow::Context;
 use bitvec::array::BitArray;
+use osstrtools::OsStrTools;
 use pyo3::{
     exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
     prelude::*,
@@ -80,11 +81,15 @@ impl PyExecGraph {
                 None => "default-key-value".to_owned(),
             },
         };
+        assert_eq!(std::str::from_utf8(key.as_bytes())?, key);
         debug!("Writing new log header key={}", key);
         log.write(LogEntry::new_header(
             &key,
             readonly_logfiles,
-            storage_roots,
+            storage_roots
+                .iter()
+                .map(|s| PathBuf::from(s.as_os_str().replace(&"$KEY"[..], key.as_bytes())))
+                .collect(),
         )?)?;
 
         Ok(PyExecGraph {
