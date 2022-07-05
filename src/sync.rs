@@ -69,6 +69,7 @@ pub struct ReadyTrackerServer<'a> {
     queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
     inflight: HashMap<NodeIndex, std::time::Instant>,
     statuses: HashMap<NodeIndex, TaskStatus>,
+    shutdown_state: ShutdownState,
 }
 
 #[derive(Debug)]
@@ -136,6 +137,7 @@ pub fn new_ready_tracker<'a>(
             inflight: HashMap::new(),
             logfile,
             statuses,
+            shutdown_state: ShutdownState::Normal,
         },
         ReadyTrackerClient {
             r: ready_r.try_into().unwrap(),
@@ -203,12 +205,6 @@ impl<'a> ReadyTrackerServer<'a> {
 
     #[tracing::instrument(skip_all)]
     pub async fn background_serve(&mut self, token: CancellationToken) -> Result<()> {
-        #[derive(Eq, PartialEq)]
-        enum State {
-            Normal,
-            SoftShutdown,
-        }
-
         // trigger all of the tasks that have zero unmet dependencies
         self.add_to_ready_queue(
             self.statuses
@@ -218,8 +214,6 @@ impl<'a> ReadyTrackerServer<'a> {
         )
         .await
         .context("couldn't add to ready queue")?;
-
-        let mut state = State::Normal;
 
         // every time we put a task into the ready queue, we increment n_pending.
         // every time a task completes, we decrement n_pending.
@@ -263,10 +257,10 @@ impl<'a> ReadyTrackerServer<'a> {
                                 self.n_fizzled, self.failures_allowed, self.n_pending);
                                 token.cancel(CancellationState::CancelledAfterTime(SystemTime::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
-                                state = State::SoftShutdown;
+                                self.shutdown_state = ShutdownState::SoftShutdown;
                             }
 
-                            if self.n_pending == 0 || (state == State::SoftShutdown && self.inflight.is_empty()) {
+                            if self.n_pending == 0 || (self.shutdown_state == ShutdownState::SoftShutdown && self.inflight.is_empty()) {
                                 // drop the send side of the channel. this will cause the receive side
                                 // to start returning errors, which is exactly what we want and will
                                 // break the run_local_process_loop runners at the point where they're
@@ -340,14 +334,16 @@ impl<'a> ReadyTrackerServer<'a> {
                 self.n_fizzled += 1;
             }
 
-            eprintln!(
-                "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
-                e.status.fail_description(fizzled),
-                FAIL_COMMAND_PREFIX,
-                cmd.key,
-                cmd.runcount,
-                cmd.display()
-            );
+            if self.shutdown_state != ShutdownState::SoftShutdown {
+                eprintln!(
+                    "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
+                    e.status.fail_description(fizzled),
+                    FAIL_COMMAND_PREFIX,
+                    cmd.key,
+                    cmd.runcount,
+                    cmd.display()
+                );
+            }
         }
 
         if !e.stdout.is_empty() {
@@ -656,4 +652,10 @@ pub enum ReadyTrackerClientError {
 
     #[error("No such runner type")]
     NoSuchRunnerType,
+}
+
+#[derive(Eq, PartialEq)]
+enum ShutdownState {
+    Normal,
+    SoftShutdown,
 }
