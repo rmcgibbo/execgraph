@@ -473,18 +473,8 @@ fn get_subgraph<'a, 'b: 'a>(
                 );
                 return None; // returning none excludes it from filtered_subgraph
             }
-            let has_success = {
-                let mut any_has_success = logfile.has_success(&w.key);
-                if !any_has_success {
-                    for l in readonly_logfiles {
-                        if l.has_success(&w.key) {
-                            any_has_success = true;
-                            break;
-                        }
-                    }
-                }
-                any_has_success
-            };
+            let has_success = logfile.has_success(&w.key)
+                || readonly_logfiles.iter().any(|l| l.has_success(&w.key));
 
             if has_success {
                 trace!(
@@ -512,6 +502,7 @@ fn get_subgraph<'a, 'b: 'a>(
             .filter(|&n| {
                 let w = tc[n];
                 logfile.has_failure(&w.key)
+                    || readonly_logfiles.iter().any(|l| l.has_failure(&w.key))
             })
             .collect::<HashSet<NodeIndex>>();
 

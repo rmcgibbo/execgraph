@@ -934,3 +934,33 @@ def test_fork_1(tmp_path):
             ],
         )
     )
+
+
+def test_fork_2(tmp_path):
+    eg1 = _execgraph.ExecGraph(
+        2, logfile=tmp_path / "foo",
+    )
+    eg1.add_task(["true"], key="0")
+    eg1.add_task(["false"], key="1", dependencies=[0])
+    eg1.add_task(["true"], key="2", dependencies=[1])
+    assert eg1.execute() == (1, ['0', '1'])
+    del eg1
+
+    eg1 = _execgraph.ExecGraph(
+        2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "foo"]
+    )
+    eg1.add_task(["true"], key="0")
+    eg1.add_task(["false"], key="1", dependencies=[0])
+    eg1.add_task(["true"], key="2", dependencies=[1])
+    assert eg1.execute() == (1, ['1'])
+    del eg1
+
+    eg1 = _execgraph.ExecGraph(
+        2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "foo"],
+        rerun_failures=False,
+    )
+    eg1.add_task(["true"], key="0")
+    eg1.add_task(["false"], key="1", dependencies=[0])
+    eg1.add_task(["true"], key="2", dependencies=[1])
+    assert eg1.execute() == (0, [])
+    del eg1

@@ -102,7 +102,12 @@ impl PyExecGraph {
 
     fn all_storage_roots(&self) -> Vec<PathBuf> {
         let mut result = self.g.logfile.storage_roots();
-        result.extend(self.g.readonly_logfiles.iter().flat_map(|l| l.storage_roots()));
+        result.extend(
+            self.g
+                .readonly_logfiles
+                .iter()
+                .flat_map(|l| l.storage_roots()),
+        );
         result
     }
 
@@ -340,7 +345,7 @@ impl PyExecGraph {
     #[tracing::instrument(skip_all)]
     fn execute(
         &mut self,
-        //py: Python,
+        py: Python,
         target: Option<u32>,
         remote_provisioner: Option<String>,
         remote_provisioner_arg2: Option<String>,
@@ -358,12 +363,10 @@ impl PyExecGraph {
             arg2: remote_provisioner_arg2,
         });
 
-        //let out = py.allow_threads(move || {
-        let rt = Runtime::new().expect("Failed to build tokio runtime");
-        let out = rt
-            .block_on(async {
-                let out = self
-                    .g
+        py.allow_threads(move || {
+            let rt = Runtime::new().expect("Failed to build tokio runtime");
+            rt.block_on(async {
+                self.g
                     .execute(
                         target,
                         self.num_parallel,
@@ -371,14 +374,10 @@ impl PyExecGraph {
                         self.rerun_failures,
                         x,
                     )
-                    .await;
-                log::debug!("Finished g.execute(");
-                out
+                    .await
             })
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()));
-        //});
-        log::debug!("Finished py.allow_threads");
-        out
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        })
     }
 }
 

@@ -209,7 +209,6 @@ impl LogFile<LogFileRW> {
     }
 
     pub fn write(&mut self, e: LogEntry) -> Result<()> {
-        tracing::debug!("write: {:#?}", e);
         match e {
             LogEntry::Header(ref h) => {
                 // TODO: check for consistency with prior header?
@@ -417,8 +416,15 @@ impl<T> LogFile<T> {
     }
 
     pub fn storage_roots(&self) -> Vec<PathBuf> {
-        let n = self.header.as_ref().map(|h| h.storage_roots.len()).unwrap_or(0) as u32;
-        (0..n).map(|id| self.storage_root(id)).collect::<Option<Vec<_>>>().unwrap()
+        let n = self
+            .header
+            .as_ref()
+            .map(|h| h.storage_roots.len())
+            .unwrap_or(0) as u32;
+        (0..n)
+            .map(|id| self.storage_root(id))
+            .collect::<Option<Vec<_>>>()
+            .unwrap()
     }
 
     pub fn storage_root(&self, id: u32) -> Option<PathBuf> {
