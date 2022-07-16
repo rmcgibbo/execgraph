@@ -280,7 +280,6 @@ impl PyExecGraph {
         storage_root = "0"
     )]
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip_all)]
     fn add_task(
         &mut self,
         cmdline: Vec<OsString>,
