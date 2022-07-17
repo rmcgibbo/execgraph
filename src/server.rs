@@ -294,10 +294,10 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
         .await;
 
     let resp = snapshot
-        .iter()
+        .into_iter()
         .map(|(name, queue)| {
             (
-                name.data,
+                name,
                 StatusQueueReply {
                     num_ready: queue.num_ready,
                     num_inflight: queue.num_inflight,

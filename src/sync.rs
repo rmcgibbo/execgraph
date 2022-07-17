@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
 use logfile2::{LogEntry, LogFile, ValueMaps};
+
 use petgraph::prelude::*;
 use std::{
     collections::HashMap,
@@ -39,6 +40,7 @@ macro_rules! u32checked_add {
 //
 
 const NUM_RUNNER_TYPES: usize = 64;
+pub type QueueStateHashMap = nohash_hasher::IntMap<u64, Snapshot>;
 
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -68,7 +70,7 @@ pub struct ReadyTrackerServer<'a> {
     pending_increased_event: Arc<AwaitableCounter>,
     count_offset: u32,
     failures_allowed: u32,
-    queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
+    queuestate: Arc<Mutex<QueueStateHashMap>>,
     inflight: HashMap<NodeIndex, std::time::Instant>,
     statuses: HashMap<NodeIndex, TaskStatus>,
     shutdown_state: ShutdownState,
@@ -76,7 +78,7 @@ pub struct ReadyTrackerServer<'a> {
 
 #[derive(Debug)]
 pub struct ReadyTrackerClient {
-    queuestate: Arc<Mutex<HashMap<BitArray<u64>, Snapshot>>>,
+    queuestate: Arc<Mutex<QueueStateHashMap>>,
     pending_increased_event: Arc<AwaitableCounter>,
     s: async_channel::Sender<CompletedEvent>,
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
@@ -103,7 +105,7 @@ pub fn new_ready_tracker<'a>(
         ready_r.push(receiver);
     }
 
-    let queuestate = Arc::new(Mutex::new(HashMap::new()));
+    let queuestate = Arc::new(Mutex::new(QueueStateHashMap::default()));
     let (finished_s, finished_r) = async_channel::unbounded();
 
     // for each task, how many unmet first-order dependencies does it have?
@@ -316,7 +318,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 .lock()
                 .expect("Something must have panicked while holding this lock?");
             let num_inflight = &mut locked
-                .get_mut(&cmd.affinity)
+                .get_mut(&cmd.affinity.data)
                 .expect("No such queue")
                 .num_inflight;
             *num_inflight = num_inflight.checked_sub(1).expect("Underflow");
@@ -410,9 +412,8 @@ impl<'a> ReadyTrackerServer<'a> {
                 &cmd.display(),
                 cmd.storage_root,
             ))?;
-            // this is fairly hot
             queuestate_lock
-                .entry(cmd.affinity)
+                .entry(cmd.affinity.data)
                 .or_insert_with(|| Snapshot {
                     num_ready: 0,
                     num_inflight: 0,
@@ -470,7 +471,7 @@ impl ReadyTrackerClient {
             let was_taken = task.taken.fetch_or(true, SeqCst);
             if !was_taken {
                 let mut s = self.queuestate.lock().expect("foo");
-                let x = s.get_mut(&task.affinity).expect("bar");
+                let x = s.get_mut(&task.affinity.data).expect("bar");
                 x.num_ready -= 1;
                 x.num_inflight += 1;
 
@@ -494,7 +495,7 @@ impl ReadyTrackerClient {
             let (task, _priority) = reciever.recv().await?;
             if !task.taken.fetch_or(true, SeqCst) {
                 let mut s = self.queuestate.lock().expect("foo");
-                let x = s.get_mut(&task.affinity).expect("bar");
+                let x = s.get_mut(&task.affinity.data).expect("bar");
                 x.num_ready -= 1;
                 x.num_inflight += 1;
 
@@ -562,7 +563,7 @@ impl ReadyTrackerClient {
         etag: u64,
         timemin: Duration,
         timeout: Duration,
-    ) -> (u64, HashMap<BitArray<u64>, Snapshot>) {
+    ) -> (u64, QueueStateHashMap) {
         let clock_start = tokio::time::Instant::now();
 
         let mut etag_new =
