@@ -20,14 +20,14 @@ anyhow = "1.0.58"
 async-channel = "1.6.1"
 async-priority-channel = "0.1.0"
 event-listener = "2.5.2"
-bitvec = "1.0.0"
-clap = { version = "3.2.8", features = ["derive"] }
+bitvec = "1.0.1"
+clap = { version = "3.2.12", features = ["derive"] }
 tokio-command-fds = "0.2.1"
 derivative = "2.2.0"
 lazy_static = "1.4.0"
 futures = "0.3.21"
 gethostname = "0.2.3"
-hyper = "0.14.19"
+hyper = "0.14.20"
 log = "0.4.17"
 libc = "0.2.126"
 nix = "0.24.1"
@@ -42,9 +42,9 @@ regex = "1.6.0"
 reqwest = { version = "0.11.11", features = ["json"], default-features = false }
 routerify = "3.0.0"
 routerify-json-response = "3.0.0"
-serde = { version = "1.0.138", features = ["derive"] }
+serde = { version = "1.0.139", features = ["derive"] }
 serde_json = "1.0.82"
-tokio = { version = "1.19.2", features = ["full", "tracing"] }
+tokio = { version = "1.20.0", features = ["full", "tracing"] }
 tokio-pipe = "0.2.12"
 tokio-util = "0.7.3"
 shell-words = "1.1.0"
