@@ -11,6 +11,7 @@ use petgraph::prelude::*;
 use std::{
     collections::HashMap,
     convert::{TryFrom, TryInto},
+    io::Write,
     sync::{
         atomic::{AtomicBool, Ordering::SeqCst},
         Arc, Mutex,
@@ -57,6 +58,7 @@ pub struct ReadyTrackerServer<'a> {
     pub n_failed: u32,
     n_fizzled: u32,
 
+    stdout: grep_cli::StandardStream,
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile<LogFileRW>,
     ready: Option<[async_priority_channel::Sender<TaskItem, u32>; NUM_RUNNER_TYPES]>,
@@ -124,6 +126,7 @@ pub fn new_ready_tracker<'a>(
         ReadyTrackerServer {
             finished_order: vec![],
             g,
+            stdout: grep_cli::stdout(termcolor::ColorChoice::AlwaysAnsi),
             ready: Some(ready_s.try_into().unwrap()),
             completed: finished_r,
             n_failed: 0,
@@ -321,12 +324,13 @@ impl<'a> ReadyTrackerServer<'a> {
 
         if is_success {
             self.n_success += 1;
-            println!(
+            writeln!(
+                self.stdout,
                 "[{}/{}] {}",
                 self.n_success + self.count_offset,
                 total + self.count_offset,
                 cmd.display()
-            );
+            )?;
         } else {
             self.n_failed += 1;
             let fizzled = matches!(elapsed, Some(elapsed) if elapsed < FIZZLED_TIME_CUTOFF);
@@ -348,7 +352,7 @@ impl<'a> ReadyTrackerServer<'a> {
 
         if self.shutdown_state != ShutdownState::SoftShutdown {
             if !e.stdout.is_empty() {
-                print!("{}", e.stdout);
+                write!(self.stdout, "{}", e.stdout)?;
             }
             if !e.stderr.is_empty() {
                 eprint!("{}", e.stderr);
@@ -406,6 +410,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 &cmd.display(),
                 cmd.storage_root,
             ))?;
+            // this is fairly hot
             queuestate_lock
                 .entry(cmd.affinity)
                 .or_insert_with(|| Snapshot {
@@ -415,12 +420,8 @@ impl<'a> ReadyTrackerServer<'a> {
                 .num_ready += 1;
 
             let taken = Arc::new(AtomicBool::new(false));
-            for i in cmd
-                .affinity
-                .iter()
-                .enumerate()
-                .filter_map(|(i, b)| if *b { Some(i) } else { None })
-            {
+
+            for i in cmd.affinity.iter_ones() {
                 inserts[i].push((
                     TaskItem {
                         id: index,
