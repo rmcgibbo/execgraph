@@ -151,7 +151,7 @@ pub struct LogFileRO;
 pub struct LogFileRW;
 #[derive(Debug)]
 pub struct LogFile<T> {
-    f: std::fs::File,
+    f: std::io::BufWriter<std::fs::File>,
     path: std::path::PathBuf,
     lockf: Option<(std::fs::File, std::path::PathBuf)>,
     header: Option<HeaderEntry>,
@@ -199,7 +199,7 @@ impl LogFile<LogFileRW> {
             .open(&path)?;
         let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
-            f,
+            f: std::io::BufWriter::new(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
@@ -310,7 +310,7 @@ impl LogFile<LogFileRO> {
             .open(&path)?;
         let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
-            f,
+            f: std::io::BufWriter::new(f), // unused, would be better not to make
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
