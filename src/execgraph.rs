@@ -354,6 +354,7 @@ impl ExecGraph {
             self.completed.insert(item.clone());
         }
         debug!("nfailed={}, ncompleted={}", n_failed, completed.len());
+        self.logfile.flush()?;
         Ok((n_failed, completed))
     }
 }
