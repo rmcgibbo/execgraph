@@ -67,7 +67,6 @@ impl Capsule {
         Capsule { capsule }
     }
 
-    #[tracing::instrument]
     fn call(&self) -> Result<i32> {
         const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
         let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
@@ -107,7 +106,6 @@ impl Cmd {
         }
     }
 
-    #[tracing::instrument]
     pub fn call_preamble(&self) {
         match &self.preamble {
             Some(preamble) => {
@@ -125,7 +123,6 @@ impl Cmd {
         };
     }
 
-    #[tracing::instrument]
     pub fn call_postamble(&self) {
         match &self.postamble {
             Some(postamble) => {

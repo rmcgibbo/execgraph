@@ -127,7 +127,6 @@ fn get_state(req: &Request<Body>) -> Arc<State<'static>> {
 
 // Define an error handler function which will accept the `routerify::Error`
 // and the request information and generates an appropriate response.
-#[tracing::instrument]
 async fn error_handler(err: RouteError, _: RequestInfo) -> Response<Body> {
     //log::warn!("{}", err);
 
@@ -143,7 +142,6 @@ async fn error_handler(err: RouteError, _: RequestInfo) -> Response<Body> {
     }
 }
 
-#[tracing::instrument]
 async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T, JsonResponseErr> {
     let bytes = hyper::body::to_bytes(req.into_body())
         .await
@@ -151,7 +149,6 @@ async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T, Jso
     serde_json::from_slice(bytes.to_vec().as_slice()).map_err(|e| e.into())
 }
 
-#[tracing::instrument]
 async fn middleware_after(
     res: Response<Body>,
     req_info: RequestInfo,
@@ -171,7 +168,6 @@ async fn middleware_after(
     Ok(res)
 }
 
-#[tracing::instrument]
 async fn middleware_before(req: Request<Body>) -> Result<Request<Body>, RouteError> {
     req.set_context((tokio::time::Instant::now(), req.remote_addr()));
     Ok(req)
@@ -273,7 +269,6 @@ fn spawn_ping_collector_thread(
 // ------------------------------------------------------------------ //
 
 // GET /status
-#[tracing::instrument]
 async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
     let request = get_json_body::<StatusRequest>(req)
@@ -310,7 +305,6 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
 }
 
 // POST /ping
-#[tracing::instrument]
 async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
     let request = get_json_body::<Ping>(req).await?;
@@ -327,7 +321,6 @@ async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> 
 }
 
 // GET /start
-#[tracing::instrument]
 async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
     let request = get_json_body::<StartRequest>(req).await?;
@@ -388,7 +381,6 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
 }
 
 // POST /begun
-#[tracing::instrument]
 async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
     let request = get_json_body::<BegunRequest>(req).await?;
@@ -408,7 +400,6 @@ async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
 }
 
 // POST /end
-#[tracing::instrument]
 async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let state = get_state(&req);
     let request = get_json_body::<EndRequest>(req).await?;
