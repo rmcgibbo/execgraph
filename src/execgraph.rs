@@ -50,6 +50,12 @@ pub struct Cmd {
     pub postamble: Option<Capsule>,
 }
 
+lazy_static::lazy_static! {
+    static ref ESCAPED_NEWLINE_OR_TAB: aho_corasick::AhoCorasick = aho_corasick::AhoCorasick::new(
+        ["\\\n", "\t"]
+    );
+}
+
 #[derive(Debug)]
 pub struct RemoteProvisionerSpec {
     pub cmd: String,
@@ -104,14 +110,29 @@ impl Cmd {
     pub fn display(&self) -> String {
         match &self.display {
             Some(s) => s.to_string(),
-            None => self
-                .cmdline
-                .iter()
-                .map(|x| x.clone().into_string().expect("cmdline must be utf-8"))
-                .collect::<Vec<String>>()
-                .join(" ")
-                .replace("\\\n", " ")
-                .replace('\t', "\\t"),
+            None => {
+                let mut buffer = OsString::new();
+                let sep = OsString::from(" ");
+                for (i, item) in self.cmdline.iter().enumerate() {
+                    if i > 0 {
+                        buffer.push(&sep);
+                    }
+                    buffer.push(item);
+                }
+                let s = buffer.into_string().expect("cmdline must be utf-8");
+                let mut dst = String::new();
+                ESCAPED_NEWLINE_OR_TAB.replace_all_with(&s, &mut dst, |_m, t, d| {
+                    if t == "\\\n" {
+                        d.push_str(" ")
+                    } else if t == "\t" {
+                        d.push_str("\\t");
+                    } else {
+                        panic!("");
+                    }
+                    true
+                });
+                dst
+            }
         }
     }
 

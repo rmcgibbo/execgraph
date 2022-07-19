@@ -4,13 +4,14 @@ use crate::{
     sync::{ExitStatus, ReadyTrackerClient},
 };
 use anyhow::Result;
+use dashmap::DashMap;
 use hyper::{Body, Request, Response, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
 use routerify_json_response::json_success_resp;
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::SystemTime};
-use tokio::{sync::Mutex, time::timeout};
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 type RouteError = Box<dyn std::error::Error + Send + Sync + 'static>;
 use crate::{constants::PING_INTERVAL_MSECS, logfile2::ValueMaps};
@@ -26,7 +27,7 @@ struct ConnectionState {
 }
 #[derive(Debug)]
 pub struct State<'a> {
-    connections: Mutex<HashMap<u32, ConnectionState>>,
+    connections: DashMap<u32, ConnectionState>,
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
     tracker: &'a ReadyTrackerClient,
     token: crate::utils::CancellationToken,
@@ -39,7 +40,7 @@ impl<'a> State<'a> {
         token: crate::utils::CancellationToken,
     ) -> State<'a> {
         State {
-            connections: Mutex::new(HashMap::new()),
+            connections: DashMap::new(),
             subgraph,
             tracker,
             token,
@@ -50,23 +51,21 @@ impl<'a> State<'a> {
     /// async drop, so this can't be in the drop. But you really should call this before
     /// dropping the server.
     pub async fn join(&self) {
-        let cstates: Vec<_> = {
-            let mut connections = self.connections.lock().await;
-            let keys: Vec<_> = connections
-                .iter()
-                .map(|(k, v)| {
-                    v.cancel.cancel();
-                    *k
-                })
-                .collect();
-            keys.iter().filter_map(|k| connections.remove(k)).collect()
-        };
-
-        let n_joined = cstates.len();
-        for cs in cstates {
-            cs.joinhandle.await.expect("Unable to join");
+        let mut join_handles = vec![];
+        for k in self
+            .connections
+            .iter()
+            .map(|r| *r.key())
+            .collect::<Vec<_>>()
+        {
+            let cs = self.connections.remove(&k).unwrap().1;
+            cs.cancel.cancel();
+            join_handles.push(cs.joinhandle);
         }
-        log::debug!("Joined all {} ping threads", n_joined);
+
+        for jh in join_handles {
+            jh.await.expect("Unable to join");
+        }
     }
 }
 
@@ -205,9 +204,8 @@ async fn ping_timeout_handler(transaction_id: u32, state: Arc<State<'_>>) {
     // every time a background task is spawned with tokio::spawn, we must carefully guard the
     // JoinHandle and make sure it's joined.
 
-    let mut connections = state.connections.lock().await;
-    let cstate = match connections.remove(&transaction_id) {
-        Some(cs) => cs,
+    let cstate = match state.connections.remove(&transaction_id) {
+        Some(cs) => cs.1,
         None => return,
     };
 
@@ -312,8 +310,8 @@ async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> 
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    let guard = state.connections.lock().await;
-    let cstate = guard
+    let cstate = state
+        .connections
         .get(&request.transaction_id)
         .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
     cstate.pings.send(()).await?;
@@ -353,9 +351,8 @@ async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
     let cmd = state.subgraph[node_id];
     cmd.call_preamble();
     {
-        let mut lock = state.connections.lock().await;
         let token = CancellationToken::new();
-        lock.insert(
+        state.connections.insert(
             transaction_id,
             ConnectionState {
                 pings: ping_tx,
@@ -386,8 +383,8 @@ async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError>
     let request = get_json_body::<BegunRequest>(req).await?;
 
     {
-        let mut lock = state.connections.lock().await;
-        let cstate = lock
+        let cstate = state
+            .connections
             .get_mut(&request.transaction_id)
             .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
         state
@@ -405,11 +402,11 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
     let request = get_json_body::<EndRequest>(req).await?;
 
     let cstate = {
-        let mut lock = state.connections.lock().await;
-        let cstate = lock
+        let (_transaction_id, cstate) = state
+            .connections
             .remove(&request.transaction_id)
             .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
-        cstate.cancel.cancel();
+        //cstate.cancel.cancel();
         cstate
     };
 

@@ -20,6 +20,7 @@ lto = "off"
 
 [dependencies]
 advisory-lock = "0.3.0"
+aho-corasick = "0.7.8"
 anyhow = "1.0.58"
 async-channel = "1.6.1"
 async-priority-channel = "0.1.0"

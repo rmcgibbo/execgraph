@@ -259,6 +259,7 @@ name = "execgraph"
 version = "0.1.0"
 dependencies = [
  "advisory-lock",
+ "aho-corasick",
  "anyhow",
  "async-channel",
  "async-priority-channel",

@@ -74,10 +74,10 @@ pub async fn run_local_process_loop(
         // write end of the pipe we need to close it ourselves
         drop(pipe_write);
 
-        let start_time = std::time::SystemTime::now();
+        let start_time = std::time::Instant::now();
         let child = match maybe_child {
             Ok(child) => child,
-            Err(_) => {
+            Err(e) => {
                 tracker
                     .send_started(subgraph_node_id, cmd, &hostname, 0)
                     .await;
@@ -87,7 +87,7 @@ pub async fn run_local_process_loop(
                         cmd,
                         ExitStatus::Code(127),
                         "".to_owned(),
-                        format!("No such command: {:#?}", &cmd.cmdline[0]),
+                        format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
                         ValueMaps::new(),
                     )
                     .await;
