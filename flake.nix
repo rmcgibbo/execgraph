@@ -27,6 +27,7 @@
           rustc
           clippy
           maturin
+          cargo-flamegraph
           cargo-udeps
           cargo-edit
           cargo-tarpaulin
@@ -44,7 +45,7 @@
           curl
 
           protobuf
-        ];
+        ] ++ [ pkgs.coz ];
       };
     });
 }
