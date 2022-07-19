@@ -12,7 +12,6 @@ use derivative::Derivative;
 use futures::future::join_all;
 use hyper::Server;
 use petgraph::prelude::*;
-use pyo3::AsPyPointer;
 use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
@@ -59,15 +58,18 @@ pub struct RemoteProvisionerSpec {
 
 #[derive(Debug, Clone)]
 pub struct Capsule {
+    #[cfg(feature = "pyo3")]
     capsule: pyo3::PyObject,
 }
 
+#[cfg(feature = "pyo3")]
 impl Capsule {
     pub fn new(capsule: pyo3::PyObject) -> Self {
         Capsule { capsule }
     }
 
     fn call(&self) -> Result<i32> {
+        use pyo3::AsPyPointer;
         const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
         let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
 
@@ -88,6 +90,13 @@ impl Capsule {
                 Err(anyhow!("Not a capsule!"))
             }
         }
+    }
+}
+
+#[cfg(not(feature = "pyo3"))]
+impl Capsule {
+    fn call(&self) -> Result<i32> {
+        Ok(0)
     }
 }
 

@@ -246,6 +246,10 @@ impl<'a> ReadyTrackerServer<'a> {
                             assert!(self.inflight.insert(e.id, Instant::now()).is_none());
                         }
                         CompletedEvent::Finished(e) => {
+                            #[cfg(feature = "coz")]
+                            {
+                                coz::progress!();
+                            }
                             let cmd = self.g[e.id];
                             self.finished_order.push(e.id);
                             self._finished_bookkeeping(&e).await?;

@@ -1,5 +1,3 @@
-#![cfg(feature = "extension-module")]
-
 use async_channel::bounded;
 use clap::Parser;
 use execgraph::{
@@ -100,6 +98,9 @@ async fn main() -> Result<(), RemoteError> {
     // Slurm error logfile events Notify
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
 
+    let mut time_running_commands = std::time::Duration::new(0, 0);
+    let mut n_commands = 0;
+    let start_time = std::time::Instant::now();
     while still_accepting_tasks() {
         match run_command(&opt, &base, &client, &mut sigterms, &mut rx).await {
             Err(RemoteError::Connection(e)) => {
@@ -107,9 +108,18 @@ async fn main() -> Result<(), RemoteError> {
                 debug!("{:#?}", e);
                 break;
             }
-            result => result?,
+            result => {
+                time_running_commands += result?;
+                n_commands += 1;
+            }
         };
     }
+    let total_duration = std::time::Instant::now() - start_time;
+    tracing::info!(
+        "Time running commands: {:#?} / {:#?}",
+        time_running_commands / n_commands,
+        total_duration / n_commands
+    );
 
     drop(watcher);
     Ok(())
@@ -121,7 +131,7 @@ async fn run_command(
     client: &reqwest::Client,
     sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
-) -> Result<(), RemoteError> {
+) -> Result<Duration, RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
@@ -212,6 +222,7 @@ async fn run_command(
 
     // Run the command and record the pid
     let mut command = tokio::process::Command::new(&start.data.cmdline[0]);
+    let t_before_spawn = std::time::Instant::now();
     let maybe_child = command
         .args(&start.data.cmdline[1..])
         .envs(start.data.env.iter().cloned())
@@ -269,7 +280,7 @@ async fn run_command(
                 }
             };
 
-            return Ok(());
+            return Ok(std::time::Duration::new(0, 0));
         }
     };
 
@@ -345,6 +356,9 @@ async fn run_command(
             return Err(RemoteError::SIGTERM)
         }
     };
+    let t_finished = std::time::Instant::now();
+
+    let time_executing_command = t_finished - t_before_spawn;
 
     // Tell the server that we've finished the command
     tokio::select! {
@@ -364,7 +378,7 @@ async fn run_command(
         }
     };
 
-    Ok(())
+    Ok(time_executing_command)
 }
 
 #[derive(Debug, Error)]
