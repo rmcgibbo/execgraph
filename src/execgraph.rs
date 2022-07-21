@@ -123,7 +123,7 @@ impl Cmd {
                 let mut dst = String::new();
                 ESCAPED_NEWLINE_OR_TAB.replace_all_with(&s, &mut dst, |_m, t, d| {
                     if t == "\\\n" {
-                        d.push_str(" ")
+                        d.push(' ')
                     } else if t == "\t" {
                         d.push_str("\\t");
                     } else {
@@ -324,6 +324,7 @@ impl ExecGraph {
                     transmute_lifetime(&tracker),
                     token1.clone(),
                 ));
+
                 let router = router(state.clone());
                 let service = RouterService::new(router).expect("Failed to constuct Router");
                 let addr = SocketAddr::from(([0, 0, 0, 0], 0));
@@ -331,12 +332,20 @@ impl ExecGraph {
                 let bound_addr = server.local_addr();
                 let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
 
+                let (stop_reaping_pings_tx, stop_reaping_pings_rx) = oneshot::channel();
+                let jh = {
+                    let state = state.clone();
+                    tokio::spawn(
+                        async move { state.reap_pings_forever(stop_reaping_pings_rx).await },
+                    )
+                };
                 server_start_tx.send(bound_addr).expect("failed to send");
                 if let Err(err) = graceful.await {
                     log::error!("Server error: {}", err);
                 }
                 debug!("Joining server tasks");
-                state.join().await;
+                stop_reaping_pings_tx.send(()).unwrap();
+                jh.await.unwrap();
                 token1.cancel(CancellationState::HardCancelled);
                 debug!("Server task exited");
             }));

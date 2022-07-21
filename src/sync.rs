@@ -18,7 +18,7 @@ use std::{
         atomic::{AtomicBool, Ordering::SeqCst},
         Arc,
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 
@@ -265,7 +265,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             if self.n_fizzled >= self.failures_allowed {
                                 tracing::debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
                                 self.n_fizzled, self.failures_allowed, self.n_pending);
-                                token.cancel(CancellationState::CancelledAfterTime(SystemTime::now() - FIZZLED_TIME_CUTOFF));
+                                token.cancel(CancellationState::CancelledAfterTime(Instant::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
                                 self.shutdown_state = ShutdownState::SoftShutdown;
                             }

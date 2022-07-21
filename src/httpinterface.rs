@@ -56,6 +56,7 @@ pub struct EndRequest {
     pub stdout: String,
     pub stderr: String,
     pub values: ValueMaps,
+    pub start_request: Option<StartRequest>,
 }
 
 pub mod vectorize {

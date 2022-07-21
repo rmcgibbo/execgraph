@@ -13,6 +13,7 @@ use serde::Deserialize;
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::time::Instant;
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use whoami::username;
@@ -98,9 +99,8 @@ async fn main() -> Result<(), RemoteError> {
     // Slurm error logfile events Notify
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
 
-    let mut time_running_commands = std::time::Duration::new(0, 0);
-    let mut n_commands = 0;
     let start_time = std::time::Instant::now();
+    let mut timing_info = TimingInfo::default();
     while still_accepting_tasks() {
         match run_command(&opt, &base, &client, &mut sigterms, &mut rx).await {
             Err(RemoteError::Connection(e)) => {
@@ -109,16 +109,15 @@ async fn main() -> Result<(), RemoteError> {
                 break;
             }
             result => {
-                time_running_commands += result?;
-                n_commands += 1;
+                timing_info += result?;
             }
         };
     }
     let total_duration = std::time::Instant::now() - start_time;
-    tracing::info!(
-        "Time running commands: {:#?} / {:#?}",
-        time_running_commands / n_commands,
-        total_duration / n_commands
+    timing_info.debug_average_times();
+    tracing::debug!(
+        "Avg total duration: {:#?}",
+        total_duration / timing_info.n_commands
     );
 
     drop(watcher);
@@ -131,11 +130,12 @@ async fn run_command(
     client: &reqwest::Client,
     sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
-) -> Result<Duration, RemoteError> {
+) -> Result<TimingInfo, RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
     let end_route = base.join("end")?;
+    let t_before_start_request = Instant::now();
 
     let start = client
         .get(start_route)
@@ -148,6 +148,7 @@ async fn run_command(
         .error_for_status()?
         .json::<StartResponseFull>()
         .await?;
+    let start_time_request_elapsed = Instant::now() - t_before_start_request;
 
     let ping_interval = Duration::from_millis(start.data.ping_interval_msecs);
     let transaction_id = start.data.transaction_id;
@@ -169,8 +170,7 @@ async fn run_command(
     // a channel
     let client1 = client.clone();
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval_at(tokio::time::Instant::now() + ping_interval, ping_interval);
+        let mut interval = tokio::time::interval_at(Instant::now() + ping_interval, ping_interval);
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -271,6 +271,7 @@ async fn run_command(
                     stdout: "".to_owned(),
                     stderr: format!("No such command: {:#?}", &start.data.cmdline[0]),
                     values: ValueMaps::new(),
+                    start_request: None,
                 })
                 .send() => {
                     value?.error_for_status()?;
@@ -280,7 +281,7 @@ async fn run_command(
                 }
             };
 
-            return Ok(std::time::Duration::new(0, 0));
+            return Ok(TimingInfo::default());
         }
     };
 
@@ -331,7 +332,8 @@ async fn run_command(
                     status: 128+16,
                     stdout: "".to_string(),
                     stderr: slurm_error_message,
-                    values: vec![]
+                    values: vec![],
+                    start_request: None,
                 }).send().await.unwrap();
             return Err(RemoteError::SIGTERM)
         },
@@ -350,7 +352,8 @@ async fn run_command(
                     status: 128+15,
                     stdout: "".to_string(),
                     stderr: slurm_error_logfile_contents,
-                    values: vec![]
+                    values: vec![],
+                    start_request: None,
                 }).send().await.unwrap();
 
             return Err(RemoteError::SIGTERM)
@@ -359,6 +362,7 @@ async fn run_command(
     let t_finished = std::time::Instant::now();
 
     let time_executing_command = t_finished - t_before_spawn;
+    let t_before_end_request = Instant::now();
 
     // Tell the server that we've finished the command
     tokio::select! {
@@ -369,6 +373,7 @@ async fn run_command(
             stdout: output.stdout_str(),
             stderr: output.stderr_str(),
             values: output.fd3_values(),
+            start_request: None,
         })
         .send() => {
             value?.error_for_status()?;
@@ -377,8 +382,51 @@ async fn run_command(
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
         }
     };
+    let end_request_elapsed = Instant::now() - t_before_end_request;
 
-    Ok(time_executing_command)
+    Ok(TimingInfo {
+        subprocess: time_executing_command,
+        start_request: start_time_request_elapsed,
+        end_request: end_request_elapsed,
+        n_commands: 1,
+    })
+}
+
+#[derive(Default)]
+struct TimingInfo {
+    subprocess: Duration,
+    start_request: Duration,
+    end_request: Duration,
+    n_commands: u32,
+}
+
+impl std::ops::AddAssign for TimingInfo {
+    fn add_assign(&mut self, other: TimingInfo) {
+        self.subprocess += other.subprocess;
+        self.start_request += other.start_request;
+        self.end_request += other.end_request;
+        self.n_commands += other.n_commands;
+    }
+}
+
+impl TimingInfo {
+    fn debug_average_times(&self) {
+        if self.n_commands > 0 {
+            tracing::debug!("Number of commands: {}", self.n_commands);
+            tracing::debug!(
+                "Avg subprocess duration: {:#?}",
+                self.subprocess / self.n_commands
+            );
+            tracing::debug!(
+                "Avg start_request duration: {:#?}",
+                self.start_request / self.n_commands
+            );
+            tracing::debug!(
+                "Avg end_request duration: {:#?}",
+                self.end_request / self.n_commands
+            );
+        }
+    }
 }
 
 #[derive(Debug, Error)]

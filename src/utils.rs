@@ -1,7 +1,7 @@
 use event_listener::Event;
 use std::{
     sync::atomic::{AtomicU64, Ordering},
-    time::SystemTime,
+    time::Instant,
 };
 
 pub struct AwaitableCounter {
@@ -58,7 +58,7 @@ pub struct CancellationToken {
 
 #[derive(Clone, Debug)]
 pub enum CancellationState {
-    CancelledAfterTime(SystemTime),
+    CancelledAfterTime(Instant),
     HardCancelled,
 }
 
@@ -78,13 +78,19 @@ impl CancellationToken {
         }
     }
 
+    pub fn is_soft_cancelled(&self) -> Option<CancellationState> {
+        let r = self.inner.receiver.clone();
+        let x = r.borrow();
+        x.clone()
+    }
+
     /// Returns a `Future` that gets fulfilled when "soft cancellation"
     /// is requested for work items after ``time``.
     ///
     /// The idea behind soft cancellation is that we want to cancel
     /// work items that were begun after a cutoff time.
     ///
-    pub async fn soft_cancelled(&self, time: SystemTime) -> CancellationState {
+    pub async fn soft_cancelled(&self, time: Instant) -> CancellationState {
         let mut r = self.inner.receiver.clone();
 
         loop {
