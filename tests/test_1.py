@@ -419,7 +419,7 @@ def test_status_1(tmp_path):
         x = f.read()
         assert (
             x
-            == '{"status":"success","code":200,"data":{"queues":[[3,{"num_ready":2,"num_inflight":0}]],"etag":1}}'
+            == '{"queues":[[3,{"num_ready":2,"num_inflight":0}]],"etag":1}'
         )
 
     assert nfailed == 0
@@ -469,13 +469,8 @@ def test_queue(tmp_path):
 
     with open(tmp_path / "resp0.json") as f:
         value = json.load(f)
-        value["data"]["queues"] = sorted(
-            value["data"]["queues"], key=lambda x: str(x[0])
-        )
+        value["queues"] = sorted(value["queues"], key=lambda x: str(x[0]))
         assert value == {
-            "status": "success",
-            "code": 200,
-            "data": {
                 "etag": 1,
                 "queues": sorted(
                     [
@@ -496,12 +491,11 @@ def test_queue(tmp_path):
                     ],
                     key=lambda x: str(x[0]),
                 ),
-            },
-        }
+            }
 
     with open(tmp_path / "resp0.json") as f:
         value = json.load(f)
-        assert sorted(value["data"]["queues"], key=lambda x: x[0]) == [
+        assert sorted(value["queues"], key=lambda x: x[0]) == [
             [
                 1,
                 {

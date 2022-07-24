@@ -50,12 +50,12 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(
             PROVISIONER,
             "#!/bin/sh
-            sleep 5
-            /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
+            #sleep 0
+            /home/mcgibbon/projects/execgraph/target/debug/execgraph-remote $1 0 &
+            #/home/mcgibbon/projects/execgraph/target/debug/execgraph-remote $1 0 &
+            #/home/mcgibbon/projects/execgraph/target/debug/execgraph-remote $1 0 &
+            #/home/mcgibbon/projects/execgraph/target/debug/execgraph-remote $1 0 &
+            #/home/mcgibbon/projects/execgraph/target/debug/execgraph-remote $1 0 &
             wait
         ",
         )?;

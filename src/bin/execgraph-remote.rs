@@ -9,7 +9,6 @@ use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use notify::Watcher;
-use serde::Deserialize;
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
@@ -115,10 +114,12 @@ async fn main() -> Result<(), RemoteError> {
     }
     let total_duration = std::time::Instant::now() - start_time;
     timing_info.debug_average_times();
-    tracing::debug!(
-        "Avg total duration: {:#?}",
-        total_duration / timing_info.n_commands
-    );
+    if timing_info.n_commands > 0 {
+        tracing::debug!(
+            "Avg total duration: {:#?}",
+            total_duration / timing_info.n_commands
+        );
+    }
 
     drop(watcher);
     Ok(())
@@ -146,12 +147,12 @@ async fn run_command(
         .send()
         .await?
         .error_for_status()?
-        .json::<StartResponseFull>()
+        .json::<StartResponse>()
         .await?;
     let start_time_request_elapsed = Instant::now() - t_before_start_request;
 
-    let ping_interval = Duration::from_millis(start.data.ping_interval_msecs);
-    let transaction_id = start.data.transaction_id;
+    let ping_interval = Duration::from_millis(start.ping_interval_msecs);
+    let transaction_id = start.transaction_id;
     let ping_timeout = 2 * ping_interval;
     let token = CancellationToken::new();
     let token1 = token.clone();
@@ -221,11 +222,11 @@ async fn run_command(
     let (read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
 
     // Run the command and record the pid
-    let mut command = tokio::process::Command::new(&start.data.cmdline[0]);
+    let mut command = tokio::process::Command::new(&start.cmdline[0]);
     let t_before_spawn = std::time::Instant::now();
     let maybe_child = command
-        .args(&start.data.cmdline[1..])
-        .envs(start.data.env.iter().cloned())
+        .args(&start.cmdline[1..])
+        .envs(start.env.iter().cloned())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -269,7 +270,7 @@ async fn run_command(
                     transaction_id,
                     status: 127,
                     stdout: "".to_owned(),
-                    stderr: format!("No such command: {:#?}", &start.data.cmdline[0]),
+                    stderr: format!("No such command: {:#?}", &start.cmdline[0]),
                     values: ValueMaps::new(),
                     start_request: None,
                 })
@@ -484,15 +485,6 @@ impl From<ChildProcessError> for RemoteError {
     fn from(e: ChildProcessError) -> Self {
         e.into()
     }
-}
-
-#[derive(Deserialize)]
-struct StartResponseFull {
-    #[serde(rename = "status")]
-    _status: String,
-    #[serde(rename = "code")]
-    _code: u16,
-    data: StartResponse,
 }
 
 fn parse_seconds(s: &str) -> anyhow::Result<std::time::Duration> {

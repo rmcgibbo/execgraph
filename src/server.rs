@@ -7,21 +7,25 @@ use crate::{
     utils::CancellationState,
 };
 use anyhow::Result;
-use dashmap::DashMap;
-use hyper::{Body, Request, Response, StatusCode};
-use petgraph::graph::{DiGraph, NodeIndex};
-use routerify::{ext::RequestExt, Middleware, RequestInfo, Router};
-use routerify_json_response::json_success_resp;
-use serde::de::DeserializeOwned;
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::Instant,
+use axum::{
+    extract,
+    response::{IntoResponse, Response},
+    Extension, Json, Router,
 };
+use dashmap::DashMap;
+use hyper::StatusCode;
+use petgraph::graph::{DiGraph, NodeIndex};
+use serde_json::json;
+use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::oneshot;
+use tower::ServiceBuilder;
+use tower_http::{
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+    LatencyUnit, ServiceBuilderExt,
+};
+use tracing::Level;
 
-type RouteError = Box<dyn std::error::Error + Send + Sync + 'static>;
 use crate::{constants::PING_INTERVAL_MSECS, logfile2::ValueMaps};
 
 const TIMEWHEEL_DURATION_MSECS: u64 = PING_TIMEOUT_MSECS + 1;
@@ -54,7 +58,7 @@ impl<'a> State<'a> {
             subgraph,
             tracker,
             token,
-            timeouts: TimeWheel::new(std::time::Duration::from_millis(TIMEWHEEL_DURATION_MSECS)),
+            timeouts: TimeWheel::new(Duration::from_millis(TIMEWHEEL_DURATION_MSECS)),
         }
     }
 
@@ -112,118 +116,49 @@ impl<'a> State<'a> {
     }
 }
 
-#[derive(Debug)]
-struct JsonResponseErr {
-    code: StatusCode,
-    message: String,
+enum AppError {
+    NotFound,
+    Shutdown,
+    NoSuchTransaction,
+    NoSuchRunnerType,
+    RequestError(hyper::Error),
 }
-impl std::fmt::Display for JsonResponseErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:#?}", self)
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let status = StatusCode::NOT_FOUND;
+        // TODO
+        let body = Json(json!({
+            "error": "foo",
+        }));
+
+        (status, body).into_response()
     }
-}
-
-impl From<hyper::Error> for JsonResponseErr {
-    fn from(err: hyper::Error) -> JsonResponseErr {
-        JsonResponseErr {
-            code: StatusCode::UNPROCESSABLE_ENTITY,
-            message: err.to_string(),
-        }
-    }
-}
-
-impl From<serde_json::Error> for JsonResponseErr {
-    fn from(err: serde_json::Error) -> JsonResponseErr {
-        JsonResponseErr {
-            code: StatusCode::BAD_REQUEST,
-            message: err.to_string(),
-        }
-    }
-}
-
-impl std::error::Error for JsonResponseErr {}
-
-fn json_response_err<T: std::string::ToString>(code: StatusCode, message: T) -> RouteError {
-    Box::new(JsonResponseErr {
-        code,
-        message: message.to_string(),
-    })
-}
-
-// Get the "state" from inside one of the request handlers.
-fn get_state(req: &Request<Body>) -> Arc<State<'static>> {
-    req.data::<Arc<State>>()
-        .expect("Unable to access router state")
-        .clone()
-}
-
-// Define an error handler function which will accept the `routerify::Error`
-// and the request information and generates an appropriate response.
-async fn error_handler(err: RouteError, _: RequestInfo) -> Response<Body> {
-    //log::warn!("{}", err);
-
-    let e2 = err.downcast_ref::<JsonResponseErr>();
-    match e2 {
-        Some(e) => routerify_json_response::json_failed_resp_with_message(e.code, &e.message)
-            .expect("failed to construct error"),
-        _ => routerify_json_response::json_failed_resp_with_message(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Something went wrong: {}", err),
-        )
-        .expect("Failed to build error"),
-    }
-}
-
-async fn get_json_body<T: DeserializeOwned>(req: Request<Body>) -> Result<T, JsonResponseErr> {
-    let bytes = hyper::body::to_bytes(req.into_body())
-        .await
-        .map_err(|e| -> JsonResponseErr { e.into() })?;
-    serde_json::from_slice(bytes.to_vec().as_slice()).map_err(|e| e.into())
-}
-
-async fn middleware_after(
-    res: Response<Body>,
-    req_info: RequestInfo,
-) -> Result<Response<Body>, RouteError> {
-    let (started, remote_addr) = req_info
-        .context::<(tokio::time::Instant, SocketAddr)>()
-        .expect("Unable to access request context");
-    let duration = started.elapsed();
-    log::debug!(
-        "{} {} {} {}us {}",
-        remote_addr,
-        req_info.method(),
-        req_info.uri().path(),
-        duration.as_micros(),
-        res.status().as_u16()
-    );
-    Ok(res)
-}
-
-async fn middleware_before(req: Request<Body>) -> Result<Request<Body>, RouteError> {
-    req.set_context((tokio::time::Instant::now(), req.remote_addr()));
-    Ok(req)
 }
 
 // ------------------------------------------------------------------ //
 
 // GET /status
-async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
-    let state = get_state(&req);
-    let request = get_json_body::<StatusRequest>(req)
-        .await
-        .unwrap_or(StatusRequest {
-            timeout_ms: 0,
-            timemin_ms: 0,
-            etag: 0,
-        });
-
+async fn status_handler(
+    Extension(state): Extension<Arc<State<'static>>>,
+    extract::RawBody(payload): extract::RawBody,
+) -> Result<Json<StatusReply>, AppError> {
+    let request = serde_json::from_slice(
+        &hyper::body::to_bytes(payload)
+            .await
+            .map_err(|e| AppError::RequestError(e))?,
+    )
+    .unwrap_or(StatusRequest {
+        timeout_ms: 0,
+        timemin_ms: 0,
+        etag: 0,
+    });
     let (etag, snapshot) = state
         .tracker
         .get_queuestate(
             request.etag,
-            std::time::Duration::from_millis(request.timemin_ms),
-            std::time::Duration::from_millis(request.timeout_ms),
+            Duration::from_millis(request.timemin_ms),
+            Duration::from_millis(request.timeout_ms),
         )
         .await;
 
@@ -240,21 +175,21 @@ async fn status_handler(req: Request<Body>) -> Result<Response<Body>, RouteError
         })
         .collect::<HashMap<u64, StatusQueueReply>>();
 
-    json_success_resp(&StatusReply { queues: resp, etag })
+    Ok(Json(StatusReply { queues: resp, etag }))
 }
 
 // POST /ping
-async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
-    let state = get_state(&req);
-    let request = get_json_body::<Ping>(req).await?;
-
+async fn ping_handler(
+    Extension(state): Extension<Arc<State<'static>>>,
+    extract::Json(request): extract::Json<Ping>,
+) -> Result<Response, AppError> {
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     let mut cstate = state
         .connections
         .get_mut(&request.transaction_id)
-        .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
+        .ok_or(AppError::NotFound)?;
 
     cstate.value_mut().timer_id = {
         state.timeouts.cancel(cstate.value().timer_id);
@@ -264,34 +199,29 @@ async fn ping_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> 
         )
     };
 
-    Ok(Response::builder().status(200).body("".into()).unwrap())
+    Ok((StatusCode::OK, "").into_response())
 }
 
 // GET /start
-async fn start_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
-    let state = get_state(&req);
-    let request = get_json_body::<StartRequest>(req).await?;
+async fn start_handler(
+    Extension(state): Extension<Arc<State<'static>>>,
+    extract::Json(request): extract::Json<StartRequest>,
+) -> Result<Json<StartResponse>, AppError> {
     start_request_impl(state, request)
 }
 
 fn start_request_impl(
     state: Arc<State>,
     request: StartRequest,
-) -> Result<Response<Body>, RouteError> {
+) -> Result<Json<StartResponse>, AppError> {
     let transaction_id = rand::random::<u32>();
 
     let node_id = state
         .tracker
         .try_recv(request.runnertypeid)
         .map_err(|e| match e {
-            crate::sync::ReadyTrackerClientError::ChannelTryRecvError(_) => json_response_err(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Channel closed: {:?}", e),
-            ),
-            crate::sync::ReadyTrackerClientError::NoSuchRunnerType => json_response_err(
-                StatusCode::NOT_FOUND,
-                format!("Invalid runner type: {:?}", request.runnertypeid),
-            ),
+            crate::sync::ReadyTrackerClientError::ChannelTryRecvError(_) => AppError::Shutdown,
+            crate::sync::ReadyTrackerClientError::NoSuchRunnerType => AppError::NoSuchRunnerType,
             crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => unreachable!(),
         })?;
 
@@ -314,43 +244,41 @@ fn start_request_impl(
         },
     );
 
-    json_success_resp(&StartResponse {
+    Ok(Json(StartResponse {
         transaction_id,
         cmdline: cmd.cmdline.clone(),
         env: cmd.env.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
-    })
+    }))
 }
 
 // POST /begun
-async fn begun_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
-    let state = get_state(&req);
-    let request = get_json_body::<BegunRequest>(req).await?;
+async fn begun_handler(
+    Extension(state): Extension<Arc<State<'static>>>,
+    extract::Json(request): extract::Json<BegunRequest>,
+) -> Result<Response, AppError> {
+    let cstate = state
+        .connections
+        .get_mut(&request.transaction_id)
+        .ok_or_else(|| AppError::NoSuchTransaction)?;
+    state
+        .tracker
+        .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
+        .await;
 
-    {
-        let cstate = state
-            .connections
-            .get_mut(&request.transaction_id)
-            .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
-        state
-            .tracker
-            .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
-            .await;
-    }
-
-    Ok(Response::builder().status(200).body("".into()).unwrap())
+    Ok((StatusCode::OK, "").into_response())
 }
 
 // POST /end
-async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
-    let state = get_state(&req);
-    let request = get_json_body::<EndRequest>(req).await?;
-
+async fn end_handler(
+    Extension(state): Extension<Arc<State<'static>>>,
+    extract::Json(request): extract::Json<EndRequest>,
+) -> Result<Response, AppError> {
     let cstate = {
         let (_transaction_id, cstate) = state
             .connections
             .remove(&request.transaction_id)
-            .ok_or_else(|| json_response_err(StatusCode::NOT_FOUND, "No active transaction"))?;
+            .ok_or_else(|| AppError::NoSuchTransaction)?;
         cstate
     };
     state.timeouts.cancel(cstate.timer_id);
@@ -368,23 +296,32 @@ async fn end_handler(req: Request<Body>) -> Result<Response<Body>, RouteError> {
         .await;
 
     match request.start_request {
-        Some(start_request) => start_request_impl(state, start_request),
-        None => Ok(Response::builder().status(200).body("".into()).unwrap()),
+        Some(start_request) => start_request_impl(state, start_request).map(|x| x.into_response()),
+        None => Ok((StatusCode::OK, "").into_response()),
     }
 }
 
-pub fn router(state: Arc<State<'static>>) -> Router<Body, RouteError> {
-    Router::builder()
-        // Attach the handlers.
-        .data(state)
-        .middleware(Middleware::pre(middleware_before))
-        .middleware(Middleware::post_with_info(middleware_after))
-        .get("/status", status_handler)
-        .post("/ping", ping_handler)
-        .get("/start", start_handler)
-        .post("/begun", begun_handler)
-        .post("/end", end_handler)
-        .err_handler_with_info(error_handler)
-        .build()
-        .unwrap()
+pub fn router(state: Arc<State<'static>>) -> Router {
+    use axum::routing::{get, post};
+
+    let middleware = ServiceBuilder::new()
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().include_headers(true))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(
+                    DefaultOnResponse::new()
+                        .level(Level::INFO)
+                        .latency_unit(LatencyUnit::Micros),
+                ), // on so on for `on_eos`, `on_body_chunk`, and `on_failure`
+        )
+        .add_extension(state);
+
+    Router::new()
+        .route("/start", get(start_handler))
+        .route("/begun", post(begun_handler))
+        .route("/end", post(end_handler))
+        .route("/ping", get(ping_handler))
+        .route("/status", get(status_handler))
+        .layer(middleware.into_inner())
 }

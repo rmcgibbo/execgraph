@@ -12,7 +12,6 @@ use derivative::Derivative;
 use futures::future::join_all;
 use hyper::Server;
 use petgraph::prelude::*;
-use routerify::RouterService;
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
@@ -325,8 +324,7 @@ impl ExecGraph {
                     token1.clone(),
                 ));
 
-                let router = router(state.clone());
-                let service = RouterService::new(router).expect("Failed to constuct Router");
+                let service = router(state.clone()).into_make_service();
                 let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                 let server = Server::bind(&addr).serve(service);
                 let bound_addr = server.local_addr();
