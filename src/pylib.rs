@@ -57,6 +57,7 @@ impl PyExecGraph {
         storage_roots = "vec![PathBuf::from(\"\")]"
     )]
     #[tracing::instrument(skip(py))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python,
         mut num_parallel: i32,

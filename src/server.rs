@@ -21,7 +21,7 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
 use tower_http::{
-    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
     LatencyUnit, ServiceBuilderExt,
 };
 use tracing::Level;
@@ -116,6 +116,7 @@ impl<'a> State<'a> {
     }
 }
 
+#[derive(Debug)]
 enum AppError {
     NotFound,
     Shutdown,
@@ -126,10 +127,15 @@ enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = StatusCode::NOT_FOUND;
-        // TODO
+        let status = match self {
+            AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Shutdown => StatusCode::GONE,
+            AppError::NoSuchTransaction => StatusCode::NOT_FOUND,
+            AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
+            AppError::RequestError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         let body = Json(json!({
-            "error": "foo",
+            "message": format!("{:#?}", self)
         }));
 
         (status, body).into_response()
@@ -146,7 +152,7 @@ async fn status_handler(
     let request = serde_json::from_slice(
         &hyper::body::to_bytes(payload)
             .await
-            .map_err(|e| AppError::RequestError(e))?,
+            .map_err(AppError::RequestError)?,
     )
     .unwrap_or(StatusRequest {
         timeout_ms: 0,
@@ -207,13 +213,10 @@ async fn start_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     extract::Json(request): extract::Json<StartRequest>,
 ) -> Result<Json<StartResponse>, AppError> {
-    start_request_impl(state, request)
+    Ok(Json(start_request_impl(state, request)?))
 }
 
-fn start_request_impl(
-    state: Arc<State>,
-    request: StartRequest,
-) -> Result<Json<StartResponse>, AppError> {
+fn start_request_impl(state: Arc<State>, request: StartRequest) -> Result<StartResponse, AppError> {
     let transaction_id = rand::random::<u32>();
 
     let node_id = state
@@ -244,12 +247,12 @@ fn start_request_impl(
         },
     );
 
-    Ok(Json(StartResponse {
+    Ok(StartResponse {
         transaction_id,
         cmdline: cmd.cmdline.clone(),
         env: cmd.env.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
-    }))
+    })
 }
 
 // POST /begun
@@ -260,7 +263,7 @@ async fn begun_handler(
     let cstate = state
         .connections
         .get_mut(&request.transaction_id)
-        .ok_or_else(|| AppError::NoSuchTransaction)?;
+        .ok_or(AppError::NoSuchTransaction)?;
     state
         .tracker
         .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
@@ -273,12 +276,12 @@ async fn begun_handler(
 async fn end_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     extract::Json(request): extract::Json<EndRequest>,
-) -> Result<Response, AppError> {
+) -> Result<Json<EndResponse>, AppError> {
     let cstate = {
         let (_transaction_id, cstate) = state
             .connections
             .remove(&request.transaction_id)
-            .ok_or_else(|| AppError::NoSuchTransaction)?;
+            .ok_or(AppError::NoSuchTransaction)?;
         cstate
     };
     state.timeouts.cancel(cstate.timer_id);
@@ -296,8 +299,12 @@ async fn end_handler(
         .await;
 
     match request.start_request {
-        Some(start_request) => start_request_impl(state, start_request).map(|x| x.into_response()),
-        None => Ok((StatusCode::OK, "").into_response()),
+        Some(start_request) => Ok(Json(EndResponse {
+            start_response: Some(start_request_impl(state, start_request)?),
+        })),
+        None => Ok(Json(EndResponse {
+            start_response: None,
+        })),
     }
 }
 
@@ -308,12 +315,12 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                //.on_request(DefaultOnRequest::new().level(Level::DEBUG))
                 .on_response(
                     DefaultOnResponse::new()
-                        .level(Level::INFO)
+                        .level(Level::DEBUG)
                         .latency_unit(LatencyUnit::Micros),
-                ), // on so on for `on_eos`, `on_body_chunk`, and `on_failure`
+                ),
         )
         .add_extension(state);
 

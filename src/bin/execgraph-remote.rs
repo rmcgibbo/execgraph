@@ -20,6 +20,10 @@ use whoami::username;
 // https://github.com/SchedMD/slurm/blob/791f9c39e0db919e02ef8857be0faff09a3656b2/src/slurmd/slurmstepd/req.c#L724
 const FINAL_SLURM_ERROR_MESSAGE_STRINGS: &str = "CANCELLED|FAILED|ERROR";
 
+lazy_static::lazy_static! {
+    static ref START_TIME: std::time::Instant = std::time::Instant::now();
+}
+
 #[derive(Debug, Parser)]
 #[clap(name = "execgraph-remote")]
 struct CommandLineArguments {
@@ -48,6 +52,7 @@ struct CommandLineArguments {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
+    lazy_static::initialize(&START_TIME);
     tracing_subscriber::fmt::init();
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
@@ -75,18 +80,12 @@ async fn main() -> Result<(), RemoteError> {
                 .as_bytes(),
         )?,
     );
-    let start = std::time::Instant::now();
-
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .http2_prior_knowledge()
         .build()?;
     let base = reqwest::Url::parse(&opt.url)?;
 
-    let still_accepting_tasks = || match opt.max_time_accepting_tasks {
-        None => true,
-        Some(t) => (std::time::Instant::now() - start) < t,
-    };
     // An infinite stream of SIGERM signals.
     // TODO: there are short sections of the run_command function below where we're not
     // listening on the SIGTERM channel. That's not ideal. The best thing would be to
@@ -98,21 +97,26 @@ async fn main() -> Result<(), RemoteError> {
     // Slurm error logfile events Notify
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
 
-    let start_time = std::time::Instant::now();
     let mut timing_info = TimingInfo::default();
-    while still_accepting_tasks() {
-        match run_command(&opt, &base, &client, &mut sigterms, &mut rx).await {
+    let mut start_response = None;
+    loop {
+        match run_command(&opt, &base, &client, &mut sigterms, &mut rx, start_response).await {
             Err(RemoteError::Connection(e)) => {
                 // break with no error message
                 debug!("{:#?}", e);
                 break;
             }
             result => {
-                timing_info += result?;
+                let (this_timing_info, this_start_response) = result?;
+                timing_info += this_timing_info;
+                start_response = this_start_response;
+                if start_response.is_none() {
+                    break;
+                }
             }
         };
     }
-    let total_duration = std::time::Instant::now() - start_time;
+    let total_duration = std::time::Instant::now() - *START_TIME;
     timing_info.debug_average_times();
     if timing_info.n_commands > 0 {
         tracing::debug!(
@@ -131,24 +135,32 @@ async fn run_command(
     client: &reqwest::Client,
     sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
-) -> Result<TimingInfo, RemoteError> {
+    start: Option<StartResponse>,
+) -> Result<(TimingInfo, Option<StartResponse>), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
     let end_route = base.join("end")?;
     let t_before_start_request = Instant::now();
 
-    let start = client
-        .get(start_route)
-        .json(&StartRequest {
-            runnertypeid: opt.runnertypeid,
-            disconnect_error_message: opt.disconnect_error_message.clone(),
-        })
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<StartResponse>()
-        .await?;
+    let make_start_request = || StartRequest {
+        runnertypeid: opt.runnertypeid,
+        disconnect_error_message: opt.disconnect_error_message.clone(),
+    };
+
+    let start = match start {
+        Some(s) => s,
+        None => {
+            client
+                .get(start_route)
+                .json(&make_start_request())
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<StartResponse>()
+                .await?
+        }
+    };
     let start_time_request_elapsed = Instant::now() - t_before_start_request;
 
     let ping_interval = Duration::from_millis(start.ping_interval_msecs);
@@ -272,17 +284,19 @@ async fn run_command(
                     stdout: "".to_owned(),
                     stderr: format!("No such command: {:#?}", &start.cmdline[0]),
                     values: ValueMaps::new(),
-                    start_request: None,
+                    start_request: still_accepting_tasks(opt).then(make_start_request),
                 })
                 .send() => {
-                    value?.error_for_status()?;
+                    let r = value?
+                        .error_for_status()?
+                        .json::<EndResponse>()
+                        .await?;
+                    return Ok((TimingInfo::default(), r.start_response))
                 }
                 _ = token3.cancelled() => {
                     return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
                 }
             };
-
-            return Ok(TimingInfo::default());
         }
     };
 
@@ -336,7 +350,7 @@ async fn run_command(
                     values: vec![],
                     start_request: None,
                 }).send().await.unwrap();
-            return Err(RemoteError::SIGTERM)
+            return Err(RemoteError::Sigterm)
         },
         _ = sigterms.recv() => {
             // propagate sigterm to child process
@@ -355,9 +369,9 @@ async fn run_command(
                     stderr: slurm_error_logfile_contents,
                     values: vec![],
                     start_request: None,
-                }).send().await.unwrap();
+                }).send().await.ok();
 
-            return Err(RemoteError::SIGTERM)
+            return Err(RemoteError::Sigterm)
         }
     };
     let t_finished = std::time::Instant::now();
@@ -374,23 +388,29 @@ async fn run_command(
             stdout: output.stdout_str(),
             stderr: output.stderr_str(),
             values: output.fd3_values(),
-            start_request: None,
+            start_request: still_accepting_tasks(opt).then(make_start_request),
         })
         .send() => {
-            value?.error_for_status()?;
+            let r = value?.error_for_status()?.json::<EndResponse>().await?;
+            let end_request_elapsed = Instant::now() - t_before_end_request;
+            Ok((TimingInfo {
+                subprocess: time_executing_command,
+                start_request: start_time_request_elapsed,
+                end_request: end_request_elapsed,
+                n_commands: 1,
+            }, r.start_response))
         }
         _ = token3.cancelled() => {
-            return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+            Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
         }
-    };
-    let end_request_elapsed = Instant::now() - t_before_end_request;
+    }
+}
 
-    Ok(TimingInfo {
-        subprocess: time_executing_command,
-        start_request: start_time_request_elapsed,
-        end_request: end_request_elapsed,
-        n_commands: 1,
-    })
+fn still_accepting_tasks(opt: &CommandLineArguments) -> bool {
+    match opt.max_time_accepting_tasks {
+        None => true,
+        Some(t) => (std::time::Instant::now() - *START_TIME) < t,
+    }
 }
 
 #[derive(Default)]
@@ -436,7 +456,7 @@ enum RemoteError {
     PingTimeout(String),
 
     #[error("SIGTERM")]
-    SIGTERM,
+    Sigterm,
 
     #[error("Connection error: {0}")]
     Connection(
@@ -520,6 +540,7 @@ fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
 }
 
 // https://github.com/notify-rs/notify/blob/d7e22791faffb7bd9bd10f031c260ae019d7f474/examples/async_monitor.rs
+#[allow(clippy::drop_ref)]
 fn async_watcher(
     filename: Option<std::path::PathBuf>,
 ) -> notify::Result<(notify::INotifyWatcher, tokio::sync::mpsc::Receiver<String>)> {
@@ -566,6 +587,7 @@ fn async_watcher(
             // take a reference to `tx` to prevent it from getting dropped, so that the recv
             // side of the channel remains in a valid state.
             drop(&tx);
+            unreachable!("This should never get called");
         })?,
     };
     Ok((watcher, rx))

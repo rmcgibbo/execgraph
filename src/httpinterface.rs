@@ -59,6 +59,11 @@ pub struct EndRequest {
     pub start_request: Option<StartRequest>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct EndResponse {
+    pub start_response: Option<StartResponse>,
+}
+
 pub mod vectorize {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::iter::FromIterator;

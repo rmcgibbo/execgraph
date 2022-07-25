@@ -1,8 +1,9 @@
-use arr_macro::arr;
 use slotmap::{DefaultKey, SlotMap};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+
+const NUM_SLOTS: usize = 256;
 
 #[derive(Debug, Copy, Clone)]
 pub struct TimerID {
@@ -13,7 +14,7 @@ pub struct TimerID {
 #[derive(Debug)]
 pub struct TimeWheel<Entry> {
     current: AtomicU8,
-    slots: [Mutex<Option<SlotMap<DefaultKey, Entry>>>; 256],
+    slots: Vec<Mutex<Option<SlotMap<DefaultKey, Entry>>>>,
     duration: Duration,
 }
 
@@ -21,14 +22,14 @@ impl<Entry> TimeWheel<Entry> {
     /// Create a new empty TimeWheel
     pub fn new(duration: Duration) -> Self {
         TimeWheel {
-            slots: arr![Mutex::new(None); 256],
+            slots: std::iter::from_fn(|| Some(Mutex::new(None)) ).take(NUM_SLOTS).collect(),
             current: AtomicU8::new(0u8),
             duration,
         }
     }
 
     pub fn tick_duration(&self) -> Duration {
-        self.duration / 256
+        self.duration / (NUM_SLOTS as u32)
     }
 
     /// Move the wheel by one tick and return all entries in the current slot
@@ -44,7 +45,7 @@ impl<Entry> TimeWheel<Entry> {
         if dur > self.duration {
             panic!("dur {:#?} cannot exceed duration {:#?}", dur, self.duration);
         }
-        let step = ((256 * dur.as_nanos()) / self.duration.as_nanos()) as u8;
+        let step = ((NUM_SLOTS as u64 * dur.as_nanos() as u64) / self.duration.as_nanos() as u64) as u8;
         let pos = self.current.load(Ordering::SeqCst).wrapping_add(step);
         let index = pos as usize;
 
