@@ -20,6 +20,8 @@ pub struct StatusReply {
     #[serde(with = "vectorize")]
     pub queues: HashMap<u64, StatusQueueReply>,
     pub etag: u64,
+    pub p50_latency: HashMap<String, u32>,
+    pub p99_latency: HashMap<String, u32>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct StatusQueueReply {

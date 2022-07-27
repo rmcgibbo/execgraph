@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
             PROVISIONER,
             "#!/bin/sh
             sleep 2
+            curl $1/status
             /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
             /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
             /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &

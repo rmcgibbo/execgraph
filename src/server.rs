@@ -9,26 +9,32 @@ use crate::{
 use anyhow::Result;
 use axum::{
     extract,
+    middleware::Next,
     response::{IntoResponse, Response},
     Extension, Json, Router,
 };
 use dashmap::DashMap;
-use hyper::StatusCode;
+use hyper::{Request, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde_json::json;
-use std::time::Duration;
 use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{sync::Mutex, time::Duration};
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
-use tower_http::{
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
-    LatencyUnit, ServiceBuilderExt,
-};
-use tracing::Level;
+use tower_http::ServiceBuilderExt;
 
 use crate::{constants::PING_INTERVAL_MSECS, logfile2::ValueMaps};
 
 const TIMEWHEEL_DURATION_MSECS: u64 = PING_TIMEOUT_MSECS + 1;
+
+type Histogram = quantiles::ckms::CKMS<u32>;
+
+lazy_static::lazy_static! {
+    static ref END_LATENCY:   Mutex<Histogram> = Mutex::new(Histogram::new(0.01));
+    static ref START_LATENCY: Mutex<Histogram> = Mutex::new(Histogram::new(0.01));
+    static ref BEGUN_LATENCY: Mutex<Histogram> = Mutex::new(Histogram::new(0.01));
+    static ref PING_LATENCY: Mutex<Histogram> = Mutex::new(Histogram::new(0.01));
+}
 
 #[derive(Debug)]
 struct ConnectionState {
@@ -134,9 +140,7 @@ impl IntoResponse for AppError {
             AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
             AppError::RequestError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let body = Json(json!({
-            "message": format!("{:#?}", self)
-        }));
+        let body = Json(json!({ "message": format!("{:#?}", self) }));
 
         (status, body).into_response()
     }
@@ -181,7 +185,88 @@ async fn status_handler(
         })
         .collect::<HashMap<u64, StatusQueueReply>>();
 
-    Ok(Json(StatusReply { queues: resp, etag }))
+    let mut p50_latency = HashMap::new();
+    p50_latency.insert(
+        "ping".to_owned(),
+        (*PING_LATENCY)
+            .lock()
+            .unwrap()
+            .query(0.5)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+    p50_latency.insert(
+        "start".to_owned(),
+        (*START_LATENCY)
+            .lock()
+            .unwrap()
+            .query(0.5)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+    p50_latency.insert(
+        "end".to_owned(),
+        (*END_LATENCY)
+            .lock()
+            .unwrap()
+            .query(0.5)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+    p50_latency.insert(
+        "begun".to_owned(),
+        (*BEGUN_LATENCY)
+            .lock()
+            .unwrap()
+            .query(0.5)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+
+    let mut p99_latency = HashMap::new();
+    p99_latency.insert(
+        "ping".to_owned(),
+        (*PING_LATENCY)
+            .lock()
+            .unwrap()
+            .query(0.99)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+    p99_latency.insert(
+        "start".to_owned(),
+        START_LATENCY
+            .lock()
+            .unwrap()
+            .query(0.99)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+    p99_latency.insert(
+        "end".to_owned(),
+        END_LATENCY
+            .lock()
+            .unwrap()
+            .query(0.99)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+    p99_latency.insert(
+        "begun".to_owned(),
+        BEGUN_LATENCY
+            .lock()
+            .unwrap()
+            .query(0.99)
+            .map(|x| x.1)
+            .unwrap_or(0),
+    );
+
+    Ok(Json(StatusReply {
+        queues: resp,
+        etag,
+        p50_latency,
+        p99_latency,
+    }))
 }
 
 // POST /ping
@@ -308,20 +393,28 @@ async fn end_handler(
     }
 }
 
+async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
+    let start = std::time::Instant::now();
+    let hist = match req.uri().path() {
+        "/end" => Some(&*END_LATENCY),
+        "/begun" => Some(&*BEGUN_LATENCY),
+        "/start" => Some(&*START_LATENCY),
+        "/ping" => Some(&*PING_LATENCY),
+        _ => None,
+    };
+    let out = next.run(req).await;
+    if let Some(hist) = hist {
+        let mut guard = hist.lock().unwrap();
+        guard.insert((std::time::Instant::now() - start).as_micros() as u32);
+    }
+    Ok(out)
+}
+
 pub fn router(state: Arc<State<'static>>) -> Router {
     use axum::routing::{get, post};
 
     let middleware = ServiceBuilder::new()
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().include_headers(true))
-                //.on_request(DefaultOnRequest::new().level(Level::DEBUG))
-                .on_response(
-                    DefaultOnResponse::new()
-                        .level(Level::DEBUG)
-                        .latency_unit(LatencyUnit::Micros),
-                ),
-        )
+        .layer(axum::middleware::from_fn(custom_middleware))
         .add_extension(state);
 
     Router::new()

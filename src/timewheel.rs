@@ -22,7 +22,9 @@ impl<Entry> TimeWheel<Entry> {
     /// Create a new empty TimeWheel
     pub fn new(duration: Duration) -> Self {
         TimeWheel {
-            slots: std::iter::from_fn(|| Some(Mutex::new(None)) ).take(NUM_SLOTS).collect(),
+            slots: std::iter::from_fn(|| Some(Mutex::new(None)))
+                .take(NUM_SLOTS)
+                .collect(),
             current: AtomicU8::new(0u8),
             duration,
         }
@@ -45,7 +47,8 @@ impl<Entry> TimeWheel<Entry> {
         if dur > self.duration {
             panic!("dur {:#?} cannot exceed duration {:#?}", dur, self.duration);
         }
-        let step = ((NUM_SLOTS as u64 * dur.as_nanos() as u64) / self.duration.as_nanos() as u64) as u8;
+        let step =
+            ((NUM_SLOTS as u64 * dur.as_nanos() as u64) / self.duration.as_nanos() as u64) as u8;
         let pos = self.current.load(Ordering::SeqCst).wrapping_add(step);
         let index = pos as usize;
 
