@@ -368,7 +368,7 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/start", get(start_handler))
         .route("/begun", post(begun_handler))
         .route("/end", post(end_handler))
-        .route("/ping", get(ping_handler))
+        .route("/ping", post(ping_handler))
         .route("/status", get(status_handler))
         .layer(middleware.into_inner())
 }
