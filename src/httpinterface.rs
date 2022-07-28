@@ -15,13 +15,18 @@ pub struct StatusRequest {
     pub timeout_ms: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ServerMetrics {
+    pub p50_latency: HashMap<String, u32>,
+    pub p99_latency: HashMap<String, u32>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct StatusReply {
     #[serde(with = "vectorize")]
     pub queues: HashMap<u64, StatusQueueReply>,
     pub etag: u64,
-    pub p50_latency: HashMap<String, u32>,
-    pub p99_latency: HashMap<String, u32>,
+    pub server_metrics: ServerMetrics,
 }
 #[derive(Serialize, Deserialize)]
 pub struct StatusQueueReply {

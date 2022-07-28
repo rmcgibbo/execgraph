@@ -416,11 +416,9 @@ def test_status_1(tmp_path):
     nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
-        x = f.read()
-        assert (
-            x
-            == '{"queues":[[3,{"num_ready":2,"num_inflight":0}]],"etag":1}'
-        )
+        x = json.load(f)
+        del x["server_metrics"]
+        assert x == {"queues":[[3,{"num_ready":2,"num_inflight":0}]],"etag":1}
 
     assert nfailed == 0
 
@@ -470,6 +468,7 @@ def test_queue(tmp_path):
     with open(tmp_path / "resp0.json") as f:
         value = json.load(f)
         value["queues"] = sorted(value["queues"], key=lambda x: str(x[0]))
+        del value["server_metrics"]
         assert value == {
                 "etag": 1,
                 "queues": sorted(

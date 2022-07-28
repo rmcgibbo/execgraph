@@ -185,87 +185,10 @@ async fn status_handler(
         })
         .collect::<HashMap<u64, StatusQueueReply>>();
 
-    let mut p50_latency = HashMap::new();
-    p50_latency.insert(
-        "ping".to_owned(),
-        (*PING_LATENCY)
-            .lock()
-            .unwrap()
-            .query(0.5)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-    p50_latency.insert(
-        "start".to_owned(),
-        (*START_LATENCY)
-            .lock()
-            .unwrap()
-            .query(0.5)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-    p50_latency.insert(
-        "end".to_owned(),
-        (*END_LATENCY)
-            .lock()
-            .unwrap()
-            .query(0.5)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-    p50_latency.insert(
-        "begun".to_owned(),
-        (*BEGUN_LATENCY)
-            .lock()
-            .unwrap()
-            .query(0.5)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-
-    let mut p99_latency = HashMap::new();
-    p99_latency.insert(
-        "ping".to_owned(),
-        (*PING_LATENCY)
-            .lock()
-            .unwrap()
-            .query(0.99)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-    p99_latency.insert(
-        "start".to_owned(),
-        START_LATENCY
-            .lock()
-            .unwrap()
-            .query(0.99)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-    p99_latency.insert(
-        "end".to_owned(),
-        END_LATENCY
-            .lock()
-            .unwrap()
-            .query(0.99)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-    p99_latency.insert(
-        "begun".to_owned(),
-        BEGUN_LATENCY
-            .lock()
-            .unwrap()
-            .query(0.99)
-            .map(|x| x.1)
-            .unwrap_or(0),
-    );
-
     Ok(Json(StatusReply {
         queues: resp,
         etag,
-        p50_latency,
-        p99_latency,
+        server_metrics: collect_server_metrics(),
     }))
 }
 
@@ -390,6 +313,30 @@ async fn end_handler(
         None => Ok(Json(EndResponse {
             start_response: None,
         })),
+    }
+}
+
+fn collect_server_metrics() -> ServerMetrics {
+    let mut p50_latency = HashMap::new();
+    let mut p99_latency = HashMap::new();
+    for (key, hist) in [
+        ("ping", &*PING_LATENCY),
+        ("start", &*START_LATENCY),
+        ("end", &*END_LATENCY),
+        ("begun", &*BEGUN_LATENCY),
+    ] {
+        p50_latency.insert(
+            key.to_owned(),
+            hist.lock().unwrap().query(0.50).map(|x| x.1).unwrap_or(0),
+        );
+        p99_latency.insert(
+            key.to_owned(),
+            hist.lock().unwrap().query(0.99).map(|x| x.1).unwrap_or(0),
+        );
+    }
+    ServerMetrics {
+        p50_latency,
+        p99_latency,
     }
 }
 
