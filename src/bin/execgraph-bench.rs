@@ -33,7 +33,11 @@ async fn main() -> anyhow::Result<()> {
     for i in 0..opt.n_tasks {
         let cmd = Cmd {
             //cmdline: vec![OsString::from("true")],
-            cmdline: vec![OsString::from("sh"), OsString::from("-c"), OsString::from("sleep 60")],
+            cmdline: vec![
+                OsString::from("sh"),
+                OsString::from("-c"),
+                OsString::from("sleep 60"),
+            ],
             key: format!("{}", i),
             display: None,
             env: vec![],

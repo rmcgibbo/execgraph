@@ -64,7 +64,7 @@ pub struct ReadyTrackerServer<'a> {
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile<LogFileRW>,
     ready: Option<[async_priority_channel::Sender<TaskItem, u32>; NUM_RUNNER_TYPES]>,
-    completed: async_channel::Receiver<CompletedEvent>,
+    completed: async_channel::Receiver<Event>,
     n_success: u32,
     n_pending: u32,
     pending_increased_event: Arc<AwaitableCounter>,
@@ -80,7 +80,7 @@ pub struct ReadyTrackerServer<'a> {
 pub struct ReadyTrackerClient {
     queuestate: Arc<DashMap<u64, Snapshot>>,
     pending_increased_event: Arc<AwaitableCounter>,
-    s: async_channel::Sender<CompletedEvent>,
+    s: async_channel::Sender<Event>,
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
 }
 
@@ -160,13 +160,13 @@ impl<'a> ReadyTrackerServer<'a> {
         log::debug!("Draining {} inflight tasks", inflight.len());
         loop {
             match self.completed.try_recv() {
-                Ok(CompletedEvent::Started(e)) => {
+                Ok(Event::Started(e)) => {
                     let cmd = self.g[e.id];
                     self.logfile
                         .write(LogEntry::new_started(&cmd.key, "host", 0))?;
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
-                Ok(CompletedEvent::Finished(e)) => {
+                Ok(Event::Finished(e)) => {
                     // with remote provisioner it's actually possible to get a finished
                     // entry without a started because of the ping_timeout shutdown
                     // cancelation sequence running without a /begun record
@@ -220,6 +220,7 @@ impl<'a> ReadyTrackerServer<'a> {
         .await
         .context("couldn't add to ready queue")?;
         let mut ctrl_c = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut flush_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
 
         // every time we put a task into the ready queue, we increment n_pending.
         // every time a task completes, we decrement n_pending.
@@ -230,6 +231,14 @@ impl<'a> ReadyTrackerServer<'a> {
 
         loop {
             tokio::select! {
+                _ = flush_ticker.tick() => {
+                    // if you have few long-running tasks, it's pretty annoying if the log file doesn't
+                    // update somewhat frequently. flushing every 100ms is a balance between not wanting
+                    // too many syscalls for workflows that are generating thousands of events per second
+                    // and wanting to see the log for ones that are generating one event per hour.
+                    self.logfile.flush()?;
+                    self.stdout.flush()?
+                },
                 event = self.completed.recv() => {
                     if event.is_err() {
                         tracing::error!("{:#?}", event);
@@ -237,7 +246,7 @@ impl<'a> ReadyTrackerServer<'a> {
                         break;
                     }
                     match event.unwrap() {
-                        CompletedEvent::Started(e) => {
+                        Event::Started(e) => {
                             let cmd = self.g[e.id];
                             self.logfile.write(LogEntry::new_started(
                                 &cmd.key,
@@ -246,7 +255,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             ))?;
                             assert!(self.inflight.insert(e.id, Instant::now()).is_none());
                         }
-                        CompletedEvent::Finished(e) => {
+                        Event::Finished(e) => {
                             #[cfg(feature = "coz")]
                             {
                                 coz::progress!();
@@ -505,7 +514,7 @@ impl ReadyTrackerClient {
         cmd.call_preamble();
         let r = self
             .s
-            .send(CompletedEvent::Started(StartedEvent {
+            .send(Event::Started(StartedEvent {
                 id: v,
                 host: host.to_string(),
                 pid,
@@ -529,7 +538,7 @@ impl ReadyTrackerClient {
         cmd.call_postamble();
         let r = self
             .s
-            .send(CompletedEvent::Finished(FinishedEvent {
+            .send(Event::Finished(FinishedEvent {
                 id: v,
                 status,
                 stdout,
@@ -599,7 +608,7 @@ struct FinishedEvent {
     values: ValueMaps,
 }
 #[derive(Debug)]
-enum CompletedEvent {
+enum Event {
     Started(StartedEvent),
     Finished(FinishedEvent),
 }
