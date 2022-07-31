@@ -602,17 +602,6 @@ def test_hang(tmp_path):
         assert len(v) == 3
 
 
-def test_env_1(tmp_path):
-    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(
-        ["sh", "-c", f"echo $foo > {tmp_path}/log.txt"], key="0", env=[("foo", "bar")]
-    )
-    eg.execute()
-
-    with open(tmp_path / "log.txt", "rb") as f:
-        assert f.read() == b"bar\n"
-
-
 def test_newkeyfn_1(tmp_path):
     def fn():
         return "foo"
