@@ -4,7 +4,7 @@ use osstrtools::OsStrTools;
 use pyo3::{
     exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
     prelude::*,
-    types::PyTuple,
+    types::{PyBytes, PyTuple},
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -275,7 +275,7 @@ impl PyExecGraph {
         dependencies = "vec![]",
         display = "None",
         affinity = "1",
-        env = "vec![]",
+        fd_input = "None",
         preamble = "None",
         postamble = "None",
         storage_root = "0"
@@ -288,7 +288,7 @@ impl PyExecGraph {
         dependencies: Vec<u32>,
         display: Option<String>,
         affinity: u64,
-        env: Vec<(OsString, OsString)>,
+        fd_input: Option<(i32, &PyBytes)>,
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
         storage_root: u32,
@@ -298,7 +298,7 @@ impl PyExecGraph {
             cmdline,
             key,
             display,
-            env,
+            fd_input: fd_input.map(|(fd, buf)| (fd, buf.extract::<Vec<u8>>().unwrap())),
             storage_root,
             runcount,
             priority: 0,

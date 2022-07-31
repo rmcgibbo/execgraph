@@ -232,29 +232,42 @@ async fn run_command(
     });
 
     let (read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
+    let (fd4_read_pipe, fd4_write_pipe) = if start.fd_input.is_some() {
+        let (read, write) = tokio_pipe::pipe().expect("Cannot create pipe");
+        (Some(read), Some(write))
+    } else {
+        (None, None)
+    };
+    let mut fd_mapping = vec![
+        // Map the pipe as FD 3 in the child process.
+        FdMapping {
+            parent_fd: write_fd3.as_raw_fd(),
+            child_fd: 3,
+        },
+    ];
+    if fd4_read_pipe.is_some() {
+        fd_mapping.push(FdMapping {
+            parent_fd: fd4_read_pipe.as_ref().unwrap().as_raw_fd(),
+            child_fd: start.fd_input.as_ref().unwrap().0,
+        })
+    };
 
     // Run the command and record the pid
     let mut command = tokio::process::Command::new(&start.cmdline[0]);
     let t_before_spawn = std::time::Instant::now();
     let maybe_child = command
         .args(&start.cmdline[1..])
-        .envs(start.env.iter().cloned())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .fd_mappings(vec![
-            // Map the pipe as FD 3 in the child process.
-            FdMapping {
-                parent_fd: write_fd3.as_raw_fd(),
-                child_fd: 3,
-            },
-        ])
+        .fd_mappings(fd_mapping)
         .unwrap()
         .spawn();
 
     // Deadlock potential: After spawning the command and passing it the
     // write end of the pipe we need to close it ourselves
     drop(write_fd3);
+    drop(fd4_read_pipe);
 
     let child = match maybe_child {
         Ok(child) => child,
@@ -322,7 +335,7 @@ async fn run_command(
 
     // Wait for the command to finish
     let output: ChildOutput = tokio::select! {
-        output = wait_with_output(child, read_fd3) => output.unwrap(),
+        output = wait_with_output(child, read_fd3, start.fd_input.as_ref().map(|(_fd, buf)| (fd4_write_pipe.unwrap(), &buf[..]))) => output.unwrap(),
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
         },

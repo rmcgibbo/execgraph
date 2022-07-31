@@ -258,7 +258,7 @@ fn start_request_impl(state: Arc<State>, request: StartRequest) -> Result<StartR
     Ok(StartResponse {
         transaction_id,
         cmdline: cmd.cmdline.clone(),
-        env: cmd.env.clone(),
+        fd_input: cmd.fd_input.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
     })
 }

@@ -38,7 +38,7 @@ pub struct Cmd {
 
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
-    pub env: Vec<(OsString, OsString)>,
+    pub fd_input: Option<(i32, Vec<u8>)>,
 
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]

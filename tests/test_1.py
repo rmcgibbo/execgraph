@@ -957,3 +957,13 @@ def test_fork_2(tmp_path):
     eg1.add_task(["true"], key="2", dependencies=[1])
     assert eg1.execute() == (0, [])
     del eg1
+
+
+def test_fd_input(tmp_path):
+    eg = _execgraph.ExecGraph(
+        2, logfile=tmp_path / "foo",
+    )
+    eg.add_task(["sh", "-c", f"cat /proc/$$/fd/8 > {tmp_path}/file"], key="0", fd_input=(8, b"hello world"))
+    eg.execute()
+    with open(tmp_path / "file") as f:
+        assert f.read() == "hello world"

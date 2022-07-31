@@ -9,12 +9,13 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
 };
 use tokio_command_fds::{CommandFdExt, FdMapping};
-use tokio_pipe::PipeRead;
+use tokio_pipe::{PipeRead, PipeWrite};
 use tracing::debug;
 
 use crate::{execgraph::Cmd, logfile2::ValueMaps, sync::ReadyTrackerClient};
@@ -38,41 +39,54 @@ pub async fn run_local_process_loop(
     };
 
     while let Ok(subgraph_node_id) = tracker.recv(runnertypeid).await {
-        // we're making a pipe to pass to the child process as fd3.
-        let (pipe_read, pipe_write) = tokio_pipe::pipe().expect("Cannot create pipe");
         let cmd = subgraph[subgraph_node_id];
         cmd.call_preamble();
+
+        // we're making a pipe to pass to the child process as fd3.
+        let (fd3_read_pipe, fd3_write_pipe) = tokio_pipe::pipe().expect("Cannot create pipe");
+        let (fd4_read_pipe, fd4_write_pipe) = if cmd.fd_input.is_some() {
+            let (read, write) = tokio_pipe::pipe().expect("Cannot create pipe");
+            (Some(read), Some(write))
+        } else {
+            (None, None)
+        };
+        let mut fd_mapping = vec![
+            // Map the pipe as FD 3 in the child process.
+            FdMapping {
+                parent_fd: fd3_write_pipe.as_raw_fd(),
+                child_fd: 3,
+            },
+        ];
+        if fd4_read_pipe.is_some() {
+            fd_mapping.push(FdMapping {
+                parent_fd: fd4_read_pipe.as_ref().unwrap().as_raw_fd(),
+                child_fd: cmd.fd_input.as_ref().unwrap().0,
+            })
+        }
 
         let mut command = Command::new(&cmd.cmdline[0]);
         let maybe_child = match &local_queue_type {
             LocalQueueType::NormalLocalQueue => command
                 .args(&cmd.cmdline[1..])
                 .kill_on_drop(true)
-                .envs(cmd.env.iter().cloned())
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
             LocalQueueType::ConsoleQueue => command
                 .args(&cmd.cmdline[1..])
                 .kill_on_drop(true)
-                .envs(cmd.env.iter().cloned())
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit()),
         }
-        .fd_mappings(vec![
-            // Map the pipe as FD 3 in the child process.
-            FdMapping {
-                parent_fd: pipe_write.as_raw_fd(),
-                child_fd: 3,
-            },
-        ])
+        .fd_mappings(fd_mapping)
         .unwrap()
         .spawn();
 
         // Deadlock potential: After spawning the command and passing it the
         // write end of the pipe we need to close it ourselves
-        drop(pipe_write);
+        drop(fd3_write_pipe);
+        drop(fd4_read_pipe);
 
         let start_time = std::time::Instant::now();
         let child = match maybe_child {
@@ -114,7 +128,7 @@ pub async fn run_local_process_loop(
                 debug!("Received cancellation {:#?}", cmd.display);
                 return;
             },
-            output = wait_with_output(child, pipe_read) => {
+            output = wait_with_output(child, fd3_read_pipe, cmd.fd_input.as_ref().map(|(_fd, buf)| (fd4_write_pipe.unwrap(), &buf[..]))) => {
                 output.unwrap()
             }
         };
@@ -141,6 +155,7 @@ pub async fn run_local_process_loop(
 pub async fn wait_with_output(
     mut child: tokio::process::Child,
     fd: PipeRead,
+    write: Option<(PipeWrite, &[u8])>,
 ) -> Result<ChildOutput, ChildProcessError> {
     async fn read_to_end(
         pipe: &mut Option<impl AsyncRead + std::marker::Unpin>,
@@ -151,6 +166,14 @@ pub async fn wait_with_output(
         }
         Ok(buf)
     }
+    async fn write_to_fd(input: Option<(PipeWrite, &[u8])>) -> std::io::Result<()> {
+        if let Some((pipe, buf)) = input {
+            let mut writer = tokio::io::BufWriter::new(pipe);
+            writer.write_all(buf).await?;
+            writer.flush().await?;
+        }
+        Ok(())
+    }
 
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
@@ -159,9 +182,10 @@ pub async fn wait_with_output(
     let f1 = read_to_end(&mut stdout_pipe);
     let f2 = read_to_end(&mut stderr_pipe);
     let f3 = read_to_end(&mut fd);
+    let f4 = write_to_fd(write);
 
-    let (status, stdout, stderr, fd3bytes) =
-        futures::future::try_join4(child.wait(), f1, f2, f3).await?;
+    let (status, stdout, stderr, fd3bytes, _) =
+        futures::future::try_join5(child.wait(), f1, f2, f3, f4).await?;
     drop(stdout_pipe);
     drop(stderr_pipe);
     drop(fd);
