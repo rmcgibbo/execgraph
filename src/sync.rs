@@ -375,6 +375,18 @@ impl<'a> ReadyTrackerServer<'a> {
     }
 
     async fn _finished_bookkeeping_2(&mut self, e: &FinishedEvent) -> Result<()> {
+        if self.shutdown_state == ShutdownState::SoftShutdown {
+            // if we're in a soft shutdown state, that's because we've seen a failure and
+            // we're not submitting any more tasks to the ready queue and we've triggered
+            // a cancellation token to prevent the ready side from even taking any more tasks
+            // out of the ready queue and dispatching them, so there's no point in doing this
+            // bookkeeping and adding new tasks to the ready queue. and frankly we've already
+            // dropped the ready queue channel, so if we keep going in this task there's nothing
+            // we can do with self.ready
+            assert!(self.ready.is_none());
+            return Ok(());
+        }
+
         let is_success = e.status.is_success();
         let statuses = &mut self.statuses;
         let ready = self
