@@ -167,9 +167,10 @@ impl<'a> ReadyTrackerServer<'a> {
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(Event::Finished(e)) => {
-                    // with remote provisioner it's actually possible to get a finished
-                    // entry without a started because of the ping_timeout shutdown
-                    // cancelation sequence running without a /begun record
+                    // With execgraph-remote workers, it's  possible to get a FinishedEvent
+                    // without having previously received a StartedEvent because of the heartbeat
+                    // (ping timeout)-iniated shutdown happening before a /begun request was
+                    // transmitted.
                     if inflight.remove(&e.id).is_some() {
                         let cmd = self.g[e.id];
                         self._finished_bookkeeping_1(&e)?;
@@ -263,12 +264,33 @@ impl<'a> ReadyTrackerServer<'a> {
                             let cmd = self.g[e.id];
                             self.finished_order.push(e.id);
                             self._finished_bookkeeping(&e).await?;
-                            self.logfile.write(LogEntry::new_finished(
-                                &cmd.key,
-                                e.status.as_i32(),
-                                e.values,
-                            ))?;
-                            assert!(self.inflight.remove(&e.id).is_some());
+                            if self.inflight.remove(&e.id).is_some() {
+                                // With execgraph-remote workers, it's  possible to get a FinishedEvent
+                                // without having previously received a StartedEvent because of the heartbeat
+                                // (ping timeout)-caused disconnect happening before /begun request was
+                                // transmitted. Maybe the /begun request was just lost into the ether because
+                                // the task was started on a node that was so slow it never was able to send either
+                                // a ping or a /begun.
+                                //
+                                // But frankly, this is not the right solution. We _should_ write a log entry here.
+                                // We're not because I wanted to preserve the invariant in logfile that every Finished
+                                // entry in the log follows a Started entry -- logfile2.rs panics if that's not true.
+                                // Maybe we should relax that and allow there to be a Finished entry w/o a prior Started
+                                // entry, or better maybe we should just fabricate a fake Started entry.
+                                // Other consumers of the log file probably want that invariant to hold too, so just writing
+                                // a Finished entry w/o a Started entry is risky, and fabricating a fake Started entry is
+                                // probably better.
+                                //
+                                // TODO: FIXME, and also figure out how to test this better.
+                                //
+                                self.logfile.write(LogEntry::new_finished(
+                                    &cmd.key,
+                                    e.status.as_i32(),
+                                    e.values,
+                                ))?;
+                            } else {
+                                tracing::debug!("Possible protocol error. We received a FinishedEvent, but never received a StarteEvent?");
+                            }
 
 
                             if self.n_fizzled >= self.failures_allowed {
