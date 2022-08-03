@@ -8,13 +8,13 @@ use crate::{
 };
 use anyhow::Result;
 use axum::{
-    extract,
+    extract::{self},
     middleware::Next,
     response::{IntoResponse, Response},
     Extension, Json, Router,
 };
 use dashmap::DashMap;
-use hyper::{Request, StatusCode};
+use hyper::{Body, Request, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc, time::Instant};
@@ -22,6 +22,7 @@ use std::{sync::Mutex, time::Duration};
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
 use tower_http::ServiceBuilderExt;
+use tracing::{error, Span};
 
 use crate::{constants::PING_INTERVAL_MSECS, logfile2::ValueMaps};
 
@@ -124,7 +125,6 @@ impl<'a> State<'a> {
 
 #[derive(Debug)]
 enum AppError {
-    NotFound,
     Shutdown,
     NoSuchTransaction,
     NoSuchRunnerType,
@@ -134,7 +134,6 @@ enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
-            AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Shutdown => StatusCode::GONE,
             AppError::NoSuchTransaction => StatusCode::NOT_FOUND,
             AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
@@ -200,10 +199,10 @@ async fn ping_handler(
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    let mut cstate = state
-        .connections
-        .get_mut(&request.transaction_id)
-        .ok_or(AppError::NotFound)?;
+    let mut cstate = match state.connections.get_mut(&request.transaction_id) {
+        Some(cstate) => cstate,
+        None => return Ok((StatusCode::OK, "").into_response()),
+    };
 
     cstate.value_mut().timer_id = {
         state.timeouts.cancel(cstate.value().timer_id);
@@ -272,11 +271,11 @@ async fn begun_handler(
         .connections
         .get_mut(&request.transaction_id)
         .ok_or(AppError::NoSuchTransaction)?;
+
     state
         .tracker
         .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
         .await;
-
     Ok((StatusCode::OK, "").into_response())
 }
 
@@ -340,6 +339,18 @@ fn collect_server_metrics() -> ServerMetrics {
     }
 }
 
+async fn fallback(
+    method: hyper::Method,
+    uri: hyper::Uri,
+    body: axum::body::Bytes,
+) -> (StatusCode, String) {
+    error!("/404 method={} url={} body={:?}", method, uri, body);
+    (
+        StatusCode::NOT_FOUND,
+        format!("`{}` not allowed for {}", method, uri),
+    )
+}
+
 async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response, StatusCode> {
     let start = std::time::Instant::now();
     let hist = match req.uri().path() {
@@ -358,10 +369,33 @@ async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response
 }
 
 pub fn router(state: Arc<State<'static>>) -> Router {
+    use axum::handler::Handler;
     use axum::routing::{get, post};
+    use tower_http::trace::TraceLayer;
+    use tower_http::trace::{DefaultOnEos, DefaultOnFailure, DefaultOnResponse};
+    use tracing::Level;
 
     let middleware = ServiceBuilder::new()
         .layer(axum::middleware::from_fn(custom_middleware))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|_request: &Request<Body>| tracing::info_span!("http-request {}",))
+                .on_request(|request: &Request<Body>, _span: &Span| {
+                    tracing::info!(
+                        "started {:?} {} {}",
+                        request.headers(),
+                        request.method(),
+                        request.uri().path()
+                    )
+                })
+                .on_response(
+                    DefaultOnResponse::new()
+                        .include_headers(true)
+                        .level(Level::INFO),
+                )
+                .on_failure(DefaultOnFailure::new().level(Level::INFO))
+                .on_eos(DefaultOnEos::new().level(Level::INFO)),
+        )
         .add_extension(state);
 
     Router::new()
@@ -370,5 +404,6 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/end", post(end_handler))
         .route("/ping", post(ping_handler))
         .route("/status", get(status_handler))
+        .fallback(fallback.into_service())
         .layer(middleware.into_inner())
 }

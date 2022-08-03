@@ -8,6 +8,7 @@
 , networkx
 , curl
 , crane
+, toxiproxy
 }:
 
 let
@@ -72,6 +73,7 @@ in buildPythonPackage rec {
   '';
 
   checkInputs = [
+    toxiproxy
     pytest
     numpy
     scipy

@@ -440,6 +440,28 @@ fn write_logfile(path: std::path::PathBuf, value: &PyAny) -> PyResult<()> {
 pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
     tracing_subscriber::fmt::init();
 
+    // // Log to file
+    // let file_appender = RollingFileAppender::new(
+    //     Rotation::NEVER,
+    //     crate::constants::FAIL_COMMAND_PREFIX,
+    //     "execgraph.log",
+    // );
+    // let (non_blocking_appender, guard) = tracing_appender::non_blocking(file_appender);
+    // std::mem::forget(guard); // LEAK ME
+    // let file_layer = tracing_subscriber::fmt::layer()
+    //     .with_writer(non_blocking_appender)
+    //     .with_filter(
+    //         tracing_subscriber::EnvFilter::try_from_env(tracing_subscriber::EnvFilter::DEFAULT_ENV)
+    //             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    //     );
+    // // Log to console
+    // let fmt_layer =
+    //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::ERROR);
+    // tracing_subscriber::registry()
+    //     .with(fmt_layer)
+    //     .with(file_layer)
+    //     .init();
+
     m.add_class::<PyExecGraph>()?;
     m.add_function(wrap_pyfunction!(test_make_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(load_logfile, m)?)?;

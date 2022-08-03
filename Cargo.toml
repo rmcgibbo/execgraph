@@ -65,7 +65,8 @@ quantiles = "0.7.1"
 url = "2.2.2"
 whoami = "1.2.1"
 tracing = "0.1.35"
-tracing-subscriber = "0.3.15"
+# tracing-appender = "0.2.2"
+tracing-subscriber = { version = "0.3.15", features = ["env-filter"] }
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
 # to run rust tests, need to do ``$ cargo test --no-default-features``

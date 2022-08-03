@@ -54,6 +54,11 @@ struct CommandLineArguments {
 async fn main() -> Result<(), RemoteError> {
     lazy_static::initialize(&START_TIME);
     tracing_subscriber::fmt::init();
+    // use tracing_subscriber::prelude::*;
+    // let fmt_layer =
+    //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::INFO);
+    // tracing_subscriber::registry().with(fmt_layer).init();
+
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
     let opt = CommandLineArguments::from_args();
@@ -189,6 +194,7 @@ async fn run_command(
                 _ = interval.tick() => {
                     match client1.post(ping_route.clone())
                         .json(&Ping{transaction_id})
+                        .header("x-execgraph-txid", transaction_id)
                         .send()
                         .await {
                             Ok(r) if r.status() == StatusCode::OK => {
@@ -275,6 +281,7 @@ async fn run_command(
             // Tell the server that we've started the command
             tokio::select! {
                 value = client.post(begun_route)
+                .header("x-execgraph-txid", transaction_id)
                 .json(&BegunRequest{
                     transaction_id,
                     host: gethostname().to_string_lossy().to_string(),
@@ -284,13 +291,14 @@ async fn run_command(
                     value?.error_for_status()?;
                 }
                 _ = token3.cancelled() => {
-                    return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+                    return Err(RemoteError::PingTimeout("Failed to receive server pong (290)".to_owned()))
                 }
             };
 
             // Tell the server that we've finished the command
             tokio::select! {
                 value = client.post(end_route)
+                .header("x-execgraph-txid", transaction_id)
                 .json(&EndRequest{
                     transaction_id,
                     status: 127,
@@ -307,7 +315,7 @@ async fn run_command(
                     return Ok((TimingInfo::default(), r.start_response))
                 }
                 _ = token3.cancelled() => {
-                    return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+                    return Err(RemoteError::PingTimeout("Failed to receive server pong (313)".to_owned()))
                 }
             };
         }
@@ -329,7 +337,7 @@ async fn run_command(
             value?.error_for_status()?;
         }
         _ = token3.cancelled() => {
-            return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+            return Err(RemoteError::PingTimeout("Failed to receive server pong (335)".to_owned()))
         }
     };
 
@@ -337,7 +345,7 @@ async fn run_command(
     let output: ChildOutput = tokio::select! {
         output = wait_with_output(child, read_fd3, start.fd_input.as_ref().map(|(_fd, buf)| (fd4_write_pipe.unwrap(), &buf[..]))) => output.unwrap(),
         _ = token3.cancelled() => {
-            return Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+            return Err(RemoteError::PingTimeout("Failed to receive server pong (343)".to_owned()))
         },
         maybe_slurm_error_message = notify_rx.recv() => {
             let slurm_error_message = maybe_slurm_error_message.unwrap_or_else(||"Logic error. This channel should not have been dropped.".to_string());
@@ -405,6 +413,7 @@ async fn run_command(
         })
         .send() => {
             let r = value?.error_for_status()?.json::<EndResponse>().await?;
+            token3.cancel();
             let end_request_elapsed = Instant::now() - t_before_end_request;
             Ok((TimingInfo {
                 subprocess: time_executing_command,
@@ -414,7 +423,7 @@ async fn run_command(
             }, r.start_response))
         }
         _ = token3.cancelled() => {
-            Err(RemoteError::PingTimeout("Failed to receive server pong".to_owned()))
+            Err(RemoteError::PingTimeout("Failed to receive server pong (420)".to_owned()))
         }
     }
 }

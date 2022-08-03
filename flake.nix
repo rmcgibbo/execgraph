@@ -43,8 +43,7 @@
           numpy
           scipy
           curl
-
-          protobuf
+          toxiproxy
         ] ++ [ pkgs.coz ];
       };
     });
