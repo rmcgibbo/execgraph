@@ -53,6 +53,8 @@ impl ResponseExt for reqwest::Response {
             CompressionType::LZ4 => {
                 let mut decomp = vec![0; bytes.len()];
                 lz4::decompress(&bytes, &mut decomp)?;
+                let n = lz4::decompress(&bytes, &mut decomp)?;
+                decomp.truncate(n);
                 decomp
             }
             CompressionType::Uncompresed => bytes.to_vec(),

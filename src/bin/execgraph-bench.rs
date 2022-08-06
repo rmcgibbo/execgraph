@@ -32,38 +32,47 @@ async fn main() -> anyhow::Result<()> {
 
     for i in 0..opt.n_tasks {
         let cmd = Cmd {
-            //cmdline: vec![OsString::from("true")],
-            cmdline: vec![
-                OsString::from("sh"),
-                OsString::from("-c"),
-                OsString::from("sleep 60"),
-            ],
+            cmdline: vec![OsString::from("true")],
+            // cmdline: vec![
+            //     OsString::from("sh"),
+            //     OsString::from("-c"),
+            //     OsString::from("sleep 1"),
+            // ],
             key: format!("{}", i),
             display: None,
-            env: vec![],
             storage_root: 0,
             runcount: 0,
             priority: 0,
             affinity: BitArray::<u64>::new(1),
             preamble: None,
             postamble: None,
+            fd_input: None,
         };
         graph.add_task(cmd, vec![])?;
     }
 
+    let execgraph_remote = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("execgraph-remote");
+
     let provisioner = if opt.n_remote > 0 {
         std::fs::write(
             PROVISIONER,
-            "#!/bin/sh
-            sleep 2
-            curl $1/status
-            /home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            #/home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            #/home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            #/home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            #/home/mcgibbon/projects/execgraph/target/release/execgraph-remote $1 0 &
-            wait
+            format!(
+                "#!/bin/sh
+sleep 2
+echo $1
+curl $1/status
+for i in $(seq {0}); do
+    {1} $1 0 &
+done
+wait
         ",
+                opt.n_remote,
+                execgraph_remote.display().to_string()
+            ),
         )?;
         std::fs::set_permissions(PROVISIONER, std::fs::Permissions::from_mode(0o755))?;
         Some(RemoteProvisionerSpec {

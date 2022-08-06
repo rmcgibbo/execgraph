@@ -360,7 +360,7 @@ async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response
     let out = next.run(req).await;
     if let Some(hist) = hist {
         let mut guard = hist.lock().unwrap();
-        guard.insert((std::time::Instant::now() - start).as_micros() as u32);
+        guard.insert(start.elapsed().as_micros() as u32);
     }
     Ok(out)
 }
@@ -369,14 +369,17 @@ pub fn router(state: Arc<State<'static>>) -> Router {
     use axum::handler::Handler;
     use axum::routing::{get, post};
     use tower_http::trace::TraceLayer;
-    use tower_http::trace::{DefaultOnEos, DefaultOnFailure, DefaultOnResponse};
+    use tower_http::trace::{DefaultOnEos, DefaultOnFailure};
     use tracing::Level;
 
     let middleware = ServiceBuilder::new()
         .layer(axum::middleware::from_fn(custom_middleware))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(|_request: &Request<Body>| tracing::info_span!("http-request {}",))
+                .make_span_with(|request: &Request<Body>| {
+                    let ray = rand::random::<u32>();
+                    tracing::info_span!("req", "uri" = request.uri().path(), "id" = ray)
+                })
                 .on_request(|request: &Request<Body>, _span: &Span| {
                     tracing::info!(
                         "started {:?} {} {}",
@@ -385,11 +388,13 @@ pub fn router(state: Arc<State<'static>>) -> Router {
                         request.uri().path()
                     )
                 })
-                .on_response(
-                    DefaultOnResponse::new()
-                        .include_headers(true)
-                        .level(Level::INFO),
-                )
+                .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
+                    tracing::info!(
+                        "status={} latency={:?}",
+                        response.status().as_u16(),
+                        latency
+                    )
+                })
                 .on_failure(DefaultOnFailure::new().level(Level::INFO))
                 .on_eos(DefaultOnEos::new().level(Level::INFO)),
         )
