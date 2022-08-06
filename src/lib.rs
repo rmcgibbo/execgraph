@@ -7,6 +7,7 @@ pub mod logfile2;
 #[cfg(feature = "pyo3")]
 pub mod pylib;
 
+pub mod http_extensions;
 mod server;
 pub mod sync;
 mod timewheel;

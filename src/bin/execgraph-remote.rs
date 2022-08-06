@@ -1,6 +1,7 @@
 use async_channel::bounded;
 use clap::Parser;
 use execgraph::{
+    http_extensions::reqwest::{RequestBuilderExt, ResponseExt},
     httpinterface::*,
     localrunner::{wait_with_output, ChildOutput, ChildProcessError},
     logfile2::ValueMaps,
@@ -9,6 +10,7 @@ use gethostname::gethostname;
 use hyper::StatusCode;
 use log::{debug, warn};
 use notify::Watcher;
+use reqwest::header::{HeaderMap, HeaderValue};
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
@@ -35,7 +37,7 @@ struct CommandLineArguments {
 
     /// Stop accepting new tasks after this amount of time, in seconds.
     #[clap(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
-    max_time_accepting_tasks: Option<std::time::Duration>,
+    max_time_accepting_tasks: Option<Duration>,
 
     /// Path to the log file where slurmstepd will write errors. This should be a file
     /// on a local disk, so that we can watch it with inotify and report back any errors
@@ -62,18 +64,18 @@ async fn main() -> Result<(), RemoteError> {
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
     let opt = CommandLineArguments::from_args();
-    let mut headers = reqwest::header::HeaderMap::new();
+    let mut headers = HeaderMap::new();
     headers.insert(
         "X-EXECGRAPH-USERNAME",
-        reqwest::header::HeaderValue::from_bytes(username().as_bytes())?,
+        HeaderValue::from_bytes(username().as_bytes())?,
     );
     headers.insert(
         "X-EXECGRAPH-SLURM-JOB-ID",
-        reqwest::header::HeaderValue::from_bytes(slurm_jobid.as_bytes())?,
+        HeaderValue::from_bytes(slurm_jobid.as_bytes())?,
     );
     headers.insert(
         "X-EXECGRAPH-HOSTNAME",
-        reqwest::header::HeaderValue::from_bytes(
+        HeaderValue::from_bytes(
             gethostname()
                 .to_str()
                 .ok_or_else(|| {
@@ -88,6 +90,8 @@ async fn main() -> Result<(), RemoteError> {
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .http2_prior_knowledge()
+        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_secs(5))
         .build()?;
     let base = reqwest::Url::parse(&opt.url)?;
 
@@ -158,11 +162,11 @@ async fn run_command(
         None => {
             client
                 .get(start_route)
-                .json(&make_start_request())
+                .postcard(&make_start_request())?
                 .send()
                 .await?
                 .error_for_status()?
-                .json::<StartResponse>()
+                .postcard::<StartResponse>()
                 .await?
         }
     };
@@ -193,8 +197,8 @@ async fn run_command(
             tokio::select! {
                 _ = interval.tick() => {
                     match client1.post(ping_route.clone())
-                        .json(&Ping{transaction_id})
-                        .header("x-execgraph-txid", transaction_id)
+                        .postcard(&Ping{transaction_id})
+                        .expect("Unable to encode ping as postcard?")
                         .send()
                         .await {
                             Ok(r) if r.status() == StatusCode::OK => {
@@ -281,12 +285,11 @@ async fn run_command(
             // Tell the server that we've started the command
             tokio::select! {
                 value = client.post(begun_route)
-                .header("x-execgraph-txid", transaction_id)
-                .json(&BegunRequest{
+                .postcard(&BegunRequest{
                     transaction_id,
                     host: gethostname().to_string_lossy().to_string(),
                     pid: 0,
-                })
+                })?
                 .send() => {
                     value?.error_for_status()?;
                 }
@@ -298,19 +301,18 @@ async fn run_command(
             // Tell the server that we've finished the command
             tokio::select! {
                 value = client.post(end_route)
-                .header("x-execgraph-txid", transaction_id)
-                .json(&EndRequest{
+                .postcard(&EndRequest{
                     transaction_id,
                     status: 127,
                     stdout: "".to_owned(),
                     stderr: format!("No such command: {:#?}", &start.cmdline[0]),
                     values: ValueMaps::new(),
                     start_request: still_accepting_tasks(opt).then(make_start_request),
-                })
+                })?
                 .send() => {
                     let r = value?
                         .error_for_status()?
-                        .json::<EndResponse>()
+                        .postcard::<EndResponse>()
                         .await?;
                     return Ok((TimingInfo::default(), r.start_response))
                 }
@@ -328,11 +330,11 @@ async fn run_command(
     // Tell the server that we've started the command
     tokio::select! {
         value = client.post(begun_route)
-        .json(&BegunRequest{
+        .postcard(&BegunRequest{
             transaction_id,
             host: gethostname().to_string_lossy().to_string(),
             pid,
-        })
+        })?
         .send() => {
             value?.error_for_status()?;
         }
@@ -363,14 +365,14 @@ async fn run_command(
 
             // send a notification back to the controller if possible
             client.post(end_route)
-                .json(&EndRequest {
+                .postcard(&EndRequest {
                     transaction_id,
                     status: 128+16,
                     stdout: "".to_string(),
                     stderr: slurm_error_message,
                     values: vec![],
                     start_request: None,
-                }).send().await.unwrap();
+                })?.send().await.unwrap();
             return Err(RemoteError::Sigterm)
         },
         _ = sigterms.recv() => {
@@ -383,14 +385,14 @@ async fn run_command(
             };
             // send a notification back to the controller if possible
             client.post(end_route)
-                .json(&EndRequest {
+                .postcard(&EndRequest {
                     transaction_id,
                     status: 128+15,
                     stdout: "".to_string(),
                     stderr: slurm_error_logfile_contents,
                     values: vec![],
                     start_request: None,
-                }).send().await.ok();
+                })?.send().await.ok();
 
             return Err(RemoteError::Sigterm)
         }
@@ -401,18 +403,17 @@ async fn run_command(
     let t_before_end_request = Instant::now();
 
     // Tell the server that we've finished the command
+    let end_request = EndRequest {
+        transaction_id,
+        status: output.code().as_i32(),
+        stdout: output.stdout_str(),
+        stderr: output.stderr_str(),
+        values: output.fd3_values(),
+        start_request: still_accepting_tasks(opt).then(make_start_request),
+    };
     tokio::select! {
-        value = client.post(end_route)
-        .json(&EndRequest{
-            transaction_id,
-            status: output.code().as_i32(),
-            stdout: output.stdout_str(),
-            stderr: output.stderr_str(),
-            values: output.fd3_values(),
-            start_request: still_accepting_tasks(opt).then(make_start_request),
-        })
-        .send() => {
-            let r = value?.error_for_status()?.json::<EndResponse>().await?;
+        value = client.post(end_route).postcard(&end_request)?.send() => {
+            let r = value?.error_for_status()?.postcard::<EndResponse>().await?;
             token3.cancel();
             let end_request_elapsed = Instant::now() - t_before_end_request;
             Ok((TimingInfo {
@@ -508,6 +509,13 @@ enum RemoteError {
         std::str::Utf8Error,
     ),
 
+    #[error("JsonError: {0}")]
+    JsonError(
+        #[from]
+        #[source]
+        serde_json::Error,
+    ),
+
     #[error("IoError: {0}")]
     IoError(
         #[from]
@@ -521,6 +529,13 @@ enum RemoteError {
         #[source]
         notify::Error,
     ),
+
+    #[error("AnyhowError: {0}")]
+    AnyhowError(
+        #[from]
+        #[source]
+        anyhow::Error,
+    ),
 }
 
 impl From<ChildProcessError> for RemoteError {
@@ -529,9 +544,9 @@ impl From<ChildProcessError> for RemoteError {
     }
 }
 
-fn parse_seconds(s: &str) -> anyhow::Result<std::time::Duration> {
+fn parse_seconds(s: &str) -> anyhow::Result<Duration> {
     let x = s.parse::<u64>()?;
-    Ok(std::time::Duration::new(x, 0))
+    Ok(Duration::new(x, 0))
 }
 
 fn parse_slurm_error_logfile(s: &str) -> anyhow::Result<std::path::PathBuf> {

@@ -1,6 +1,7 @@
 use crate::{
     constants::PING_TIMEOUT_MSECS,
     execgraph::Cmd,
+    http_extensions::axum::Postcard,
     httpinterface::*,
     sync::{ExitStatus, ReadyTrackerClient},
     timewheel::{TimeWheel, TimerID},
@@ -8,7 +9,6 @@ use crate::{
 };
 use anyhow::Result;
 use axum::{
-    extract::{self},
     middleware::Next,
     response::{IntoResponse, Response},
     Extension, Json, Router,
@@ -128,7 +128,6 @@ enum AppError {
     Shutdown,
     NoSuchTransaction,
     NoSuchRunnerType,
-    RequestError(hyper::Error),
 }
 
 impl IntoResponse for AppError {
@@ -137,7 +136,6 @@ impl IntoResponse for AppError {
             AppError::Shutdown => StatusCode::GONE,
             AppError::NoSuchTransaction => StatusCode::NOT_FOUND,
             AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
-            AppError::RequestError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let body = Json(json!({ "message": format!("{:#?}", self) }));
 
@@ -150,18 +148,17 @@ impl IntoResponse for AppError {
 // GET /status
 async fn status_handler(
     Extension(state): Extension<Arc<State<'static>>>,
-    extract::RawBody(payload): extract::RawBody,
+    payload: Option<Json<StatusRequest>>,
 ) -> Result<Json<StatusReply>, AppError> {
-    let request = serde_json::from_slice(
-        &hyper::body::to_bytes(payload)
-            .await
-            .map_err(AppError::RequestError)?,
-    )
-    .unwrap_or(StatusRequest {
-        timeout_ms: 0,
-        timemin_ms: 0,
-        etag: 0,
-    });
+    let request = match payload {
+        None => StatusRequest {
+            timeout_ms: 0,
+            timemin_ms: 0,
+            etag: 0,
+        },
+        Some(Json(r)) => r,
+    };
+
     let (etag, snapshot) = state
         .tracker
         .get_queuestate(
@@ -194,7 +191,7 @@ async fn status_handler(
 // POST /ping
 async fn ping_handler(
     Extension(state): Extension<Arc<State<'static>>>,
-    extract::Json(request): extract::Json<Ping>,
+    Postcard(request): Postcard<Ping>,
 ) -> Result<Response, AppError> {
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -218,9 +215,9 @@ async fn ping_handler(
 // GET /start
 async fn start_handler(
     Extension(state): Extension<Arc<State<'static>>>,
-    extract::Json(request): extract::Json<StartRequest>,
-) -> Result<Json<StartResponse>, AppError> {
-    Ok(Json(start_request_impl(state, request)?))
+    Postcard(request): Postcard<StartRequest>,
+) -> Result<Postcard<StartResponse>, AppError> {
+    Ok(Postcard(start_request_impl(state, request)?))
 }
 
 fn start_request_impl(state: Arc<State>, request: StartRequest) -> Result<StartResponse, AppError> {
@@ -265,7 +262,7 @@ fn start_request_impl(state: Arc<State>, request: StartRequest) -> Result<StartR
 // POST /begun
 async fn begun_handler(
     Extension(state): Extension<Arc<State<'static>>>,
-    extract::Json(request): extract::Json<BegunRequest>,
+    Postcard(request): Postcard<BegunRequest>,
 ) -> Result<Response, AppError> {
     let cstate = state
         .connections
@@ -282,8 +279,8 @@ async fn begun_handler(
 // POST /end
 async fn end_handler(
     Extension(state): Extension<Arc<State<'static>>>,
-    extract::Json(request): extract::Json<EndRequest>,
-) -> Result<Json<EndResponse>, AppError> {
+    Postcard(request): Postcard<EndRequest>,
+) -> Result<Postcard<EndResponse>, AppError> {
     let cstate = {
         let (_transaction_id, cstate) = state
             .connections
@@ -306,10 +303,10 @@ async fn end_handler(
         .await;
 
     match request.start_request {
-        Some(start_request) => Ok(Json(EndResponse {
+        Some(start_request) => Ok(Postcard(EndResponse {
             start_response: Some(start_request_impl(state, start_request)?),
         })),
-        None => Ok(Json(EndResponse {
+        None => Ok(Postcard(EndResponse {
             start_response: None,
         })),
     }

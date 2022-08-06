@@ -43,7 +43,6 @@ pub struct StartRequest {
 #[derive(Serialize, Deserialize)]
 pub struct StartResponse {
     pub transaction_id: u32,
-    // TODO: OsString is ugly in the json. can we just use regular utf-8 String?
     pub cmdline: Vec<OsString>,
     pub fd_input: Option<(i32, Vec<u8>)>,
     pub ping_interval_msecs: u64,

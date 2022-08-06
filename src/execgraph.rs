@@ -569,7 +569,6 @@ fn get_subgraph<'a, 'b: 'a>(
         trace!("Writing backref for key={}", key);
         logfile.write(LogEntry::new_backref(&key))?;
         completed.insert(key);
-        // TODO: do we need to do anything more?
     }
 
     Ok(filtered_subgraph)
