@@ -360,7 +360,7 @@ impl<'a> ReadyTrackerServer<'a> {
             writeln!(
                 self.stdout,
                 "[{}/{}] {}",
-                self.n_success + self.count_offset,
+                self.n_success + self.n_failed + self.count_offset,
                 total + self.count_offset,
                 cmd.display()
             )?;
