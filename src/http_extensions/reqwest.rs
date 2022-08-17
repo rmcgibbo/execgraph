@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
 use axum::async_trait;
-use lzzzz::lz4;
+use lzzzz::lz4f;
 use reqwest::header::{HeaderMap, CONTENT_ENCODING, CONTENT_TYPE};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use super::common::{
     get_compression, get_content_type, CompressionType, SerdeType, APPLICATION_POSTCARD, LZ4,
-    SMALL_REQUEST_SIZE_NO_COMPRESSION,
+    LZ4_ENCODING_PREFS, SMALL_REQUEST_SIZE_NO_COMPRESSION,
 };
 
 pub trait RequestBuilderExt {
@@ -26,7 +26,7 @@ impl RequestBuilderExt for reqwest::RequestBuilder {
         let bytes = postcard::to_allocvec(data)?;
         let compressed = if bytes.len() > SMALL_REQUEST_SIZE_NO_COMPRESSION {
             let mut compressed = Vec::new();
-            lz4::compress_to_vec(&bytes, &mut compressed, lzzzz::lz4::ACC_LEVEL_DEFAULT)?;
+            lz4f::compress_to_vec(&bytes, &mut compressed, &LZ4_ENCODING_PREFS)?;
             headers.insert(CONTENT_ENCODING, LZ4.clone());
             compressed
         } else {
@@ -51,10 +51,8 @@ impl ResponseExt for reqwest::Response {
 
         let decomp = match compression {
             CompressionType::LZ4 => {
-                let mut decomp = vec![0; bytes.len()];
-                lz4::decompress(&bytes, &mut decomp)?;
-                let n = lz4::decompress(&bytes, &mut decomp)?;
-                decomp.truncate(n);
+                let mut decomp = vec![];
+                lz4f::decompress_to_vec(&bytes, &mut decomp)?;
                 decomp
             }
             CompressionType::Uncompresed => bytes.to_vec(),

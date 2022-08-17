@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::BoxError;
 use hyper::header;
-use lzzzz::lz4;
+use lzzzz::lz4f;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -18,6 +18,7 @@ use thiserror::Error;
 
 use super::common::APPLICATION_POSTCARD;
 use super::common::LZ4;
+use super::common::LZ4_ENCODING_PREFS;
 use super::common::{
     get_compression, get_content_type, CompressionType, SerdeType,
     SMALL_REQUEST_SIZE_NO_COMPRESSION,
@@ -29,7 +30,7 @@ pub enum PostcardRejection {
     DecompressionError(
         #[source]
         #[from]
-        lzzzz::Error,
+        lz4f::Error,
     ),
 
     #[error("Bytes rejection : {0}")]
@@ -65,6 +66,7 @@ pub enum PostcardRejection {
 
 impl IntoResponse for PostcardRejection {
     fn into_response(self) -> axum::response::Response {
+        tracing::error!("Bad request {:#?}", self);
         (StatusCode::BAD_REQUEST, format!("{}", self)).into_response()
     }
 }
@@ -85,9 +87,8 @@ where
         let content_type = get_content_type(req.headers());
         let decomp = match compression {
             CompressionType::LZ4 => {
-                let mut decomp = vec![0; bytes.len()];
-                let n = lz4::decompress(&bytes, &mut decomp)?;
-                decomp.truncate(n);
+                let mut decomp = vec![];
+                lz4f::decompress_to_vec(&bytes, &mut decomp)?;
                 decomp
             }
             CompressionType::Uncompresed => bytes.to_vec(),
@@ -116,11 +117,7 @@ impl<T: Serialize + Sized> IntoResponse for Postcard<T> {
             }
             Ok(bytes) => {
                 let mut compressed = Vec::new();
-                match lzzzz::lz4::compress_to_vec(
-                    &bytes,
-                    &mut compressed,
-                    lzzzz::lz4::ACC_LEVEL_DEFAULT,
-                ) {
+                match lz4f::compress_to_vec(&bytes, &mut compressed, &LZ4_ENCODING_PREFS) {
                     Ok(_) => {
                         let mut res = (StatusCode::OK, compressed).into_response();
                         res.headers_mut()

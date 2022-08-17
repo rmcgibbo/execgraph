@@ -19,10 +19,10 @@
       };
     in
     {
-      defaultPackage = pkgs.python3.pkgs.execgraph;
+      defaultPackage = pkgs.python310.pkgs.execgraph;
 
       devShell = pkgs.mkShell rec {
-        buildInputs = with pkgs; with python39Packages; [
+        buildInputs = with pkgs; with python310Packages; [
           cargo
           rustc
           clippy

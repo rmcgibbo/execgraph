@@ -3,6 +3,7 @@ use hyper::{
     header::{self},
     HeaderMap,
 };
+use lzzzz::lz4f;
 pub const SMALL_REQUEST_SIZE_NO_COMPRESSION: usize = 128;
 
 lazy_static::lazy_static! {
@@ -11,6 +12,9 @@ pub static ref APPLICATION_POSTCARD: header::HeaderValue =
 pub static ref LZ4: header::HeaderValue = header::HeaderValue::from_static("lz4");
 pub static ref APPLICATION_JSON: header::HeaderValue =
     header::HeaderValue::from_static("application/json");
+pub static ref LZ4_ENCODING_PREFS: lz4f::Preferences = lz4f::PreferencesBuilder::new()
+    .content_checksum(lz4f::ContentChecksum::Enabled)
+    .build();
 }
 
 pub enum SerdeType {
