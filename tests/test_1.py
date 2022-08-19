@@ -8,10 +8,9 @@ import sys
 import threading
 import time
 import subprocess
+from typing import Optional
 from collections import defaultdict
 from pprint import pprint
-
-from distutils.spawn import find_executable
 
 import networkx as nx
 import numpy as np
@@ -26,7 +25,12 @@ if os.path.exists("target/debug/libexecgraph.so"):
 
 import execgraph as _execgraph
 
-# print(dir(_execgraph))
+
+def find_executable(name: str) -> Optional[str]:
+    for dir in os.environ["PATH"].split(":"):
+        if name in os.listdir(dir):
+            return os.path.join(dir, name)
+    return None
 
 
 @pytest.fixture

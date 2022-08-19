@@ -4,7 +4,7 @@ import signal
 import subprocess
 import sys
 import time
-from distutils.spawn import find_executable
+from typing import Optional
 
 import networkx as nx
 import numpy as np
@@ -12,6 +12,14 @@ import pytest
 import scipy.sparse
 
 os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"
+
+
+def find_executable(name: str) -> Optional[str]:
+    for dir in os.environ["PATH"].split(":"):
+        if name in os.listdir(dir):
+            return os.path.join(dir, name)
+    return None
+
 
 def random_dag(seed):
     N = 50
