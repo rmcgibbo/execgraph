@@ -9,6 +9,7 @@
 , curl
 , crane
 , toxiproxy
+, procps
 }:
 
 let
@@ -79,6 +80,7 @@ in buildPythonPackage rec {
     scipy
     networkx
     curl
+    procps
   ];
   pythonImportsCheck = [ "execgraph" ];
 }

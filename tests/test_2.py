@@ -48,6 +48,7 @@ def random_dag(seed):
 
     return value
 
+
 def workflow_py(tmp_path):
     script1 = """#!/bin/sh
     set -e -x
@@ -81,22 +82,24 @@ sys.exit(0)
         f.write(script2)
     os.chmod(tmp_path / "workflow", 0o744)
 
+
 def assert_time_greater(x, y):
-    assert ((x["time"]["secs_since_epoch"], x["time"]["nanos_since_epoch"]) > (y["time"]["secs_since_epoch"], y["time"]["nanos_since_epoch"]))
+    assert (x["time"]["secs_since_epoch"], x["time"]["nanos_since_epoch"]) > (
+        y["time"]["secs_since_epoch"],
+        y["time"]["nanos_since_epoch"],
+    )
 
 
 @pytest.mark.parametrize("seed", range(5))
-@pytest.mark.parametrize("killmode", [
-    "pg",
-    "workflow",
-    "provisioner",
-    "remote"
-])
+@pytest.mark.parametrize("killmode", ["pg", "workflow", "provisioner", "remote"])
 def test_1(tmp_path, seed, killmode):
     assert find_executable("execgraph-remote") is not None
+    assert find_executable("ps") is not None
+    assert find_executable("grep") is not None
+
     dag = random_dag(0)
     with open(tmp_path / "dag.json", "w") as f:
-        json.dump(dag,f)
+        json.dump(dag, f)
 
     workflow_py(tmp_path)
 
@@ -119,7 +122,16 @@ def test_1(tmp_path, seed, killmode):
             kill_time = time.perf_counter()
             os.kill(p.pid, signal.SIGINT)
         elif killmode == "provisioner":
-            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps ax | grep provisioner", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            prov_pids = [
+                int(x.split()[0])
+                for x in subprocess.run(
+                    f"ps ax | grep provisioner",
+                    shell=True,
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                ).stdout.splitlines()
+            ]
             assert len(prov_pids) > 0
             kill_time = time.perf_counter()
             for prov_pid in prov_pids:
@@ -128,7 +140,16 @@ def test_1(tmp_path, seed, killmode):
                 except:
                     return
         elif killmode == "remote":
-            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps ax | grep execgraph-remote", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            prov_pids = [
+                int(x.split()[0])
+                for x in subprocess.run(
+                    f"ps ax | grep execgraph-remote",
+                    shell=True,
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                ).stdout.splitlines()
+            ]
             assert len(prov_pids) > 0
             kill_time = time.perf_counter()
             for prov_pids in prov_pids:
@@ -167,4 +188,3 @@ def test_1(tmp_path, seed, killmode):
     # for item in dag:
     #     for d in item["dependencies"]:
     #         assert_time_greater(ready[item["id"]], finished[str(d)])
-
