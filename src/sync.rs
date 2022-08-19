@@ -1,4 +1,5 @@
 use crate::{
+    async_flag::Flag,
     constants::{FAIL_COMMAND_PREFIX, FIZZLED_TIME_CUTOFF},
     execgraph::Cmd,
     logfile2::{self, LogFileRW},
@@ -198,13 +199,7 @@ impl<'a> ReadyTrackerServer<'a> {
         log::debug!("Writing {} FinishedEvents", inflight.len());
         for (k, _) in inflight.iter() {
             let cmd = self.g[*k];
-            let e = FinishedEvent {
-                id: k.to_owned(),
-                status: ExitStatus::Disconnected,
-                stdout: "".to_string(),
-                stderr: "".to_string(),
-                values: ValueMaps::new(),
-            };
+            let e = FinishedEvent::new_disconnected(k.to_owned(), "".to_owned());
             self._finished_bookkeeping_1(&e)?;
             self.logfile.write(LogEntry::new_finished(
                 &cmd.key,
@@ -249,7 +244,6 @@ impl<'a> ReadyTrackerServer<'a> {
                 },
                 event = self.completed.recv() => {
                     if event.is_err() {
-                        tracing::error!("{:#?}", event);
                         self.ready = None;
                         break;
                     }
@@ -263,14 +257,14 @@ impl<'a> ReadyTrackerServer<'a> {
                             ))?;
                             assert!(self.inflight.insert(e.id, Instant::now()).is_none());
                         }
-                        Event::Finished(e) => {
+                        Event::Finished(mut e) => {
                             #[cfg(feature = "coz")]
                             {
                                 coz::progress!();
                             }
                             let cmd = self.g[e.id];
                             self.finished_order.push(e.id);
-                            self._finished_bookkeeping(&e).await?;
+                            self._finished_bookkeeping(&mut e).await?;
 
                             if self.inflight.remove(&e.id).is_none() {
                                 // With execgraph-remote workers, it's  possible to get a FinishedEvent
@@ -329,9 +323,13 @@ impl<'a> ReadyTrackerServer<'a> {
         Ok(())
     }
 
-    async fn _finished_bookkeeping(&mut self, e: &FinishedEvent) -> Result<()> {
+    async fn _finished_bookkeeping(&mut self, e: &mut FinishedEvent) -> Result<()> {
         self._finished_bookkeeping_1(e)?;
-        self._finished_bookkeeping_2(e).await
+        let out = self._finished_bookkeeping_2(e).await;
+        if let Some(ref mut flag) = &mut e.flag {
+            flag.set();
+        }
+        out
     }
 
     fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent) -> Result<()> {
@@ -559,26 +557,9 @@ impl ReadyTrackerClient {
     }
 
     /// When a task is finished, notify the tracker by calling this.
-    pub async fn send_finished(
-        &self,
-        v: NodeIndex,
-        cmd: &Cmd,
-        status: ExitStatus,
-        stdout: String,
-        stderr: String,
-        values: ValueMaps,
-    ) {
+    pub async fn send_finished(&self, cmd: &Cmd, event: FinishedEvent) {
         cmd.call_postamble();
-        let r = self
-            .s
-            .send(Event::Finished(FinishedEvent {
-                id: v,
-                status,
-                stdout,
-                stderr,
-                values,
-            }))
-            .await;
+        let r = self.s.send(Event::Finished(event)).await;
         if r.is_err() {
             tracing::debug!("send_finished: cannot send to channel: {:#?}", r);
         };
@@ -626,21 +607,60 @@ impl ReadyTrackerClient {
     }
 }
 
-#[derive(Debug)]
 struct StartedEvent {
     id: NodeIndex,
     host: String,
     pid: u32,
 }
-#[derive(Debug)]
-struct FinishedEvent {
-    id: NodeIndex,
-    status: ExitStatus,
-    stdout: String,
-    stderr: String,
-    values: ValueMaps,
+pub struct FinishedEvent {
+    /// id of the command that finished in the graph
+    pub id: NodeIndex,
+    /// exit code of the command
+    pub status: ExitStatus,
+    /// stdout from the command
+    pub stdout: String,
+    /// stderr from the command
+    pub stderr: String,
+    /// key-value pairs from the command produced on fd3
+    pub values: ValueMaps,
+    /// an optional event that will be triggered once the servicer thread has finished
+    /// processing downstream dependencies of this task.
+    pub flag: Option<Flag>,
 }
-#[derive(Debug)]
+impl FinishedEvent {
+    pub fn new_cancelled(id: NodeIndex) -> Self {
+        FinishedEvent {
+            id,
+            status: ExitStatus::Cancelled,
+            stdout: "".to_string(),
+            stderr: "".to_string(),
+            values: vec![],
+            flag: None,
+        }
+    }
+    pub fn new_disconnected(id: NodeIndex, stderr: String) -> Self {
+        FinishedEvent {
+            id,
+            status: ExitStatus::Disconnected,
+            stdout: "".to_string(),
+            stderr: stderr,
+            values: vec![],
+            flag: None,
+        }
+    }
+
+    pub fn new_error(id: NodeIndex, code: i32, stderr: String) -> Self {
+        FinishedEvent {
+            id,
+            status: ExitStatus::Code(code),
+            stdout: "".to_owned(),
+            stderr: stderr,
+            values: ValueMaps::new(),
+            flag: None,
+        }
+    }
+}
+
 enum Event {
     Started(StartedEvent),
     Finished(FinishedEvent),

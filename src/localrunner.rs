@@ -1,7 +1,7 @@
 use crate::sync::ExitStatus;
 use crate::utils::{CancellationState, CancellationToken};
 use anyhow::Result;
-use petgraph::graph::DiGraph;
+use petgraph::prelude::*;
 use std::{
     collections::HashMap,
     os::unix::prelude::{AsRawFd, ExitStatusExt},
@@ -18,7 +18,11 @@ use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_pipe::{PipeRead, PipeWrite};
 use tracing::debug;
 
-use crate::{execgraph::Cmd, logfile2::ValueMaps, sync::ReadyTrackerClient};
+use crate::{
+    execgraph::Cmd,
+    logfile2::ValueMaps,
+    sync::{FinishedEvent, ReadyTrackerClient},
+};
 
 #[derive(Debug)]
 pub enum LocalQueueType {
@@ -97,12 +101,12 @@ pub async fn run_local_process_loop(
                     .await;
                 tracker
                     .send_finished(
-                        subgraph_node_id,
                         cmd,
-                        ExitStatus::Code(127),
-                        "".to_owned(),
-                        format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
-                        ValueMaps::new(),
+                        FinishedEvent::new_error(
+                            subgraph_node_id,
+                            127,
+                            format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
+                        ),
                     )
                     .await;
                 continue;
@@ -122,7 +126,7 @@ pub async fn run_local_process_loop(
                 if let CancellationState::CancelledAfterTime(_) = cancel {
                     // if we were soft canceled, send a finished notification.
                     tracker
-                        .send_finished(subgraph_node_id, cmd, ExitStatus::Cancelled, "".to_string(), "".to_string(), vec![])
+                        .send_finished(cmd, FinishedEvent::new_cancelled(subgraph_node_id))
                         .await;
                 }
                 debug!("Received cancellation {:#?}", cmd.display);
@@ -135,14 +139,7 @@ pub async fn run_local_process_loop(
 
         tracing::debug!("Finished cmd");
         tracker
-            .send_finished(
-                subgraph_node_id,
-                cmd,
-                output.code(),
-                output.stdout_str(),
-                output.stderr_str(),
-                output.fd3_values(),
-            )
+            .send_finished(cmd, output.to_event(subgraph_node_id))
             .await;
     }
 
@@ -223,6 +220,17 @@ pub struct ChildOutput {
 }
 
 impl ChildOutput {
+    pub fn to_event(self, id: NodeIndex) -> FinishedEvent {
+        FinishedEvent {
+            id,
+            status: self.code(),
+            stdout: self.stdout_str(),
+            stderr: self.stderr_str(),
+            values: self.fd3_values(),
+            flag: None,
+        }
+    }
+
     pub fn code(&self) -> ExitStatus {
         let code = match self.status.code() {
             Some(code) => code,

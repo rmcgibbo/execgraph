@@ -209,7 +209,7 @@ def test_not_execute_twice(num_parallel, tmp_path):
 def test_simple_remote(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
 
-    eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="task0")
+    eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="0")
     for i in range(1, 5):
         eg.add_task(
             ["sh", "-c", "echo foo; sleep 0.1; echo foo"],
@@ -227,7 +227,8 @@ def test_simple_remote(num_parallel, tmp_path):
         )
     os.chmod(tmp_path / "simple-provisioner", 0o744)
 
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
+    nfailed, order = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
+    assert order == ["0", "1", "2", "3", "4"]
     assert nfailed == 0
 
 

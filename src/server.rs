@@ -1,9 +1,10 @@
 use crate::{
+    async_flag::Flag,
     constants::PING_TIMEOUT_MSECS,
     execgraph::Cmd,
     http_extensions::axum::Postcard,
     httpinterface::*,
-    sync::{ExitStatus, ReadyTrackerClient},
+    sync::{ExitStatus, FinishedEvent, ReadyTrackerClient},
     timewheel::{TimeWheel, TimerID},
     utils::CancellationState,
 };
@@ -24,7 +25,7 @@ use tower::ServiceBuilder;
 use tower_http::ServiceBuilderExt;
 use tracing::{error, Span};
 
-use crate::{constants::PING_INTERVAL_MSECS, logfile2::ValueMaps};
+use crate::constants::PING_INTERVAL_MSECS;
 
 const TIMEWHEEL_DURATION_MSECS: u64 = PING_TIMEOUT_MSECS + 1;
 
@@ -103,12 +104,11 @@ impl<'a> State<'a> {
             for cstate in expired {
                 self.tracker
                     .send_finished(
-                        cstate.node_id,
                         &cstate.cmd,
-                        ExitStatus::Disconnected,
-                        "".to_owned(),
-                        cstate.disconnect_error_message,
-                        ValueMaps::new(),
+                        FinishedEvent::new_disconnected(
+                            cstate.node_id,
+                            cstate.disconnect_error_message,
+                        ),
                     )
                     .await;
             }
@@ -289,23 +289,31 @@ async fn end_handler(
         cstate
     };
     state.timeouts.cancel(cstate.timer_id);
+    let flag = Flag::new();
 
     state
         .tracker
         .send_finished(
-            cstate.node_id,
             &cstate.cmd,
-            ExitStatus::Code(request.status),
-            request.stdout,
-            request.stderr,
-            request.values,
+            FinishedEvent {
+                id: cstate.node_id,
+                status: ExitStatus::Code(request.status),
+                stdout: request.stdout,
+                stderr: request.stderr,
+                values: request.values,
+                flag: Some(flag.clone()),
+            },
         )
         .await;
 
     match request.start_request {
-        Some(start_request) => Ok(Postcard(EndResponse {
-            start_response: Some(start_request_impl(state, start_request)?),
-        })),
+        Some(start_request) => {
+            flag.wait().await;
+            let resp = start_request_impl(state, start_request)?;
+            Ok(Postcard(EndResponse {
+                start_response: Some(resp),
+            }))
+        }
         None => Ok(Postcard(EndResponse {
             start_response: None,
         })),
