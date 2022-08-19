@@ -1,5 +1,7 @@
-use crate::sync::ExitStatus;
-use crate::utils::{CancellationState, CancellationToken};
+use crate::{
+    fancy_cancellation_token::{CancellationState, CancellationToken},
+    sync::ExitStatus,
+};
 use anyhow::Result;
 use petgraph::prelude::*;
 use std::{
@@ -9,9 +11,8 @@ use std::{
     sync::Arc,
 };
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
 };
 use tokio_command_fds::{CommandFdExt, FdMapping};

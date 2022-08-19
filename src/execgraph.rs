@@ -1,10 +1,10 @@
 use crate::{
+    fancy_cancellation_token::{CancellationState, CancellationToken},
     graphtheory::transitive_closure_dag,
     localrunner::{run_local_process_loop, LocalQueueType},
     logfile2::{LogEntry, LogFile, LogFileRO, LogFileRW},
     server::{router, State as ServerState},
     sync::new_ready_tracker,
-    utils::{CancellationState, CancellationToken},
 };
 use anyhow::{anyhow, Result};
 use bitvec::array::BitArray;

@@ -1,12 +1,12 @@
 use crate::{
-    async_flag::Flag,
+    async_flag::AsyncFlag,
     constants::PING_TIMEOUT_MSECS,
     execgraph::Cmd,
+    fancy_cancellation_token::{self, CancellationState},
     http_extensions::axum::Postcard,
     httpinterface::*,
     sync::{ExitStatus, FinishedEvent, ReadyTrackerClient},
     timewheel::{TimeWheel, TimerID},
-    utils::CancellationState,
 };
 use anyhow::Result;
 use axum::{
@@ -51,7 +51,7 @@ pub struct State<'a> {
     connections: DashMap<u32, ConnectionState>,
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
     tracker: &'a ReadyTrackerClient,
-    token: crate::utils::CancellationToken,
+    token: fancy_cancellation_token::CancellationToken,
     timeouts: TimeWheel<u32>,
 }
 
@@ -59,7 +59,7 @@ impl<'a> State<'a> {
     pub fn new(
         subgraph: Arc<DiGraph<&'a Cmd, ()>>,
         tracker: &'a ReadyTrackerClient,
-        token: crate::utils::CancellationToken,
+        token: fancy_cancellation_token::CancellationToken,
     ) -> State<'a> {
         State {
             connections: DashMap::new(),
@@ -289,7 +289,7 @@ async fn end_handler(
         cstate
     };
     state.timeouts.cancel(cstate.timer_id);
-    let flag = Flag::new();
+    let flag = AsyncFlag::new();
 
     state
         .tracker

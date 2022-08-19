@@ -1,59 +1,8 @@
-use event_listener::Event;
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
-};
-
-pub struct AwaitableCounter {
-    value: AtomicU64,
-    event: Event,
-}
-
-impl AwaitableCounter {
-    pub fn new() -> Self {
-        AwaitableCounter {
-            value: AtomicU64::new(0),
-            event: Event::new(),
-        }
-    }
-
-    // Increment the counter
-    pub fn incr(&self) {
-        self.value.fetch_add(1, Ordering::SeqCst);
-        self.event.notify(usize::MAX);
-    }
-
-    pub fn load(&self) -> u64 {
-        self.value.load(Ordering::SeqCst)
-    }
-
-    // Wait for the counter to go above the value `from`. Returns
-    // the new value
-    pub async fn changed(&self, from: u64) -> u64 {
-        loop {
-            // Check the flag.
-            let value = self.value.load(Ordering::SeqCst);
-            if value > from {
-                return value;
-            }
-
-            // Start listening for events.
-            let listener = self.event.listen();
-
-            // Check the flag again after creating the listener.
-            let value = self.value.load(Ordering::SeqCst);
-            if value > from {
-                return value;
-            }
-
-            listener.await;
-        }
-    }
-}
+use std::{sync::Arc, time::Instant};
 
 #[derive(Clone)]
 pub struct CancellationToken {
-    inner: std::sync::Arc<CancellationTokenState>,
+    inner: Arc<CancellationTokenState>,
 }
 
 #[derive(Clone, Debug)]
@@ -158,11 +107,5 @@ impl Default for CancellationToken {
 impl core::fmt::Debug for CancellationToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CancellationToken").finish()
-    }
-}
-
-impl core::fmt::Debug for AwaitableCounter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwaitableCounter").finish()
     }
 }

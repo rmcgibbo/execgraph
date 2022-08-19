@@ -1,9 +1,9 @@
 use crate::{
-    async_flag::Flag,
+    async_flag::{AsyncCounter, AsyncFlag},
     constants::{FAIL_COMMAND_PREFIX, FIZZLED_TIME_CUTOFF},
     execgraph::Cmd,
+    fancy_cancellation_token::{CancellationState, CancellationToken},
     logfile2::{self, LogFileRW},
-    utils::{AwaitableCounter, CancellationState, CancellationToken},
 };
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
@@ -68,7 +68,7 @@ pub struct ReadyTrackerServer<'a> {
     completed: async_channel::Receiver<Event>,
     n_success: u32,
     n_pending: u32,
-    pending_increased_event: Arc<AwaitableCounter>,
+    pending_increased_event: AsyncCounter,
     count_offset: u32,
     failures_allowed: u32,
     queuestate: Arc<DashMap<u64, Snapshot>>,
@@ -80,7 +80,7 @@ pub struct ReadyTrackerServer<'a> {
 #[derive(Debug)]
 pub struct ReadyTrackerClient {
     queuestate: Arc<DashMap<u64, Snapshot>>,
-    pending_increased_event: Arc<AwaitableCounter>,
+    pending_increased_event: AsyncCounter,
     s: async_channel::Sender<Event>,
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
 }
@@ -123,7 +123,7 @@ pub fn new_ready_tracker<'a>(
         })
         .collect();
 
-    let pending_increased_event = Arc::new(AwaitableCounter::new());
+    let pending_increased_event = AsyncCounter::new();
 
     (
         ReadyTrackerServer {
@@ -586,7 +586,7 @@ impl ReadyTrackerClient {
         let clock_start = tokio::time::Instant::now();
 
         let mut etag_new =
-            match tokio::time::timeout(timeout, self.pending_increased_event.changed(etag)).await {
+            match tokio::time::timeout(timeout, self.pending_increased_event.wait(etag)).await {
                 Ok(etag_new) => etag_new,
                 Err(_elapsed) => self.pending_increased_event.load(),
             };
@@ -625,8 +625,9 @@ pub struct FinishedEvent {
     pub values: ValueMaps,
     /// an optional event that will be triggered once the servicer thread has finished
     /// processing downstream dependencies of this task.
-    pub flag: Option<Flag>,
+    pub flag: Option<AsyncFlag>,
 }
+
 impl FinishedEvent {
     pub fn new_cancelled(id: NodeIndex) -> Self {
         FinishedEvent {
@@ -643,7 +644,7 @@ impl FinishedEvent {
             id,
             status: ExitStatus::Disconnected,
             stdout: "".to_string(),
-            stderr: stderr,
+            stderr,
             values: vec![],
             flag: None,
         }
@@ -654,7 +655,7 @@ impl FinishedEvent {
             id,
             status: ExitStatus::Code(code),
             stdout: "".to_owned(),
-            stderr: stderr,
+            stderr,
             values: ValueMaps::new(),
             flag: None,
         }
