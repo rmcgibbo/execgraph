@@ -308,7 +308,10 @@ async fn end_handler(
 
     match request.start_request {
         Some(start_request) => {
-            flag.wait().await;
+            tokio::select! {
+            _ = state.token.hard_cancelled() => {}
+            _ = flag.wait() => {}
+            };
             let resp = start_request_impl(state, start_request)?;
             Ok(Postcard(EndResponse {
                 start_response: Some(resp),

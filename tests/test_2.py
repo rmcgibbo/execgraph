@@ -82,7 +82,7 @@ def assert_time_greater(x, y):
     assert ((x["time"]["secs_since_epoch"], x["time"]["nanos_since_epoch"]) > (y["time"]["secs_since_epoch"], y["time"]["nanos_since_epoch"]))
 
 
-@pytest.mark.parametrize("seed", range(2))
+@pytest.mark.parametrize("seed", range(5))
 @pytest.mark.parametrize("killmode", [
     "pg",
     "workflow",
@@ -108,6 +108,7 @@ def test_1(tmp_path, seed, killmode):
 
         if killmode == "pg":
             pgrp = os.getpgid(p.pid)
+            assert pgrp != os.getpgid(os.getpid())
             print("[test_2] sending SIGINT to process group")
             kill_time = time.perf_counter()
             os.killpg(pgrp, signal.SIGINT)
@@ -115,7 +116,8 @@ def test_1(tmp_path, seed, killmode):
             kill_time = time.perf_counter()
             os.kill(p.pid, signal.SIGINT)
         elif killmode == "provisioner":
-            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps --ppid {p.pid} | grep provisioner", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps ax | grep provisioner", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            assert len(prov_pids) > 0
             kill_time = time.perf_counter()
             for prov_pid in prov_pids:
                 try:
@@ -123,7 +125,8 @@ def test_1(tmp_path, seed, killmode):
                 except:
                     return
         elif killmode == "remote":
-            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps --ppid {p.pid} | grep execgraph-remote", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            prov_pids = [int(x.split()[0]) for x in subprocess.run(f"ps ax | grep execgraph-remote", shell=True, capture_output=True, text=True).stdout.splitlines()]
+            assert len(prov_pids) > 0
             kill_time = time.perf_counter()
             for prov_pids in prov_pids:
                 try:
