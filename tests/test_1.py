@@ -28,8 +28,11 @@ import execgraph as _execgraph
 
 def find_executable(name: str) -> Optional[str]:
     for dir in os.environ["PATH"].split(":"):
-        if name in os.listdir(dir):
-            return os.path.join(dir, name)
+        try:
+            if name in os.listdir(dir):
+                return os.path.join(dir, name)
+        except FileNotFoundError:
+            pass
     return None
 
 
