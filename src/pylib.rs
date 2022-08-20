@@ -6,6 +6,7 @@ use pyo3::{
     prelude::*,
     types::{PyBytes, PyTuple},
 };
+use std::convert::TryInto;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tokio::runtime::Runtime;
@@ -50,7 +51,7 @@ impl PyExecGraph {
     #[new]
     #[args(
         num_parallel = -1,
-	    readonly_logfiles = "vec![]",
+        readonly_logfiles = "vec![]",
         failures_allowed = 1,
         newkeyfn = "None",
         rerun_failures=true,
@@ -69,7 +70,7 @@ impl PyExecGraph {
         rerun_failures: bool,
     ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
-            num_parallel = num_cpus::get() as i32 + 2;
+            num_parallel = std::thread::available_parallelism()?.get().try_into()?;
         }
 
         let mut log =

@@ -26,49 +26,46 @@ async-channel = "1.6.1"
 async-priority-channel = "0.1.0"
 axum = { version = "0.5.13", features = ["json"] }
 atty = "0.2.14"
-event-listener = "2.5.3"
 bitvec = "1.0.1"
 clap = { version = "3.2.16", features = ["derive"] }
 coz = { version = "0.1.3", optional = true }
-tokio-command-fds = "0.2.1"
 dashmap = "5.3.4"
 derivative = "2.2.0"
-lazy_static = "1.4.0"
-lzzzz = "1.0.3"
+event-listener = "2.5.3"
 futures = "0.3.21"
 gethostname = "0.2.3"
 grep-cli = "0.1.6"
 hyper = "0.14.20"
-log = "0.4.17"
+lazy_static = "1.4.0"
 libc = "0.2.127"
-nix = "0.24.2"
-num_cpus = "1.13.1"
+lzzzz = "1.0.3"
 notify = "5.0.0-pre.15"
 osstrtools = "0.2.2"
 postcard = { version = "1.0.1", features = ["use-std"], default-features = false }
 petgraph = { version = "0.6.2", features = ["graphmap"], default-features = false }
 pyo3 = { version = "0.16.5", optional = true }
 pythonize = { version = "0.16.0", optional = true }
+quantiles = "0.7.1"
 rand = "0.8.5"
 regex = "1.6.0"
 reqwest = { version = "0.11.11", default-features = false }
 serde = { version = "1.0.142", features = ["derive"] }
 serde_json = "1.0.83"
+shell-words = "1.1.0"
 slotmap = "1.0.6"
 termcolor = "1.1.3"
+thiserror = "1.0.32"
 tokio = { version = "1.20.1", features = ["full", "tracing"] }
+tokio-command-fds = "0.2.1"
 tokio-pipe = "0.2.12"
 tokio-util = "0.7.3"
 tower = "0.4.13"
 tower-http = { version = "0.3.4", features = ["trace", "add-extension"] }
-shell-words = "1.1.0"
-thiserror = "1.0.32"
-quantiles = "0.7.1"
-url = "2.2.2"
-whoami = "1.2.1"
 tracing = "0.1.36"
 # tracing-appender = "0.2.2"
 tracing-subscriber = { version = "0.3.15", features = ["env-filter"] }
+url = "2.2.2"
+whoami = "1.2.1"
 
 # https://pyo3.rs/v0.11.1/faq.html#i-cant-run-cargo-test-im-having-linker-issues-like-symbol-not-found-or-undefined-reference-to-_pyexc_systemerror
 # to run rust tests, need to do ``$ cargo test --no-default-features``

@@ -8,7 +8,6 @@ use execgraph::{
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
-use log::{debug, warn};
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
@@ -17,6 +16,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::Instant;
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 use whoami::username;
 
 // https://github.com/SchedMD/slurm/blob/791f9c39e0db919e02ef8857be0faff09a3656b2/src/slurmd/slurmstepd/req.c#L724

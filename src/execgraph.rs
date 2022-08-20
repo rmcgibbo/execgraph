@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 // TODO: remove clone?
 #[derive(Derivative)]
@@ -339,7 +339,7 @@ impl ExecGraph {
                 };
                 server_start_tx.send(bound_addr).expect("failed to send");
                 if let Err(err) = graceful.await {
-                    log::error!("Server error: {}", err);
+                    error!("Server error: {}", err);
                 }
                 debug!("Joining server tasks");
                 stop_reaping_pings_tx.send(()).unwrap();
@@ -427,14 +427,14 @@ async fn spawn_and_wait_for_provisioner(
             drop(child_stdin); // drop stdin so that it knows to exit
             let duration = std::time::Duration::from_millis(1000);
             if tokio::time::timeout(duration, child.wait()).await.is_err() {
-                log::debug!("sending SIGKILL to provisioner");
+                debug!("sending SIGKILL to provisioner");
                 child.kill().await.expect("kill failed");
             }
         },
 
         result = child.wait() => {
             let status = result?;
-            log::error!("provisioner exited with status={}", status);
+            error!("provisioner exited with status={}", status);
         }
     }
 

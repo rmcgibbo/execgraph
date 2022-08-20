@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
+use tracing::{debug, error};
 
 macro_rules! u32checked_add {
     ($a:expr,$b:expr) => {{
@@ -158,7 +159,7 @@ impl<'a> ReadyTrackerServer<'a> {
     #[tracing::instrument(skip_all)]
     pub fn drain(&mut self) -> Result<()> {
         let mut inflight = self.inflight.clone();
-        log::debug!("Draining {} inflight tasks", inflight.len());
+        debug!("Draining {} inflight tasks", inflight.len());
         loop {
             match self.completed.try_recv() {
                 Ok(Event::Started(e)) => {
@@ -196,7 +197,7 @@ impl<'a> ReadyTrackerServer<'a> {
         }
 
         self.inflight.clear();
-        log::debug!("Writing {} FinishedEvents", inflight.len());
+        debug!("Writing {} FinishedEvents", inflight.len());
         for (k, _) in inflight.iter() {
             let cmd = self.g[*k];
             let e = FinishedEvent::new_disconnected(k.to_owned(), "".to_owned());
@@ -207,7 +208,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 e.values,
             ))?;
         }
-        log::debug!("Finished drain");
+        debug!("Finished drain");
         Ok(())
     }
 
@@ -287,7 +288,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             ))?;
 
                             if self.n_fizzled >= self.failures_allowed {
-                                tracing::debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
+                                debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
                                 self.n_fizzled, self.failures_allowed, self.n_pending);
                                 token.cancel(CancellationState::CancelledAfterTime(Instant::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
@@ -300,7 +301,7 @@ impl<'a> ReadyTrackerServer<'a> {
                                 // break the run_local_process_loop runners at the point where they're
                                 // waiting to get a task from the ready task receiver
                                 self.ready = None;
-                                tracing::debug!("background_serve breaking on n_failed={} failures_allowed={} n_pending={}",
+                                debug!("background_serve breaking on n_failed={} failures_allowed={} n_pending={}",
                                     self.n_failed, self.failures_allowed, self.n_pending);
                                 break;
                             }
@@ -308,12 +309,12 @@ impl<'a> ReadyTrackerServer<'a> {
                     }
                 },
                 _ = token.hard_cancelled() => {
-                    tracing::debug!("background_serve breaking on token cancellation");
+                    debug!("background_serve breaking on token cancellation");
                     self.ready = None;
                     break;
                 }
                 _ = ctrl_c.recv() => {
-                    tracing::debug!("background_serve breaking on ctrl-c");
+                    debug!("background_serve breaking on ctrl-c");
                     self.ready = None;
                     break;
                 }
@@ -481,7 +482,7 @@ impl<'a> ReadyTrackerServer<'a> {
         for (i, ready) in inserts.into_iter().enumerate() {
             if !ready.is_empty() {
                 if let Err(e) = channels[i].sendv(ready.into_iter().peekable()).await {
-                    tracing::error!("Perhaps TOCTOU? {}", e);
+                    error!("Perhaps TOCTOU? {}", e);
                 }
             }
         }
@@ -552,7 +553,7 @@ impl ReadyTrackerClient {
             }))
             .await;
         if r.is_err() {
-            tracing::debug!("send_started: cannot send to channel: {:#?}", r);
+            debug!("send_started: cannot send to channel: {:#?}", r);
         };
     }
 
@@ -561,7 +562,7 @@ impl ReadyTrackerClient {
         cmd.call_postamble();
         let r = self.s.send(Event::Finished(event)).await;
         if r.is_err() {
-            tracing::debug!("send_finished: cannot send to channel: {:#?}", r);
+            debug!("send_finished: cannot send to channel: {:#?}", r);
         };
     }
 
