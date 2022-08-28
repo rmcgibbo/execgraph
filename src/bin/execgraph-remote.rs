@@ -592,40 +592,46 @@ fn async_watcher(
             let mut file = std::fs::OpenOptions::new().read(true).open(&p)?;
             let mut buffer = Vec::new();
 
-            let mut watcher = notify::INotifyWatcher::new(move |res: Result<Event>| {
-                let event = res.unwrap();
+            let mut watcher = notify::INotifyWatcher::new(
+                move |res: Result<Event>| {
+                    let event = res.unwrap();
 
-                // When the file is modified, read it into the buffer
-                let is_modify = matches!(event.kind, EventKind::Any | EventKind::Modify(_));
-                if is_modify {
-                    // This appends to the current buffer
-                    file.read_to_end(&mut buffer).unwrap();
+                    // When the file is modified, read it into the buffer
+                    let is_modify = matches!(event.kind, EventKind::Any | EventKind::Modify(_));
+                    if is_modify {
+                        // This appends to the current buffer
+                        file.read_to_end(&mut buffer).unwrap();
 
-                    // Okay, now look in the buffer for the string "CANCELLED". It seems like in
-                    // general, slurmstepd will write multiple lines to the file for certain kinds
-                    // of errors, and all of them are interesting. So if we fire off an event after
-                    // the first modification, then we'll miss the later ones. It appears that
-                    // "CANCELLED AT" is the last line in the file, so let's wait for that and then
-                    // fire it off.
-                    let s = std::str::from_utf8(&buffer)
-                        .unwrap_or("Unable to read slurm error file. Utf8 issue?");
-                    if re.is_match(s) || s.contains("Unable to read") {
-                        futures::executor::block_on(async {
-                            tx.send(s.to_string()).await.unwrap();
-                        })
+                        // Okay, now look in the buffer for the string "CANCELLED". It seems like in
+                        // general, slurmstepd will write multiple lines to the file for certain kinds
+                        // of errors, and all of them are interesting. So if we fire off an event after
+                        // the first modification, then we'll miss the later ones. It appears that
+                        // "CANCELLED AT" is the last line in the file, so let's wait for that and then
+                        // fire it off.
+                        let s = std::str::from_utf8(&buffer)
+                            .unwrap_or("Unable to read slurm error file. Utf8 issue?");
+                        if re.is_match(s) || s.contains("Unable to read") {
+                            futures::executor::block_on(async {
+                                tx.send(s.to_string()).await.unwrap();
+                            })
+                        }
                     }
-                }
-            })?;
+                },
+                notify::Config::default(),
+            )?;
             watcher.watch(&p, notify::RecursiveMode::NonRecursive)?;
             watcher
         }
         // just create a dummy object so things typecheck
-        None => notify::INotifyWatcher::new(move |_event: Result<Event>| {
-            // take a reference to `tx` to prevent it from getting dropped, so that the recv
-            // side of the channel remains in a valid state.
-            drop(&tx);
-            unreachable!("This should never get called");
-        })?,
+        None => notify::INotifyWatcher::new(
+            move |_event: Result<Event>| {
+                // take a reference to `tx` to prevent it from getting dropped, so that the recv
+                // side of the channel remains in a valid state.
+                drop(&tx);
+                unreachable!("This should never get called");
+            },
+            notify::Config::default(),
+        )?,
     };
     Ok((watcher, rx))
 }
