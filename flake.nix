@@ -1,6 +1,6 @@
 {
   description = "Parallel execution of shell commands with DAG dependencies";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.py-utils.url = "github:rmcgibbo/python-flake-utils";
   inputs.utils.url = "github:numtide/flake-utils";
   inputs.crane.url = "github:ipetkov/crane";

@@ -36,19 +36,19 @@ struct CommandLineArguments {
     runnertypeid: u32,
 
     /// Stop accepting new tasks after this amount of time, in seconds.
-    #[clap(long = "max-time-accepting-tasks", parse(try_from_str = parse_seconds))]
+    #[clap(long = "max-time-accepting-tasks", value_parser = parse_seconds)]
     max_time_accepting_tasks: Option<Duration>,
 
     /// Path to the log file where slurmstepd will write errors. This should be a file
     /// on a local disk, so that we can watch it with inotify and report back any errors
     /// to the controller.
-    #[clap(long = "slurm-error-logfile", parse(try_from_str = parse_slurm_error_logfile))]
+    #[clap(long = "slurm-error-logfile", value_parser = parse_slurm_error_logfile)]
     slurm_error_logfile: Option<std::path::PathBuf>,
 
     /// Error message to be echoed on the controller side in leu of our tasks's standard error
     /// if the controller looses contact with this runner due to a network partition or node
     /// failure.
-    #[clap(long = "disconnect-err-msg", parse(try_from_str = parse_disconnect_error_message), default_value="")]
+    #[clap(long = "disconnect-err-msg", value_parser = parse_disconnect_error_message, default_value="")]
     disconnect_error_message: String,
 }
 
@@ -63,7 +63,7 @@ async fn main() -> Result<(), RemoteError> {
 
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
 
-    let opt = CommandLineArguments::from_args();
+    let opt = CommandLineArguments::parse();
     let mut headers = HeaderMap::new();
     headers.insert(
         "X-EXECGRAPH-USERNAME",
