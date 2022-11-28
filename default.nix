@@ -40,6 +40,8 @@ let
     nativeBuildInputs = [
       python
     ];
+    copyLibs = true;
+    singleStep = true;
     doCheck = false;
   };
 
