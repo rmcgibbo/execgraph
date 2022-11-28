@@ -7,7 +7,8 @@
 , scipy
 , networkx
 , curl
-, crane
+, rust-bin
+, naersk
 , toxiproxy
 , procps
 }:
@@ -28,24 +29,19 @@ let
     "tests"
   ];
 
-  # Build *just* the cargo dependencies, since they don't change super often
-  craneLib = crane.lib.${system};
-  cargoArtifacts = craneLib.buildDepsOnly {
-    inherit src;
-    name = "execgraph-deps";
-    version = "0.1.0";
-    nativeBuildInputs = [
-      python
-    ];
-    doCheck = false;
+  naerskLib = naersk.lib."${system}".override {
+    rustc = rust-bin.stable.latest.default;
+    cargo = rust-bin.stable.latest.default;
   };
-  execgraph = craneLib.buildPackage {
-    inherit cargoArtifacts src;
+  execgraph = naerskLib.buildPackage {
+    inherit src;
     name = "execgraph";
     version = "0.1.0";
     nativeBuildInputs = [
       python
     ];
+    copyLibs = true;
+    singleStep = true;
     doCheck = false;
   };
 
