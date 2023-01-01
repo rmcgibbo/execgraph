@@ -1,16 +1,12 @@
 import json
 import multiprocessing
 import os
-import random
-import shutil
 import signal
 import sys
-import threading
 import time
 import subprocess
 from typing import Optional
 from collections import defaultdict
-from pprint import pprint
 
 import networkx as nx
 import numpy as np
@@ -582,7 +578,6 @@ def test_preamble(tmp_path):
 
 def test_hang(tmp_path):
     import time
-    from collections import Counter
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
 

@@ -11,7 +11,7 @@
     rust-overlay.inputs.flake-utils.follows = "utils";
   };
   outputs = { self, nixpkgs, utils, py-utils, naersk, rust-overlay }: {
-    overlay = py-utils.lib.mkPythonOverlay (pkgs: {
+    overlays.default = py-utils.lib.mkPythonOverlay (pkgs: {
       execgraph = pkgs.callPackage ./. { inherit naersk; };
     });
   } //
@@ -19,7 +19,7 @@
     let
       pkgs = import nixpkgs {
         inherit system;
-        overlays = [ self.overlay (import rust-overlay) ];
+        overlays = [ self.overlays.default (import rust-overlay) ];
       };
     in
     {
