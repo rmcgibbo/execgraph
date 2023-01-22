@@ -142,8 +142,8 @@ async fn main() -> Result<(), RemoteError> {
                 //
                 // Find all direct child processes of ourself. SIGTERM them. Wait for them.
                 // Keep looping until there are no children. We want to ensure that everyone else
-                // dies before we do. 
-                // If we die before any of them them do, then they'll get re-parented under init(1)               
+                // dies before we do.
+                // If we die before any of them them do, then they'll get re-parented under init(1)
                 // which can cause something like slurmstepd to lose them when walking the process tree
                 //
                 loop {

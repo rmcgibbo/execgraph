@@ -304,11 +304,7 @@ pub fn load_ro_logfiles_recursive(mut paths: Vec<PathBuf>) -> Result<Vec<LogFile
 impl LogFile<LogFileRO> {
     #[tracing::instrument]
     fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .create(true)
-            .write(true)
-            .open(&path)?;
+        let mut f = std::fs::OpenOptions::new().read(true).open(&path)?;
         let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
