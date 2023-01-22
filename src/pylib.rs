@@ -50,8 +50,8 @@ pub struct PyExecGraph {
 impl PyExecGraph {
     #[new]
     #[pyo3(signature=(
+        num_parallel,
         logfile,
-        num_parallel = -1,
         readonly_logfiles = vec![],
         storage_roots = vec![PathBuf::from("")],
         failures_allowed = 1,
@@ -62,8 +62,8 @@ impl PyExecGraph {
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python,
-        logfile: PathBuf,
         mut num_parallel: i32,
+        logfile: PathBuf,
         readonly_logfiles: Vec<PathBuf>,
         storage_roots: Vec<PathBuf>,
         failures_allowed: u32,

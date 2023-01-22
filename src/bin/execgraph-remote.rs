@@ -8,6 +8,8 @@ use execgraph::{
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
+
+use nix::unistd::Pid;
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
@@ -61,7 +63,14 @@ async fn main() -> Result<(), RemoteError> {
     //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::INFO);
     // tracing_subscriber::registry().with(fmt_layer).init();
 
+    unsafe {
+        libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+    }
+
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
+    unsafe {
+        libc::setpgid(libc::getpid(), libc::getpid());
+    }
 
     let opt = CommandLineArguments::parse();
     let mut headers = HeaderMap::new();
@@ -114,6 +123,61 @@ async fn main() -> Result<(), RemoteError> {
                 // break with no error message
                 debug!("{:#?}", e);
                 break;
+            }
+            Err(RemoteError::Sigterm) => {
+                // Before the SIGTERM, maybe the process tree looked like
+                //
+                //  execgraph-remote (us) ->
+                //      shell script ->
+                //          actual worker program
+
+                // When we received a SIGTERM, we immediately forwarded the signal to our child, "shell script",
+                // but if it exited without killing its child, then because we set ourselves as the subreaper,
+                // we will now have a tree like
+                //
+                //  execgraph-remote (us) ->
+                //      actual worker program
+
+                let mypid = std::process::id() as i32;
+                //
+                // Find all direct child processes of ourself. SIGTERM them. Wait for them.
+                // Keep looping until there are no children. We want to ensure that everyone else
+                // dies before we do. 
+                // If we die before any of them them do, then they'll get re-parented under init(1)               
+                // which can cause something like slurmstepd to lose them when walking the process tree
+                //
+                loop {
+                    let mut children = vec![];
+                    for x in procfs::process::all_processes().unwrap() {
+                        let process = x.unwrap();
+                        let ppid = process.stat().unwrap().ppid;
+                        if ppid == mypid {
+                            children.push(process.pid);
+                        }
+                    }
+                    // send another sigterm to all of our children
+                    for pid in children.iter() {
+                        unsafe {
+                            libc::kill(*pid, libc::SIGTERM);
+                        }
+                    }
+                    loop {
+                        match nix::sys::wait::waitpid(Pid::from_raw(-1), None) {
+                            Ok(_) => {}
+                            Err(nix::errno::Errno::ECHILD) => {
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("Unexpected error: {:#?}", e);
+                                return Err(RemoteError::Sigterm);
+                            }
+                        }
+                    }
+                    if children.len() == 0 {
+                        break;
+                    }
+                }
+                return Err(RemoteError::Sigterm);
             }
             result => {
                 let (this_timing_info, this_start_response) = result?;

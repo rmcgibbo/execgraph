@@ -11,6 +11,7 @@
 , naersk
 , toxiproxy
 , procps
+, pstree
 }:
 
 let
@@ -77,6 +78,7 @@ in buildPythonPackage rec {
     networkx
     curl
     procps
+    pstree
   ];
   pythonImportsCheck = [ "execgraph" ];
 }
