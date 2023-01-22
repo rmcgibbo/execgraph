@@ -377,7 +377,6 @@ async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response
 }
 
 pub fn router(state: Arc<State<'static>>) -> Router {
-    use axum::handler::Handler;
     use axum::routing::{get, post};
     use tower_http::trace::TraceLayer;
     use tower_http::trace::{DefaultOnEos, DefaultOnFailure};
@@ -417,6 +416,6 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/end", post(end_handler))
         .route("/ping", post(ping_handler))
         .route("/status", get(status_handler))
-        .fallback(fallback.into_service())
+        .fallback(fallback)
         .layer(middleware.into_inner())
 }

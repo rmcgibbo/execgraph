@@ -1,4 +1,5 @@
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
+use bufreaderwriter::BufReaderWriter;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -149,11 +150,10 @@ impl LogEntry {
 
 pub struct LogFileRO;
 pub struct LogFileRW;
-#[derive(Debug)]
 pub struct LogFile<T> {
-    f: std::io::BufWriter<std::fs::File>,
+    f: BufReaderWriter<std::fs::File>,
     path: std::path::PathBuf,
-    lockf: Option<(std::fs::File, std::path::PathBuf)>,
+    lockf: Option<(std::io::BufWriter<std::fs::File>, std::path::PathBuf)>,
     header: Option<HeaderEntry>,
     runcounts: HashMap<String, RuncountStatus>,
     mode: PhantomData<T>,
@@ -184,12 +184,13 @@ impl LogFile<LogFileRW> {
     pub fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
         // acquire the lock file and write something to it
         let lockf_path = path.as_ref().with_file_name(".wrk.lock");
-        let mut lockf = std::fs::OpenOptions::new()
+        let lockf = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .open(&lockf_path)?;
         lockf.try_lock(FileLockMode::Exclusive)?;
-        serde_json::to_writer(&lockf, &LogEntry::new_header("", vec![], vec![])?)?;
+        let mut lockf = std::io::BufWriter::new(lockf);
+        serde_json::to_writer(&mut lockf, &LogEntry::new_header("", vec![], vec![])?)?;
         lockf.flush()?;
 
         let mut f = std::fs::OpenOptions::new()
@@ -199,7 +200,7 @@ impl LogFile<LogFileRW> {
             .open(&path)?;
         let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
-            f: std::io::BufWriter::new(f),
+            f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
@@ -303,10 +304,14 @@ pub fn load_ro_logfiles_recursive(mut paths: Vec<PathBuf>) -> Result<Vec<LogFile
 impl LogFile<LogFileRO> {
     #[tracing::instrument]
     fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
-        let mut f = std::fs::OpenOptions::new().read(true).open(&path)?;
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .create(true)
+            .write(true)
+            .open(&path)?;
         let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
-            f: std::io::BufWriter::new(f), // unused, would be better not to make
+            f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
@@ -568,11 +573,12 @@ impl LogFileSnapshotReader {
             }
             let len = line.trim_end_matches(&['\r', '\n'][..]).len();
             line.truncate(len);
-            let value: LogEntry = serde_json::from_str(&line).map_err(|e| {
-                eprintln!("Error parsing line={}", line);
-                e
-            })?;
-            v.push(value);
+            match serde_json::from_str(&line) {
+                Ok(value) => v.push(value),
+                Err(_) => {
+                    break;
+                }
+            };
         }
         Ok(v)
     }

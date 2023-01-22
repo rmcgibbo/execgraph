@@ -49,20 +49,21 @@ pub struct PyExecGraph {
 #[pymethods]
 impl PyExecGraph {
     #[new]
-    #[args(
+    #[pyo3(signature=(
+        logfile,
         num_parallel = -1,
-        readonly_logfiles = "vec![]",
+        readonly_logfiles = vec![],
+        storage_roots = vec![PathBuf::from("")],
         failures_allowed = 1,
-        newkeyfn = "None",
-        rerun_failures=true,
-        storage_roots = "vec![PathBuf::from(\"\")]"
-    )]
+        newkeyfn = None,
+        rerun_failures=true
+    ))]
     #[tracing::instrument(skip(py))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python,
-        mut num_parallel: i32,
         logfile: PathBuf,
+        mut num_parallel: i32,
         readonly_logfiles: Vec<PathBuf>,
         storage_roots: Vec<PathBuf>,
         failures_allowed: u32,
@@ -272,15 +273,17 @@ impl PyExecGraph {
     ///     dependencies (List[int], default=[]): dependencies for this task
     /// Returns:
     ///     taskid (int): integer id of this task
-    #[args(
-        dependencies = "vec![]",
-        display = "None",
-        affinity = "1",
-        fd_input = "None",
-        preamble = "None",
-        postamble = "None",
-        storage_root = "0"
-    )]
+    #[pyo3(signature=(
+        cmdline,
+        key,
+        dependencies = vec![],
+        display = None,
+        affinity = 1,
+        fd_input = None,
+        preamble = None,
+        postamble = None,
+        storage_root = 0
+    ))]
     #[allow(clippy::too_many_arguments)]
     fn add_task(
         &mut self,
@@ -341,13 +344,11 @@ impl PyExecGraph {
     ///     execution_order (List[int]): the ids of the tasks that finished (success
     ///         or failure) in order of when they finished.
     ///
-    #[args(
-        target = "None",
-        remote_provisioner = "None",
-        remote_provisioner_arg2 = "None",
-        local_capabilities = "vec![\"local\".to_string()]",
-        remote_capabilities = "vec![]"
-    )]
+    #[pyo3(signature=(
+        target = None,
+        remote_provisioner = None,
+        remote_provisioner_arg2 = None
+    ))]
     #[tracing::instrument(skip_all)]
     fn execute(
         &mut self,

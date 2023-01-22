@@ -4,7 +4,7 @@ use axum::async_trait;
 use axum::body::Bytes;
 use axum::body::HttpBody;
 use axum::extract::FromRequest;
-use axum::extract::RequestParts;
+//use axum::extract::RequestParts;
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -72,19 +72,20 @@ impl IntoResponse for PostcardRejection {
 }
 
 #[async_trait]
-impl<T, B> FromRequest<B> for Postcard<T>
+impl<S, B, T> FromRequest<S, B> for Postcard<T>
 where
+    B: Send + 'static + HttpBody,
     T: DeserializeOwned,
-    B: HttpBody + Send,
     B::Data: Send,
     B::Error: Into<BoxError>,
+    S: Send + Sync,
 {
     type Rejection = PostcardRejection;
 
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let bytes = Bytes::from_request(req).await?;
+    async fn from_request(req: hyper::Request<B>, state: &S) -> Result<Self, Self::Rejection> {
         let compression = get_compression(req.headers());
         let content_type = get_content_type(req.headers());
+        let bytes = Bytes::from_request(req, &state).await?;
         let decomp = match compression {
             CompressionType::LZ4 => {
                 let mut decomp = vec![];
