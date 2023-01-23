@@ -48,8 +48,7 @@ python {tmp_path}/command.py
 
 def workflow_py(tmp_path):
     script1 = """#!/bin/sh
-    echo "foo"
-    execgraph-remote $1 0
+    RUST_LOG=trace execgraph-remote $1 0
     echo "from execgaph-remote $?"
     """
     with open(tmp_path / "provisioner", "w") as f:
@@ -101,7 +100,7 @@ def test_1(tmp_path, seed):
     workflow_py(tmp_path)
     command_sh(tmp_path)
     command_py(tmp_path)
-    
+
 
     p = subprocess.Popen(
         [sys.executable, tmp_path / "workflow"],
@@ -126,12 +125,21 @@ def test_1(tmp_path, seed):
         next(int(item) for item in line.split() if is_int(item))
         for line in pstree.splitlines()
         if "command.py" in line
-    ]    
+    ]
 
     # Kill execgraph-remote
     for pid in execgraph_remote_pids:
         os.kill(pid, signal.SIGTERM)
-    time.sleep(1)
+
+    # Wait for execgraph-remote to exit
+    while True:
+        if all(not os.path.exists(f"/proc/{pid}/status") for pid in execgraph_remote_pids):
+            break
+        time.sleep(1)
+
+    subprocess.run(
+       f"pstree -w -p {os.getpid()}", shell=True, text=True
+    )
 
     for pid in command_py_pids:
         pstree = subprocess.run(
@@ -139,6 +147,3 @@ def test_1(tmp_path, seed):
         ).stdout
         assert pstree == "", pstree
 
-    subprocess.run(
-       f"pstree -w -p {os.getpid()}", shell=True, text=True
-    )

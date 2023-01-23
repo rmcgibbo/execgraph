@@ -12,7 +12,7 @@ use hyper::StatusCode;
 use nix::unistd::Pid;
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
-use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
+use std::{io::Read, os::unix::prelude::AsRawFd, time::Duration, convert::TryInto};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::Instant;
@@ -57,14 +57,17 @@ struct CommandLineArguments {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
     lazy_static::initialize(&START_TIME);
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().init();
     // use tracing_subscriber::prelude::*;
     // let fmt_layer =
     //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::INFO);
     // tracing_subscriber::registry().with(fmt_layer).init();
 
     unsafe {
-        libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
+            tracing::error!("Unable to set myself as the subreaper");
+            std::process::exit(1);
+        }
     }
 
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
@@ -173,7 +176,7 @@ async fn main() -> Result<(), RemoteError> {
                             }
                         }
                     }
-                    if children.len() == 0 {
+                    if children.is_empty() {
                         break;
                     }
                 }
@@ -428,7 +431,7 @@ async fn run_command(
             unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
 
             // send a notification back to the controller if possible
-            client.post(end_route)
+            if let Err(e) = client.post(end_route)
                 .postcard(&EndRequest {
                     transaction_id,
                     status: 128+16,
@@ -436,7 +439,9 @@ async fn run_command(
                     stderr: slurm_error_message,
                     values: vec![],
                     start_request: None,
-                })?.send().await.unwrap();
+                })?.send().await {
+                    tracing::error!("Unable to send lasp-gasp message {}", e);
+                }
             return Err(RemoteError::Sigterm)
         },
         _ = sigterms.recv() => {
@@ -448,7 +453,7 @@ async fn run_command(
                 None => "".to_string()
             };
             // send a notification back to the controller if possible
-            client.post(end_route)
+            if let Err(e) = client.post(end_route)
                 .postcard(&EndRequest {
                     transaction_id,
                     status: 128+15,
@@ -456,8 +461,9 @@ async fn run_command(
                     stderr: slurm_error_logfile_contents,
                     values: vec![],
                     start_request: None,
-                })?.send().await.ok();
-
+                })?.send().await {
+                    tracing::error!("Unable to send lasp-gasp message {}", e);
+                }
             return Err(RemoteError::Sigterm)
         }
     };
@@ -676,7 +682,10 @@ fn async_watcher(
                             .unwrap_or("Unable to read slurm error file. Utf8 issue?");
                         if re.is_match(s) || s.contains("Unable to read") {
                             futures::executor::block_on(async {
-                                tx.send(s.to_string()).await.unwrap();
+                                // send notification to channel, but if we can't don't panic
+                                if let Err(e) = tx.send(s.to_string()).await {
+                                    tracing::error!("Unable to send notifcation to channel {}", e);
+                                }
                             })
                         }
                     }

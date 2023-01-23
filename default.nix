@@ -38,6 +38,8 @@ let
     inherit src;
     name = "execgraph";
     version = "0.1.0";
+
+    RUSTFLAGS="--cfg unsound_local_offset";
     nativeBuildInputs = [
       python
     ];
