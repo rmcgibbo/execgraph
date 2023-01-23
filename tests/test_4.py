@@ -145,5 +145,6 @@ def test_1(tmp_path, seed):
         pstree = subprocess.run(
             f"pstree -w -p {pid}", shell=True, stdout=subprocess.PIPE, text=True
         ).stdout
-        assert pstree == "", pstree
+        print(pstree)
+        assert pstree == ""
 
