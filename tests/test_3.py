@@ -61,6 +61,6 @@ def test_1(tmp_path):
         )
     os.chmod(tmp_path / "simple-provisioner", 0o744)
 
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
+    nfailed, _ = eg.execute(remote_provisioner_cmd=str(tmp_path / "simple-provisioner"))
     os.system("pkill toxiproxy-serve")
     assert nfailed == 0

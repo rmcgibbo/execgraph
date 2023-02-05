@@ -16,6 +16,16 @@ pub struct StatusRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct UpdateRatelimitRequest {
+    pub per_second: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UpdateRemoteProvisionerInfo {
+    pub provisioner_info: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ServerMetrics {
     pub p50_latency: HashMap<String, u32>,
     pub p99_latency: HashMap<String, u32>,
@@ -27,6 +37,9 @@ pub struct StatusReply {
     pub queues: HashMap<u64, StatusQueueReply>,
     pub etag: u64,
     pub server_metrics: ServerMetrics,
+    pub rate: f64,
+    pub ratelimit: u32,
+    pub provisioner_info: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 pub struct StatusQueueReply {

@@ -73,7 +73,7 @@ for row in dag:
     eg.add_task(["sleep", "0.01"], key=row["id"], dependencies=row["dependencies"])
 
 try:
-    eg.execute(remote_provisioner = os.path.dirname(__file__) + "/provisioner")
+    eg.execute(remote_provisioner_cmd = os.path.dirname(__file__) + "/provisioner")
 except KeyboardInterrupt:
     sys.exit(1)
 sys.exit(0)

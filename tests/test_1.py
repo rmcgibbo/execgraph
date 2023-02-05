@@ -230,7 +230,9 @@ def test_simple_remote(num_parallel, tmp_path):
         )
     os.chmod(tmp_path / "simple-provisioner", 0o744)
 
-    nfailed, order = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
+    nfailed, order = eg.execute(
+        remote_provisioner_cmd=str(tmp_path / "simple-provisioner")
+    )
     assert order == ["0", "1", "2", "3", "4"]
     assert nfailed == 0
 
@@ -262,7 +264,7 @@ def test_murder_remote(num_parallel, tmp_path, _seed):
         )
     os.chmod(tmp_path / "simple-provisioner", 0o744)
 
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "simple-provisioner"))
+    nfailed, _ = eg.execute(remote_provisioner_cmd=str(tmp_path / "simple-provisioner"))
     assert nfailed in (0, 1)
 
 
@@ -294,7 +296,7 @@ def test_no_such_provisioner(num_parallel, tmp_path, provisioner):
 
     eg.add_task(["skdfjsbfjdbsbjdfssdf"], key="task0")
 
-    nfailed, order = eg.execute(remote_provisioner=provisioner)
+    nfailed, order = eg.execute(remote_provisioner_cmd=provisioner)
     assert nfailed == 0
     assert order == []
 
@@ -311,7 +313,7 @@ def test_shutdown(tmp_path):
     os.chmod(tmp_path / "multi-provisioner", 0o744)
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
     eg.add_task(["false"], key="0")
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    nfailed, _ = eg.execute(remote_provisioner_cmd=str(tmp_path / "multi-provisioner"))
     assert nfailed == 1
 
 
@@ -319,56 +321,15 @@ def test_shutdown_2(tmp_path):
     with open(tmp_path / "provisioner", "w") as f:
         print(
             f"""#!{sys.executable}
-import asyncio
 import sys
-import time
-import sys
-import struct
-import asyncio
+import os
 
-
-def make_cancellation_event(fileno: int) -> asyncio.Event:
-    cancellation_event = asyncio.Event()
-    loop = asyncio.get_event_loop()
-
-    def reader():
-        while True:
-            data = sys.stdin.buffer.read(4096)
-            if not data:
-                cancellation_event.set()
-                loop.remove_reader(fileno)
-                break
-
-    loop.add_reader(fileno, reader)
-    return cancellation_event
-
-
-async def main():
-    length_bytes = sys.stdin.buffer.read(8)
-    length, = struct.unpack('>Q', length_bytes)
-    y = sys.stdin.buffer.read(length)
-    assert y == b"foo bar"
-
-    cancellation_event = make_cancellation_event(sys.stdin.fileno())
-
-    done, pending = await asyncio.wait(
-        [
-            asyncio.create_task(cancellation_event.wait()),
-            asyncio.create_task(do_stuff()),
-        ],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    with open('{(tmp_path / 'finished')}', "w") as f:
-        f.write("1")
-
-async def do_stuff():
-    while True:
-        await asyncio.sleep(0.1)
-        print("Doing stuff...")
-
+def main():
+    with open('{(tmp_path / 'pid')}', "w") as f:
+        print(os.getpid(), file=f)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 """,
             file=f,
         )
@@ -377,12 +338,13 @@ if __name__ == "__main__":
     eg = _execgraph.ExecGraph(1, tmp_path / "foo")
     eg.add_task(["sleep", "1"], key="1")
     nfailed, _ = eg.execute(
-        remote_provisioner=str(tmp_path / "provisioner"),
-        remote_provisioner_arg2="foo bar",
+        remote_provisioner_cmd=str(tmp_path / "provisioner"),
+        remote_provisioner_info="foo bar",
     )
-    with open(tmp_path / "finished") as f:
-        assert f.read() == "1"
-    assert nfailed == 0
+    with open(tmp_path / "pid") as f:
+        pid = int(f.read())
+    assert not os.path.exists(f"/proc/{pid}/pid")
+    assert nfailed == 1
 
 
 def test_shutdown_3(tmp_path):
@@ -400,7 +362,7 @@ def test_shutdown_3(tmp_path):
     eg.add_task(["false"], key="2")
 
     start = time.time()
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    nfailed, _ = eg.execute(remote_provisioner_cmd=str(tmp_path / "multi-provisioner"))
     end = time.time()
     assert end - start < 5
     assert nfailed in (1, 2)
@@ -417,12 +379,21 @@ def test_status_1(tmp_path):
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
     eg.add_task(["false"], key="foo", affinity=3)
     eg.add_task(["false"], key="bar", affinity=3)
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    nfailed, _ = eg.execute(
+        remote_provisioner_cmd=str(tmp_path / "multi-provisioner"),
+        remote_provisioner_info="foo",
+    )
 
     with open(tmp_path / "resp.json") as f:
         x = json.load(f)
         del x["server_metrics"]
-        assert x == {"queues":[[3,{"num_ready":2,"num_inflight":0}]],"etag":1}
+        assert x == {
+            "queues": [[3, {"num_ready": 2, "num_inflight": 0}]],
+            "etag": 1,
+            "ratelimit": 0,
+            "rate": 0.0,
+            "provisioner_info": "foo",
+        }
 
     assert nfailed == 0
 
@@ -446,7 +417,7 @@ curl -X GET \
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
     eg.add_task(["false"], key="foo")
     eg.add_task(["false"], key="bar")
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    nfailed, _ = eg.execute(remote_provisioner_cmd=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp.json") as f:
         print(f.read())
@@ -467,34 +438,37 @@ def test_queue(tmp_path):
     eg = _execgraph.ExecGraph(num_parallel=0, logfile=tmp_path / "foo")
     eg.add_task(["true"], key="foo", affinity=1)
     eg.add_task(["true"], key="bar", affinity=2)
-    nfailed, _ = eg.execute(remote_provisioner=str(tmp_path / "multi-provisioner"))
+    nfailed, _ = eg.execute(remote_provisioner_cmd=str(tmp_path / "multi-provisioner"))
 
     with open(tmp_path / "resp0.json") as f:
         value = json.load(f)
         value["queues"] = sorted(value["queues"], key=lambda x: str(x[0]))
         del value["server_metrics"]
         assert value == {
-                "etag": 1,
-                "queues": sorted(
+            "etag": 1,
+            "rate": 0.0,
+            "ratelimit": 0,
+            "provisioner_info": None,
+            "queues": sorted(
+                [
                     [
-                        [
-                            1,
-                            {
-                                "num_ready": 1,
-                                "num_inflight": 0,
-                            },
-                        ],
-                        [
-                            2,
-                            {
-                                "num_ready": 1,
-                                "num_inflight": 0,
-                            },
-                        ],
+                        1,
+                        {
+                            "num_ready": 1,
+                            "num_inflight": 0,
+                        },
                     ],
-                    key=lambda x: str(x[0]),
-                ),
-            }
+                    [
+                        2,
+                        {
+                            "num_ready": 1,
+                            "num_inflight": 0,
+                        },
+                    ],
+                ],
+                key=lambda x: str(x[0]),
+            ),
+        }
 
     with open(tmp_path / "resp0.json") as f:
         value = json.load(f)
@@ -663,6 +637,53 @@ eg.execute()
     assert log[1]["Ready"]["key"] == "key"
     assert log[2]["Started"]["key"] == "key"
     assert log[3]["Finished"]["status"] == 127
+
+
+def test_sigint_2(tmp_path):
+    script = """
+import sys
+sys.path.insert(0, ".")
+import execgraph as _execgraph
+eg = _execgraph.ExecGraph(8, logfile="%s/wrk_log")
+eg.add_task(["true"], key="key", affinity=4)  # cant execute
+eg.execute(remote_provisioner_cmd="%s/provisioner")
+    """ % (
+        tmp_path,
+        tmp_path,
+    )
+    with open(tmp_path / "script", "w") as f:
+        f.write(script)
+    with open(tmp_path / "provisioner", "w") as f:
+        print(
+            f"""#!{sys.executable}
+import sys
+import os
+import time
+
+def main():
+    print("foo")
+    with open('{(tmp_path / 'pid')}', "w") as f:
+        print(os.getpid(), file=f)
+    time.sleep(60)
+
+if __name__ == "__main__":
+    main()
+""",
+            file=f,
+        )
+    os.chmod(tmp_path / "provisioner", 0o744)
+
+    p = subprocess.Popen(
+        [sys.executable, tmp_path / "script"],
+    )
+
+    time.sleep(1)
+    p.send_signal(signal.SIGINT)
+    p.wait(timeout=1)
+
+    with open(tmp_path / "pid") as f:
+        prov_pid = int(f.read())
+    assert not os.path.exists(f"/proc/{prov_pid}/status")
 
 
 @pytest.mark.parametrize("rerun_failures, expected", [(True, 1), (False, 0)])
@@ -923,12 +944,13 @@ def test_fork_1(tmp_path):
 
 def test_fork_2(tmp_path):
     eg1 = _execgraph.ExecGraph(
-        2, logfile=tmp_path / "foo",
+        2,
+        logfile=tmp_path / "foo",
     )
     eg1.add_task(["true"], key="0")
     eg1.add_task(["false"], key="1", dependencies=[0])
     eg1.add_task(["true"], key="2", dependencies=[1])
-    assert eg1.execute() == (1, ['0', '1'])
+    assert eg1.execute() == (1, ["0", "1"])
     del eg1
 
     eg1 = _execgraph.ExecGraph(
@@ -937,11 +959,13 @@ def test_fork_2(tmp_path):
     eg1.add_task(["true"], key="0")
     eg1.add_task(["false"], key="1", dependencies=[0])
     eg1.add_task(["true"], key="2", dependencies=[1])
-    assert eg1.execute() == (1, ['1'])
+    assert eg1.execute() == (1, ["1"])
     del eg1
 
     eg1 = _execgraph.ExecGraph(
-        2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "foo"],
+        2,
+        logfile=tmp_path / "bar",
+        readonly_logfiles=[tmp_path / "foo"],
         rerun_failures=False,
     )
     eg1.add_task(["true"], key="0")
@@ -953,9 +977,92 @@ def test_fork_2(tmp_path):
 
 def test_fd_input(tmp_path):
     eg = _execgraph.ExecGraph(
-        2, logfile=tmp_path / "foo",
+        2,
+        logfile=tmp_path / "foo",
     )
-    eg.add_task(["sh", "-c", f"cat /proc/$$/fd/8 > {tmp_path}/file"], key="0", fd_input=(8, b"hello world"))
+    eg.add_task(
+        ["sh", "-c", f"cat /proc/$$/fd/8 > {tmp_path}/file"],
+        key="0",
+        fd_input=(8, b"hello world"),
+    )
     eg.execute()
     with open(tmp_path / "file") as f:
         assert f.read() == "hello world"
+
+
+def test_ratelimit_1(tmp_path):
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+    for i in range(0, 5):
+        eg.add_task(
+            ["true"],
+            key=f"{i}",
+        )
+
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            """#!/bin/sh
+        set -e -x
+        echo $1
+        execgraph-remote $1 0
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+
+    start = time.perf_counter()
+    nfailed, order = eg.execute(
+        remote_provisioner_cmd=str(tmp_path / "simple-provisioner"),
+        ratelimit_per_second=1,
+    )
+    end = time.perf_counter()
+    assert nfailed == 0
+    assert end - start > 4
+
+
+def test_ratelimit_2(tmp_path):
+    admin_socket = "/run/user/%s/wrk-%s.sock" % (os.getuid(), os.getpid())
+    try:
+        with open(admin_socket, "w") as f:
+            pass
+        os.unlink(admin_socket)
+    except (PermissionError, FileNotFoundError):
+        return
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+    for i in range(0, 10):
+        eg.add_task(
+            ["true"],
+            key=f"{i}",
+        )
+
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            """#!/bin/sh
+        set -e -x
+        echo $1
+        execgraph-remote $1 0
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+    import threading
+
+    def run_thread():
+        time.sleep(2)
+        subprocess.run(
+            """curl --no-buffer -XPOST --unix-socket %s http:/localhost/ratelimit -H 'Content-Type: application/json' -d '{"per_second":0}'"""
+            % admin_socket,
+            shell=True,
+        )
+
+    threading.Thread(target=run_thread).start()
+
+    start = time.perf_counter()
+    nfailed, order = eg.execute(
+        remote_provisioner_cmd=str(tmp_path / "simple-provisioner"),
+        ratelimit_per_second=1,
+    )
+    end = time.perf_counter()
+    assert nfailed == 0
+    assert end - start > 2
+    assert end - start < 4

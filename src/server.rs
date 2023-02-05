@@ -1,12 +1,12 @@
 use crate::{
     async_flag::AsyncFlag,
     constants::PING_TIMEOUT_MSECS,
-    execgraph::Cmd,
+    execgraph::{Cmd, RemoteProvisionerSpec},
     fancy_cancellation_token::{self, CancellationState},
     http_extensions::axum::Postcard,
     httpinterface::*,
     sync::{ExitStatus, FinishedEvent, ReadyTrackerClient},
-    timewheel::{TimeWheel, TimerID},
+    time::timewheel::{TimeWheel, TimerID},
 };
 use anyhow::Result;
 use axum::{
@@ -46,11 +46,12 @@ struct ConnectionState {
     timer_id: TimerID,
     disconnect_error_message: String,
 }
-#[derive(Debug)]
+
 pub struct State<'a> {
     connections: DashMap<u32, ConnectionState>,
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
-    tracker: &'a ReadyTrackerClient,
+    pub(crate) tracker: &'a ReadyTrackerClient,
+    pub(crate) provisioner: Mutex<RemoteProvisionerSpec>,
     token: fancy_cancellation_token::CancellationToken,
     timeouts: TimeWheel<u32>,
 }
@@ -60,6 +61,7 @@ impl<'a> State<'a> {
         subgraph: Arc<DiGraph<&'a Cmd, ()>>,
         tracker: &'a ReadyTrackerClient,
         token: fancy_cancellation_token::CancellationToken,
+        provisioner: RemoteProvisionerSpec,
     ) -> State<'a> {
         State {
             connections: DashMap::new(),
@@ -67,6 +69,7 @@ impl<'a> State<'a> {
             tracker,
             token,
             timeouts: TimeWheel::new(Duration::from_millis(TIMEWHEEL_DURATION_MSECS)),
+            provisioner: Mutex::new(provisioner),
         }
     }
 
@@ -124,10 +127,11 @@ impl<'a> State<'a> {
 }
 
 #[derive(Debug)]
-enum AppError {
+pub enum AppError {
     Shutdown,
     NoSuchTransaction,
     NoSuchRunnerType,
+    RateLimited,
 }
 
 impl IntoResponse for AppError {
@@ -136,6 +140,7 @@ impl IntoResponse for AppError {
             AppError::Shutdown => StatusCode::GONE,
             AppError::NoSuchTransaction => StatusCode::NOT_FOUND,
             AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
+            AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         };
         let body = Json(json!({ "message": format!("{:#?}", self) }));
 
@@ -146,7 +151,7 @@ impl IntoResponse for AppError {
 // ------------------------------------------------------------------ //
 
 // GET /status
-async fn status_handler(
+pub async fn status_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     payload: Option<Json<StatusRequest>>,
 ) -> Result<Json<StatusReply>, AppError> {
@@ -185,6 +190,9 @@ async fn status_handler(
         queues: resp,
         etag,
         server_metrics: collect_server_metrics(),
+        rate: state.tracker.get_rate(),
+        ratelimit: state.tracker.get_ratelimit(),
+        provisioner_info: state.provisioner.lock().unwrap().info.clone(),
     }))
 }
 
@@ -217,21 +225,33 @@ async fn start_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<StartRequest>,
 ) -> Result<Postcard<StartResponse>, AppError> {
-    Ok(Postcard(start_request_impl(state, request)?))
+    Ok(Postcard(start_request_impl(state, request).await?))
 }
 
-fn start_request_impl(state: Arc<State>, request: StartRequest) -> Result<StartResponse, AppError> {
+async fn start_request_impl(
+    state: Arc<State<'static>>,
+    request: StartRequest,
+) -> Result<StartResponse, AppError> {
     let transaction_id = rand::random::<u32>();
 
-    let node_id = state
-        .tracker
-        .try_recv(request.runnertypeid)
-        .map_err(|e| match e {
-            crate::sync::ReadyTrackerClientError::ChannelTryRecvError(_) => AppError::Shutdown,
-            crate::sync::ReadyTrackerClientError::NoSuchRunnerType => AppError::NoSuchRunnerType,
-            crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => unreachable!(),
-        })?;
-
+    // Wait for up to one second, and if we time out then we'll reply with "RateLimited" (a 429 http code)
+    let node_id = async {
+        tokio::select! {
+            _ = state.token.hard_cancelled() => {
+                Err(AppError::Shutdown)
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                Err(AppError::RateLimited)
+            }
+            r = state.tracker.recv(request.runnertypeid) => {
+                r.map_err(|e| match e {
+                    crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => AppError::Shutdown,
+                    crate::sync::ReadyTrackerClientError::NoSuchRunnerType=>AppError::NoSuchRunnerType,
+                    crate::sync::ReadyTrackerClientError::ChannelTryRecvError(_) => unreachable!(),
+                })
+            }
+        }
+    }.await?;
     let cmd = state.subgraph[node_id];
     cmd.call_preamble();
 
@@ -312,7 +332,7 @@ async fn end_handler(
             _ = state.token.hard_cancelled() => {}
             _ = flag.wait() => {}
             };
-            let resp = start_request_impl(state, start_request)?;
+            let resp = start_request_impl(state, start_request).await?;
             Ok(Postcard(EndResponse {
                 start_response: Some(resp),
             }))
@@ -376,6 +396,9 @@ async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response
     Ok(out)
 }
 
+// Router for the main server. This server is serving on a random port, and
+// its job is primarily to give work out to execgraph-remote and accept finished
+// work.
 pub fn router(state: Arc<State<'static>>) -> Router {
     use axum::routing::{get, post};
     use tower_http::trace::TraceLayer;

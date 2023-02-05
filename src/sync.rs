@@ -4,6 +4,8 @@ use crate::{
     execgraph::Cmd,
     fancy_cancellation_token::{CancellationState, CancellationToken},
     logfile2::{self, LogFileRW},
+    time::gcra::RateLimiter,
+    time::ratecounter::RateCounter,
 };
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
@@ -23,6 +25,8 @@ use std::{
 };
 use thiserror::Error;
 use tracing::{debug, error};
+
+const DEFAULT_RATE_COUNTER_TIMESCALE: f64 = 10.; // seconds
 
 macro_rules! u32checked_add {
     ($a:expr,$b:expr) => {{
@@ -78,12 +82,13 @@ pub struct ReadyTrackerServer<'a> {
     shutdown_state: ShutdownState,
 }
 
-#[derive(Debug)]
 pub struct ReadyTrackerClient {
     queuestate: Arc<DashMap<u64, Snapshot>>,
     pending_increased_event: AsyncCounter,
     s: async_channel::Sender<Event>,
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
+    ratelimiter: RateLimiter,
+    ratecounter: RateCounter,
 }
 
 struct TaskStatus {
@@ -96,6 +101,7 @@ pub fn new_ready_tracker<'a>(
     logfile: &'a mut LogFile<LogFileRW>,
     count_offset: u32,
     failures_allowed: u32,
+    ratelimit_per_second: u32,
 ) -> (ReadyTrackerServer<'a>, ReadyTrackerClient) {
     let mut ready_s = vec![];
     let mut ready_r = vec![];
@@ -151,6 +157,8 @@ pub fn new_ready_tracker<'a>(
             s: finished_s,
             queuestate,
             pending_increased_event,
+            ratelimiter: RateLimiter::new(ratelimit_per_second.into()),
+            ratecounter: RateCounter::new(DEFAULT_RATE_COUNTER_TIMESCALE),
         },
     )
 }
@@ -340,10 +348,8 @@ impl<'a> ReadyTrackerServer<'a> {
 
         // elapsed is none if the task never started, which happens if we're being
         // called during the drain() shutdown phase on tasks that never began.
-        let elapsed = self
-            .inflight
-            .get(&e.id)
-            .map(|&started| Instant::now() - started);
+        let now = Instant::now();
+        let elapsed = self.inflight.get(&e.id).map(|&started| now - started);
 
         {
             self.n_pending = self.n_pending.saturating_sub(1);
@@ -494,31 +500,22 @@ impl<'a> ReadyTrackerServer<'a> {
 }
 
 impl ReadyTrackerClient {
-    pub fn try_recv(&self, runnertypeid: u32) -> Result<NodeIndex, ReadyTrackerClientError> {
-        let reciever = self
-            .r
-            .get(runnertypeid as usize)
-            .ok_or(ReadyTrackerClientError::NoSuchRunnerType)?;
+    pub fn set_ratelimit(&self, per_second: u32) {
+        self.ratelimiter.reset(per_second.into())
+    }
 
-        // Each task might be in multiple ready queues, one for each runner type that it's
-        // eligible for. So within the ready queue we store an AtomicBool that represents
-        // whether this item has already been claimed. A different way to implement this would
-        // be to pop off receiver channel and then mutate all of the other channels to remove
-        // the item, but instead we're using this tombstone idea.
-        loop {
-            let (task, _priority) = reciever.try_recv()?;
-            let was_taken = task.taken.fetch_or(true, SeqCst);
-            if !was_taken {
-                let mut x = self.queuestate.get_mut(&task.affinity.data).expect("bar");
-                x.num_ready -= 1;
-                x.num_inflight += 1;
+    pub fn get_ratelimit(&self) -> u32 {
+        self.ratelimiter.rate_per_second() as u32
+    }
 
-                return Ok(task.id);
-            }
-        }
+    pub fn get_rate(&self) -> f64 {
+        self.ratecounter.get_rate()
     }
 
     pub async fn recv(&self, runnertypeid: u32) -> Result<NodeIndex, ReadyTrackerClientError> {
+        // wait for the rate limiter
+        self.ratelimiter.until_ready().await;
+
         let reciever = self
             .r
             .get(runnertypeid as usize)
@@ -536,6 +533,7 @@ impl ReadyTrackerClient {
                 x.num_ready -= 1;
                 x.num_inflight += 1;
 
+                self.ratecounter.update(std::time::Instant::now());
                 return Ok(task.id);
             }
         }

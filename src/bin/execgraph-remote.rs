@@ -12,13 +12,13 @@ use hyper::StatusCode;
 use nix::unistd::Pid;
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
-use std::{io::Read, os::unix::prelude::AsRawFd, time::Duration, convert::TryInto};
+use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::Instant;
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::warn;
 use whoami::username;
 
 // https://github.com/SchedMD/slurm/blob/791f9c39e0db919e02ef8857be0faff09a3656b2/src/slurmd/slurmstepd/req.c#L724
@@ -654,7 +654,7 @@ fn async_watcher(
     Ok((watcher, rx))
 }
 
-fn cleanup_child_processes_carefully(){
+fn cleanup_child_processes_carefully() {
     // Before the SIGTERM, maybe the process tree looked like
     //
     //  execgraph-remote (us) ->
@@ -667,7 +667,6 @@ fn cleanup_child_processes_carefully(){
     //
     //  execgraph-remote (us) ->
     //      actual worker program
-
 
     let mypid = std::process::id() as i32;
     //

@@ -324,7 +324,7 @@ impl PyExecGraph {
     ///      target, you can do this. in this case we'll only execute the tasks that
     ///      are required for this target. if not supplied we'll try to execute the
     ///      whole graph.
-    ///    remote_provisioner (Optional[str]): Path to a remote provisioning script.
+    ///    remote_provisioner_cmd (Optional[str]): Path to a remote provisioning script.
     ///      If supplied, we call this script with the url of an emphemeral server
     ///      as the first argument, and it can launch processes that can connect back
     ///      to this ExecGraph instance's http server to run tasks. Note: this package
@@ -333,11 +333,14 @@ impl PyExecGraph {
     ///      status back. You'll need to write a provisioner script that arranges for
     ///      these execgraph-remote processes to be executed remotely using whatever
     ///      job queuing system you have though.
-    ///   remote_provisioner_arg2 (Optional[str]): If you have extra data that you
-    ///     want to pass to the remote provisioner script, you can use this. If supplied
-    ///     it'll be passed as the second argument to remote_provisioner. The first
-    ///     argument will be the url.
-    ///
+    ///   remote_provisioner_info (Optional[str]): If you have extra data that you
+    ///     want to pass to the remote provisioner script, you can stash it here, and the
+    ///     pick it up inside the remote provisioner by querying the /status endpoint.
+    ///     Note that the version served on the /status endpoint can also be dynamically
+    ///     updated during execution by POSTing to the admin unix socket.
+    ///   ratelimit_per_second (u32): Rate limit command execution so that approximately
+    ///     no more than this number of tasks are started per second. Set to zero to
+    ///     disable.
     /// Returns:
     ///     num_failed (int): the number of tasks that failed. a failure is identified
     ///         when a task exits with a nonzero exit code.
@@ -346,16 +349,18 @@ impl PyExecGraph {
     ///
     #[pyo3(signature=(
         target = None,
-        remote_provisioner = None,
-        remote_provisioner_arg2 = None
+        remote_provisioner_cmd = None,
+        remote_provisioner_info = None,
+        ratelimit_per_second = 0,
     ))]
     #[tracing::instrument(skip_all)]
     fn execute(
         &mut self,
         py: Python,
         target: Option<u32>,
-        remote_provisioner: Option<String>,
-        remote_provisioner_arg2: Option<String>,
+        remote_provisioner_cmd: Option<String>,
+        remote_provisioner_info: Option<String>,
+        ratelimit_per_second: u32,
     ) -> PyResult<(u32, Vec<String>)> {
         // Create a new process group so that at shutdown time, we can send a
         // SIGTERM to this process group and kill of all child processes.
@@ -365,9 +370,9 @@ impl PyExecGraph {
             }
         }
 
-        let x = remote_provisioner.map(|cmd| RemoteProvisionerSpec {
+        let x = remote_provisioner_cmd.map(|cmd| RemoteProvisionerSpec {
             cmd,
-            arg2: remote_provisioner_arg2,
+            info: remote_provisioner_info,
         });
 
         py.allow_threads(move || {
@@ -380,6 +385,7 @@ impl PyExecGraph {
                         self.failures_allowed,
                         self.rerun_failures,
                         x,
+                        ratelimit_per_second,
                     )
                     .await
             })

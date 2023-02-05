@@ -1,4 +1,5 @@
 use crate::{
+    admin_server::run_admin_service_forever,
     fancy_cancellation_token::{CancellationState, CancellationToken},
     graphtheory::transitive_closure_dag,
     localrunner::{run_local_process_loop, LocalQueueType},
@@ -17,10 +18,9 @@ use std::{
     convert::TryInto,
     ffi::OsString,
     net::SocketAddr,
-    process::Stdio,
     sync::Arc,
 };
-use tokio::{io::AsyncWriteExt, process::Command, sync::oneshot};
+use tokio::{process::Command, sync::oneshot};
 use tracing::{debug, error, trace, warn};
 
 // TODO: remove clone?
@@ -55,10 +55,10 @@ lazy_static::lazy_static! {
     );
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RemoteProvisionerSpec {
     pub cmd: String,
-    pub arg2: Option<String>,
+    pub info: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +241,7 @@ impl ExecGraph {
         failures_allowed: u32,
         rerun_failures: bool,
         provisioner: Option<RemoteProvisionerSpec>,
+        ratelimit_per_second: u32,
     ) -> Result<(u32, Vec<String>)> {
         fn extend_graph_lifetime<'a>(
             g: Arc<DiGraph<&'a Cmd, ()>>,
@@ -275,12 +276,13 @@ impl ExecGraph {
             &mut self.logfile,
             count_offset,
             failures_allowed,
+            ratelimit_per_second,
         );
 
         // Run local processes
         trace!(
             "Spawning {} local process loops",
-            num_parallel + (if num_parallel > 0 { 1 } else { 0 })
+            num_parallel + u32::from(num_parallel > 0)
         );
         let mut handles: Vec<tokio::task::JoinHandle<_>> = {
             let local = (0..num_parallel).map(|_| {
@@ -315,19 +317,26 @@ impl ExecGraph {
             let subgraph = extend_graph_lifetime(subgraph.clone());
             let token1 = token.clone();
             let token2 = token.clone();
-            let (server_start_tx, server_start_rx) = oneshot::channel();
+            let token3 = token.clone();
+            let state = Arc::new(ServerState::new(
+                subgraph,
+                transmute_lifetime(&tracker),
+                token1.clone(),
+                provisioner.clone(),
+            ));
+            let state2 = state.clone();
+            let (http_service_up_sender, http_service_up_receiver) =
+                tokio::sync::oneshot::channel();
 
+            // Run the http server
             handles.push(tokio::spawn(async move {
-                let state = Arc::new(ServerState::new(
-                    subgraph,
-                    transmute_lifetime(&tracker),
-                    token1.clone(),
-                ));
-
                 let service = router(state.clone()).into_make_service();
                 let addr = SocketAddr::from(([0, 0, 0, 0], 0));
                 let server = Server::bind(&addr).serve(service);
                 let bound_addr = server.local_addr();
+                http_service_up_sender
+                    .send(format!("http://{}", bound_addr))
+                    .expect("failed to send");
                 let graceful = server.with_graceful_shutdown(token1.hard_cancelled());
 
                 let (stop_reaping_pings_tx, stop_reaping_pings_rx) = oneshot::channel();
@@ -337,7 +346,6 @@ impl ExecGraph {
                         async move { state.reap_pings_forever(stop_reaping_pings_rx).await },
                     )
                 };
-                server_start_tx.send(bound_addr).expect("failed to send");
                 if let Err(err) = graceful.await {
                     error!("Server error: {}", err);
                 }
@@ -347,11 +355,18 @@ impl ExecGraph {
                 token1.cancel(CancellationState::HardCancelled);
                 debug!("Server task exited");
             }));
+            // Run the admin server (unix domain socket)
+            handles.push(tokio::spawn(run_admin_service_forever(state2, token3)));
+            // Run the provisioner
             handles.push(tokio::spawn(async move {
-                let bound_addr = server_start_rx.await.expect("failed to recv");
+                let http_service_addr = http_service_up_receiver.await.expect("failed to recv");
                 debug!("Spawning remote provisioner {}", provisioner.cmd);
-                if let Err(e) =
-                    spawn_and_wait_for_provisioner(&provisioner, bound_addr, token2.clone()).await
+                if let Err(e) = spawn_and_wait_for_provisioner(
+                    provisioner.cmd,
+                    http_service_addr,
+                    token2.clone(),
+                )
+                .await
                 {
                     error!("Provisioner failed: {}", e);
                 }
@@ -395,41 +410,18 @@ impl ExecGraph {
 
 #[tracing::instrument(skip_all)]
 async fn spawn_and_wait_for_provisioner(
-    provisioner: &RemoteProvisionerSpec,
-    bound_addr: SocketAddr,
+    provisioner: String,
+    http_service_addr: String,
     token: CancellationToken,
 ) -> Result<()> {
-    let mut child = Command::new(&provisioner.cmd)
-        .arg(format!("http://{}", bound_addr))
+    let mut child = Command::new(&provisioner)
+        .arg(http_service_addr)
         .kill_on_drop(true)
-        .stdin(Stdio::piped())
         .spawn()?;
-    let mut child_stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("failed to take stdin from child process"))?;
-
-    let arg2_string = provisioner
-        .arg2
-        .as_ref()
-        .map(|x| x as &str)
-        .unwrap_or_else(|| "");
-    let arg2_bytes = arg2_string.as_bytes();
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&(arg2_bytes.len() as u64).to_be_bytes());
-    buf.extend_from_slice(arg2_bytes);
-    child_stdin.write_all(&buf).await?;
-    child_stdin.flush().await?;
-
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
         _ = token.hard_cancelled() => {
-            drop(child_stdin); // drop stdin so that it knows to exit
-            let duration = std::time::Duration::from_millis(1000);
-            if tokio::time::timeout(duration, child.wait()).await.is_err() {
-                debug!("sending SIGKILL to provisioner");
-                child.kill().await.expect("kill failed");
-            }
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(child.id().unwrap() as i32), nix::sys::signal::Signal::SIGINT).unwrap();
         },
 
         result = child.wait() => {
