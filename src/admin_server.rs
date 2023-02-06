@@ -1,8 +1,10 @@
 use crate::constants::ADMIN_SOCKET_PREFIX;
+use crate::fancy_cancellation_token::CancellationState;
 use crate::fancy_cancellation_token::CancellationToken;
+use crate::httpinterface::ShutdownRequest;
 use crate::httpinterface::StatusReply;
 use crate::httpinterface::UpdateRatelimitRequest;
-use crate::httpinterface::UpdateRemoteProvisionerInfo;
+use crate::httpinterface::UpdateRemoteProvisionerInfoRequest;
 use crate::server::status_handler;
 use crate::server::{AppError, State};
 use axum::routing::{get, post};
@@ -12,6 +14,7 @@ use axum::Router;
 use axum::Server;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::error;
 
 async fn post_ratelimit_handler(
@@ -24,11 +27,25 @@ async fn post_ratelimit_handler(
 
 async fn post_provisioner_info_handler(
     Extension(state): Extension<Arc<State<'static>>>,
-    payload: Json<UpdateRemoteProvisionerInfo>,
+    payload: Json<UpdateRemoteProvisionerInfoRequest>,
 ) -> Result<Json<StatusReply>, AppError> {
     {
         let mut guard = state.provisioner.lock().unwrap();
         guard.info = payload.provisioner_info.clone();
+    }
+    status_handler(Extension(state), None).await
+}
+
+async fn post_shutdown_handler(
+    Extension(state): Extension<Arc<State<'static>>>,
+    payload: Json<ShutdownRequest>,
+) -> Result<Json<StatusReply>, AppError> {
+    if payload.soft {
+        state
+            .token
+            .cancel(CancellationState::CancelledAfterTime(Instant::now()));
+    } else {
+        state.token.cancel(CancellationState::HardCancelled);
     }
     status_handler(Extension(state), None).await
 }
@@ -38,6 +55,7 @@ fn admin_router(state: Arc<State<'static>>) -> Router {
         .route("/ratelimit", post(post_ratelimit_handler))
         .route("/provisioner_info", post(post_provisioner_info_handler))
         .route("/status", get(status_handler))
+        .route("/shutdown", post(post_shutdown_handler))
         .layer(Extension(state))
 }
 

@@ -21,10 +21,14 @@ pub struct UpdateRatelimitRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct UpdateRemoteProvisionerInfo {
+pub struct UpdateRemoteProvisionerInfoRequest {
     pub provisioner_info: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ShutdownRequest {
+    pub soft: bool,
+}
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServerMetrics {
     pub p50_latency: HashMap<String, u32>,

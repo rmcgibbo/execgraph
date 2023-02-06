@@ -52,7 +52,7 @@ pub struct State<'a> {
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
     pub(crate) tracker: &'a ReadyTrackerClient,
     pub(crate) provisioner: Mutex<RemoteProvisionerSpec>,
-    token: fancy_cancellation_token::CancellationToken,
+    pub(crate) token: fancy_cancellation_token::CancellationToken,
     timeouts: TimeWheel<u32>,
 }
 

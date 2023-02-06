@@ -426,7 +426,7 @@ async fn spawn_and_wait_for_provisioner(
 
         result = child.wait() => {
             let status = result?;
-            error!("provisioner exited with status={}", status);
+            debug!("provisioner exited with status={}", status);
         }
     }
 
