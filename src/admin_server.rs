@@ -14,7 +14,6 @@ use axum::Router;
 use axum::Server;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::error;
 
 async fn post_ratelimit_handler(
@@ -30,7 +29,7 @@ async fn post_provisioner_info_handler(
     payload: Json<UpdateRemoteProvisionerInfoRequest>,
 ) -> Result<Json<StatusReply>, AppError> {
     {
-        let mut guard = state.provisioner.lock().unwrap();
+        let mut guard = state.provisioner.write().unwrap();
         guard.info = payload.provisioner_info.clone();
     }
     status_handler(Extension(state), None).await
@@ -40,10 +39,12 @@ async fn post_shutdown_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     payload: Json<ShutdownRequest>,
 ) -> Result<Json<StatusReply>, AppError> {
+    eprintln!(
+        "\x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin",
+        if payload.soft { "Soft" } else { "Hard" }
+    );
     if payload.soft {
-        state
-            .token
-            .cancel(CancellationState::CancelledAfterTime(Instant::now()));
+        state.tracker.trigger_soft_shutdown();
     } else {
         state.token.cancel(CancellationState::HardCancelled);
     }

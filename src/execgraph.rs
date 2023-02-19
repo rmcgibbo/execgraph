@@ -8,6 +8,7 @@ use crate::{
     sync::new_ready_tracker,
 };
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as b64, Engine};
 use bitvec::array::BitArray;
 use derivative::Derivative;
 use futures::future::join_all;
@@ -318,11 +319,13 @@ impl ExecGraph {
             let token1 = token.clone();
             let token2 = token.clone();
             let token3 = token.clone();
+            let authorization_token = b64.encode(rand::random::<u128>().to_le_bytes());
             let state = Arc::new(ServerState::new(
                 subgraph,
                 transmute_lifetime(&tracker),
                 token1.clone(),
                 provisioner.clone(),
+                authorization_token.clone(),
             ));
             let state2 = state.clone();
             let (http_service_up_sender, http_service_up_receiver) =
@@ -365,6 +368,7 @@ impl ExecGraph {
                     provisioner.cmd,
                     http_service_addr,
                     token2.clone(),
+                    authorization_token,
                 )
                 .await
                 {
@@ -412,15 +416,17 @@ impl ExecGraph {
 async fn spawn_and_wait_for_provisioner(
     provisioner: String,
     http_service_addr: String,
-    token: CancellationToken,
+    cancellation_token: CancellationToken,
+    authorization_token: String,
 ) -> Result<()> {
     let mut child = Command::new(&provisioner)
         .arg(http_service_addr)
+        .env("EXECGRAPH_AUTHORIZATION_TOKEN", authorization_token)
         .kill_on_drop(true)
         .spawn()?;
     tokio::select! {
         // if this process got a ctrl-c, then this token is cancelled
-        _ = token.hard_cancelled() => {
+        _ = cancellation_token.hard_cancelled() => {
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(child.id().unwrap() as i32), nix::sys::signal::Signal::SIGINT).unwrap();
         },
 

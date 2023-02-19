@@ -1,3 +1,4 @@
+use anyhow::Context;
 use async_channel::bounded;
 use clap::Parser;
 use execgraph::{
@@ -9,6 +10,7 @@ use execgraph::{
 use gethostname::gethostname;
 use hyper::StatusCode;
 
+use execgraph::constants::HOLD_RATETIMITED_TIME;
 use nix::unistd::Pid;
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -57,11 +59,13 @@ struct CommandLineArguments {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
     lazy_static::initialize(&START_TIME);
-    tracing_subscriber::fmt().init();
-    // use tracing_subscriber::prelude::*;
-    // let fmt_layer =
-    //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::INFO);
-    // tracing_subscriber::registry().with(fmt_layer).init();
+    unsafe {
+        time::util::local_offset::set_soundness(time::util::local_offset::Soundness::Unsound);
+    } // YOLO
+    tracing_subscriber::fmt()
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     unsafe {
         if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
@@ -71,6 +75,8 @@ async fn main() -> Result<(), RemoteError> {
     }
 
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
+    let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
+    std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
     tracing::info!("execgraph-remote SLURM_JOB_ID={:?}", slurm_jobid);
     unsafe {
         libc::setpgid(libc::getpid(), libc::getpid());
@@ -78,6 +84,10 @@ async fn main() -> Result<(), RemoteError> {
 
     let opt = CommandLineArguments::parse();
     let mut headers = HeaderMap::new();
+    headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", authorization_token))?,
+    );
     headers.insert(
         "X-EXECGRAPH-USERNAME",
         HeaderValue::from_bytes(username().as_bytes())?,
@@ -103,7 +113,7 @@ async fn main() -> Result<(), RemoteError> {
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .http2_prior_knowledge()
-        .timeout(Duration::from_secs(5))
+        .timeout(2 * HOLD_RATETIMITED_TIME)
         .connect_timeout(Duration::from_secs(5))
         .build()?;
     let base = reqwest::Url::parse(&opt.url)?;
@@ -171,16 +181,16 @@ async fn run_command(
 
     let start = match start {
         Some(s) => s,
-        None => {
-            client
-                .get(start_route)
-                .postcard(&make_start_request())?
-                .send()
-                .await?
-                .error_for_status()?
-                .postcard::<StartResponse>()
-                .await?
-        }
+        None => client
+            .get(start_route)
+            .postcard(&make_start_request())?
+            .send()
+            .await
+            .context("Unable to send /start")?
+            .error_for_status()?
+            .postcard::<StartResponse>()
+            .await
+            .context("Unable to receive /start")?,
     };
     let start_time_request_elapsed = Instant::now() - t_before_start_request;
 
@@ -303,7 +313,9 @@ async fn run_command(
                     pid: 0,
                 })?
                 .send() => {
-                    value?.error_for_status()?;
+                    value.context("Unable to pose to /begun")?
+                    .error_for_status()
+                    .context("Receiving from /begun")?;
                 }
                 _ = token3.cancelled() => {
                     return Err(RemoteError::PingTimeout("Failed to receive server pong (290)".to_owned()))
@@ -427,16 +439,24 @@ async fn run_command(
         start_request: still_accepting_tasks(opt).then(make_start_request),
     };
     tokio::select! {
-        value = client.post(end_route).postcard(&end_request)?.send() => {
-            let r = value?.error_for_status()?.postcard::<EndResponse>().await?;
-            token3.cancel();
-            let end_request_elapsed = Instant::now() - t_before_end_request;
-            Ok((TimingInfo {
-                subprocess: time_executing_command,
-                start_request: start_time_request_elapsed,
-                end_request: end_request_elapsed,
-                n_commands: 1,
-            }, r.start_response))
+        value = client
+            .post(end_route)
+            .postcard(&end_request)?
+            .send() => {
+                let r = value
+                    .context("Unable to send /end")?
+                    .error_for_status().context("Receiving from /end")?
+                    .postcard::<EndResponse>()
+                    .await
+                    .context("Decoding response from /end")?;
+                token3.cancel();
+                let end_request_elapsed = Instant::now() - t_before_end_request;
+                Ok((TimingInfo {
+                    subprocess: time_executing_command,
+                    start_request: start_time_request_elapsed,
+                    end_request: end_request_elapsed,
+                    n_commands: 1,
+                }, r.start_response))
         }
         _ = token3.cancelled() => {
             Err(RemoteError::PingTimeout("Failed to receive server pong (420)".to_owned()))

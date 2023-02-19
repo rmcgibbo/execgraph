@@ -37,14 +37,27 @@ pub struct ServerMetrics {
 
 #[derive(Serialize, Deserialize)]
 pub struct StatusReply {
+    /// Information about the number of inflight and eligible tasks on each
+    /// queue
     #[serde(with = "vectorize")]
     pub queues: HashMap<u64, StatusQueueReply>,
+    /// "Expiry Tag" for information about the queues. By using an etag
+    /// one larger than the value you receive from this endpoint, you can
+    /// long-poll until the number of ready tasks changes.
     pub etag: u64,
+    /// Information about the latency of each endpoint
     pub server_metrics: ServerMetrics,
+    /// Current estimated rate of task creation (tasks/s)
     pub rate: f64,
+    /// Current rate limit on task creation (tasks/s)
     pub ratelimit: u32,
+    /// Arbitrary information passed in from the Python wrapper that can be accessed at the
+    /// /status endpoint or modified from the admin_server. The intent is to use this
+    /// for configuration like the maximum number of runners that you want the some
+    /// third-party provisioner to allocate.
     pub provisioner_info: Option<String>,
 }
+
 #[derive(Serialize, Deserialize)]
 pub struct StatusQueueReply {
     pub num_ready: u32,

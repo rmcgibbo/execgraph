@@ -1,3 +1,4 @@
+pub mod constants;
 pub mod execgraph;
 pub mod http_extensions;
 pub mod httpinterface;
@@ -9,7 +10,6 @@ pub mod sync;
 
 mod admin_server;
 mod async_flag;
-mod constants;
 mod fancy_cancellation_token;
 mod graphtheory;
 mod server;

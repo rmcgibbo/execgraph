@@ -38,8 +38,13 @@ impl AsyncFlag {
         }
     }
 
-    pub fn set(&mut self) {
+    pub fn set(&self) {
         self.inner.value.store(true, Ordering::SeqCst);
+        self.inner.event.notify(usize::MAX);
+    }
+
+    pub fn unset(&self) {
+        self.inner.value.store(false, Ordering::SeqCst);
         self.inner.event.notify(usize::MAX);
     }
 

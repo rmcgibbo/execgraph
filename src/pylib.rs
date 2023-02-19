@@ -446,7 +446,13 @@ fn write_logfile(path: std::path::PathBuf, value: &PyAny) -> PyResult<()> {
 
 #[pymodule]
 pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
-    tracing_subscriber::fmt::init();
+    unsafe {
+        time::util::local_offset::set_soundness(time::util::local_offset::Soundness::Unsound);
+    } // YOLO
+    tracing_subscriber::fmt()
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     // // Log to file
     // let file_appender = RollingFileAppender::new(

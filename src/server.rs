@@ -10,22 +10,28 @@ use crate::{
 };
 use anyhow::Result;
 use axum::{
+    headers::authorization::Bearer,
     middleware::Next,
     response::{IntoResponse, Response},
-    Extension, Json, Router,
+    Extension, Json, Router, TypedHeader,
 };
 use dashmap::DashMap;
-use hyper::{Body, Request, StatusCode};
+use hyper::{header::AUTHORIZATION, Body, Request, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Instant,
+};
 use std::{sync::Mutex, time::Duration};
 use tokio::sync::oneshot;
 use tower::ServiceBuilder;
+use tower_http::sensitive_headers::SetSensitiveHeadersLayer;
 use tower_http::ServiceBuilderExt;
 use tracing::{error, Span};
 
-use crate::constants::PING_INTERVAL_MSECS;
+use crate::constants::{HOLD_RATETIMITED_TIME, PING_INTERVAL_MSECS};
 
 const TIMEWHEEL_DURATION_MSECS: u64 = PING_TIMEOUT_MSECS + 1;
 
@@ -48,12 +54,33 @@ struct ConnectionState {
 }
 
 pub struct State<'a> {
+    /// For each open transaction (i.e. a execgraph-remote working on a task(), we track
+    /// index it via a random transaction id (u32) which is given out during the /start
+    /// and then required for each subsequent call. Each connection maintains some state
+    /// about what command is being worked on, when it started, and stuff like that.
     connections: DashMap<u32, ConnectionState>,
     subgraph: Arc<DiGraph<&'a Cmd, ()>>,
+    /// the ReadyTrackerClient is the datastructure in sync.rs that maintains the queues
+    /// of which taks are ready. this is where the server gets tasks from to respond to clients
+    /// with, and what it informs when tasks finish.
     pub(crate) tracker: &'a ReadyTrackerClient,
-    pub(crate) provisioner: Mutex<RemoteProvisionerSpec>,
+    /// this some metadata that can be maniupated and is used by the provisioner to launch
+    /// more runners.
+    pub(crate) provisioner: RwLock<RemoteProvisionerSpec>,
+    /// this is the cancellation token, when we trigger it things are supposed to shut
+    /// down
     pub(crate) token: fancy_cancellation_token::CancellationToken,
+    /// this datastructure is used to figure out when tasks haven't pinged recently enough
+    /// and should be considered dead
     timeouts: TimeWheel<u32>,
+    /// the /start, /begun, /end, and /ping endpoints are designed to only be called from
+    /// execgraph-remote, so they required a bearer token to be set in the http headers,
+    /// and we check whether it's equal to this. the /status endpoint can be called by anyone,
+    /// and the functions in the auth_server.rs server which is listening on a unix socket
+    /// can be called by anyone with OS-level permission to access the unix socket.
+    /// The point of this bearer token is really to make sure that it's only the execgraph-remote
+    /// runners from _this_ workflow that are contacting this server. It's not real security.
+    authorization_token: String,
 }
 
 impl<'a> State<'a> {
@@ -62,6 +89,7 @@ impl<'a> State<'a> {
         tracker: &'a ReadyTrackerClient,
         token: fancy_cancellation_token::CancellationToken,
         provisioner: RemoteProvisionerSpec,
+        authorization_token: String,
     ) -> State<'a> {
         State {
             connections: DashMap::new(),
@@ -69,7 +97,8 @@ impl<'a> State<'a> {
             tracker,
             token,
             timeouts: TimeWheel::new(Duration::from_millis(TIMEWHEEL_DURATION_MSECS)),
-            provisioner: Mutex::new(provisioner),
+            provisioner: RwLock::new(provisioner),
+            authorization_token,
         }
     }
 
@@ -132,6 +161,7 @@ pub enum AppError {
     NoSuchTransaction,
     NoSuchRunnerType,
     RateLimited,
+    Unauthorized,
 }
 
 impl IntoResponse for AppError {
@@ -141,6 +171,7 @@ impl IntoResponse for AppError {
             AppError::NoSuchTransaction => StatusCode::NOT_FOUND,
             AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
             AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
         };
         let body = Json(json!({ "message": format!("{:#?}", self) }));
 
@@ -192,15 +223,19 @@ pub async fn status_handler(
         server_metrics: collect_server_metrics(),
         rate: state.tracker.get_rate(),
         ratelimit: state.tracker.get_ratelimit(),
-        provisioner_info: state.provisioner.lock().unwrap().info.clone(),
+        provisioner_info: state.provisioner.read().unwrap().info.clone(),
     }))
 }
 
 // POST /ping
 async fn ping_handler(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<Ping>,
 ) -> Result<Response, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
     // For debugging: delay responding to pings here to trigger timeouts
     // tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
@@ -222,9 +257,13 @@ async fn ping_handler(
 
 // GET /start
 async fn start_handler(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<StartRequest>,
 ) -> Result<Postcard<StartResponse>, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
     Ok(Postcard(start_request_impl(state, request).await?))
 }
 
@@ -232,21 +271,23 @@ async fn start_request_impl(
     state: Arc<State<'static>>,
     request: StartRequest,
 ) -> Result<StartResponse, AppError> {
-    let transaction_id = rand::random::<u32>();
-
-    // Wait for up to one second, and if we time out then we'll reply with "RateLimited" (a 429 http code)
+    // Grab the next task off the ready queue, which might pause if we're rate limited.
+    // Hold the connection for up to ``HOLD_RATELIMITED_TIME`` (30 seconds), and then if
+    // we're still rate limited, respond to the execgraph-remote with a "RateLimited"
+    // (a 429 http code) which will cause it to exit.
     let node_id = async {
         tokio::select! {
             _ = state.token.hard_cancelled() => {
                 Err(AppError::Shutdown)
             },
-            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+            _ = tokio::time::sleep(HOLD_RATETIMITED_TIME) => {
                 Err(AppError::RateLimited)
             }
             r = state.tracker.recv(request.runnertypeid) => {
                 r.map_err(|e| match e {
                     crate::sync::ReadyTrackerClientError::ChannelRecvError(_) => AppError::Shutdown,
-                    crate::sync::ReadyTrackerClientError::NoSuchRunnerType=>AppError::NoSuchRunnerType,
+                    crate::sync::ReadyTrackerClientError::SoftShutdown => AppError::Shutdown,
+                    crate::sync::ReadyTrackerClientError::NoSuchRunnerType => AppError::NoSuchRunnerType,
                     crate::sync::ReadyTrackerClientError::ChannelTryRecvError(_) => unreachable!(),
                 })
             }
@@ -254,6 +295,7 @@ async fn start_request_impl(
     }.await?;
     let cmd = state.subgraph[node_id];
     cmd.call_preamble();
+    let transaction_id = rand::random::<u32>();
 
     let timer_id = state.timeouts.insert(
         std::time::Duration::from_millis(PING_TIMEOUT_MSECS),
@@ -281,9 +323,13 @@ async fn start_request_impl(
 
 // POST /begun
 async fn begun_handler(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<BegunRequest>,
 ) -> Result<Response, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
     let cstate = state
         .connections
         .get_mut(&request.transaction_id)
@@ -298,9 +344,13 @@ async fn begun_handler(
 
 // POST /end
 async fn end_handler(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<EndRequest>,
 ) -> Result<Postcard<EndResponse>, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
     let cstate = {
         let (_transaction_id, cstate) = state
             .connections
@@ -396,6 +446,7 @@ async fn custom_middleware<B>(req: Request<B>, next: Next<B>) -> Result<Response
     Ok(out)
 }
 
+//
 // Router for the main server. This server is serving on a random port, and
 // its job is primarily to give work out to execgraph-remote and accept finished
 // work.
@@ -406,6 +457,9 @@ pub fn router(state: Arc<State<'static>>) -> Router {
     use tracing::Level;
 
     let middleware = ServiceBuilder::new()
+        .layer(SetSensitiveHeadersLayer::new(std::iter::once(
+            AUTHORIZATION,
+        )))
         .layer(axum::middleware::from_fn(custom_middleware))
         .layer(
             TraceLayer::new_for_http()

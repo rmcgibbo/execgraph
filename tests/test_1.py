@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import time
+import threading
 import subprocess
 from typing import Optional
 from collections import defaultdict
@@ -1045,7 +1046,6 @@ def test_ratelimit_2(tmp_path):
             file=f,
         )
     os.chmod(tmp_path / "simple-provisioner", 0o744)
-    import threading
 
     def run_thread():
         time.sleep(2)
@@ -1066,3 +1066,53 @@ def test_ratelimit_2(tmp_path):
     assert nfailed == 0
     assert end - start > 2
     assert end - start < 4
+
+
+def test_admin_socket_shutdown_1(tmp_path):
+    admin_socket = "/run/user/%s/wrk-%s.sock" % (os.getuid(), os.getpid())
+    try:
+        with open(admin_socket, "w") as f:
+            pass
+        os.unlink(admin_socket)
+    except (PermissionError, FileNotFoundError):
+        return
+
+    eg = _execgraph.ExecGraph(2, tmp_path / "foo")
+    for i in range(0, 100):
+        eg.add_task(
+            ["sleep", "0.5"],
+            key=f"{i}",
+        )
+
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            """#!/bin/sh
+        set -e -x
+        for i in $(seq 1); do
+            execgraph-remote $1 0 &
+        done
+        wait
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+    triggered_at = [None]
+
+    def run_thread():
+        nonlocal triggered_at
+        time.sleep(3)
+        subprocess.run(
+            """curl --no-buffer -XPOST --unix-socket %s http:/localhost/shutdown -H 'Content-Type: application/json' -d '{"soft": true}'"""
+            % admin_socket,
+            shell=True,
+        )
+        triggered_at[0] = time.perf_counter()
+
+    threading.Thread(target=run_thread).start()
+    start = time.perf_counter()
+    nfailed, order = eg.execute(
+        remote_provisioner_cmd=str(tmp_path / "simple-provisioner"),
+    )
+    end = time.perf_counter()
+    assert end - start < 4
+    assert end - triggered_at[0] < 1

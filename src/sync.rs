@@ -12,6 +12,7 @@ use bitvec::array::BitArray;
 use dashmap::DashMap;
 use logfile2::{LogEntry, LogFile, ValueMaps};
 
+use crate::constants::DEFAULT_RATE_COUNTER_TIMESCALE;
 use petgraph::prelude::*;
 use std::{
     collections::HashMap,
@@ -24,9 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::{debug, error};
-
-const DEFAULT_RATE_COUNTER_TIMESCALE: f64 = 10.; // seconds
+use tracing::{debug, error, info};
 
 macro_rules! u32checked_add {
     ($a:expr,$b:expr) => {{
@@ -80,6 +79,7 @@ pub struct ReadyTrackerServer<'a> {
     inflight: HashMap<NodeIndex, std::time::Instant>,
     statuses: HashMap<NodeIndex, TaskStatus>,
     shutdown_state: ShutdownState,
+    soft_shutdown_trigger: AsyncFlag,
 }
 
 pub struct ReadyTrackerClient {
@@ -89,6 +89,7 @@ pub struct ReadyTrackerClient {
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
     ratelimiter: RateLimiter,
     ratecounter: RateCounter,
+    soft_shutdown_trigger: AsyncFlag,
 }
 
 struct TaskStatus {
@@ -131,6 +132,7 @@ pub fn new_ready_tracker<'a>(
         .collect();
 
     let pending_increased_event = AsyncCounter::new();
+    let soft_shutdown_trigger = AsyncFlag::new();
 
     (
         ReadyTrackerServer {
@@ -151,6 +153,7 @@ pub fn new_ready_tracker<'a>(
             logfile,
             statuses,
             shutdown_state: ShutdownState::Normal,
+            soft_shutdown_trigger: soft_shutdown_trigger.clone(),
         },
         ReadyTrackerClient {
             r: ready_r.try_into().unwrap(),
@@ -159,6 +162,7 @@ pub fn new_ready_tracker<'a>(
             pending_increased_event,
             ratelimiter: RateLimiter::new(ratelimit_per_second.into()),
             ratecounter: RateCounter::new(DEFAULT_RATE_COUNTER_TIMESCALE),
+            soft_shutdown_trigger,
         },
     )
 }
@@ -298,6 +302,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             if self.n_fizzled >= self.failures_allowed {
                                 debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
                                 self.n_fizzled, self.failures_allowed, self.n_pending);
+                                // cancel any tasks that have been going for less than FIZZLED_TIME_CUTOFF
                                 token.cancel(CancellationState::CancelledAfterTime(Instant::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
                                 self.shutdown_state = ShutdownState::SoftShutdown;
@@ -315,6 +320,12 @@ impl<'a> ReadyTrackerServer<'a> {
                             }
                         }
                     }
+                },
+                _ = self.soft_shutdown_trigger.wait() => {
+                    info!("Background serve received soft_shutdown_trigger");
+                    self.ready = None;
+                    self.shutdown_state = ShutdownState::SoftShutdown;
+                    self.soft_shutdown_trigger.unset();
                 },
                 _ = token.hard_cancelled() => {
                     debug!("background_serve breaking on token cancellation");
@@ -512,14 +523,23 @@ impl ReadyTrackerClient {
         self.ratecounter.get_rate()
     }
 
+    pub fn trigger_soft_shutdown(&self) {
+        self.soft_shutdown_trigger.set();
+    }
+
     pub async fn recv(&self, runnertypeid: u32) -> Result<NodeIndex, ReadyTrackerClientError> {
         // wait for the rate limiter
         self.ratelimiter.until_ready().await;
 
-        let reciever = self
+        let receiver = self
             .r
             .get(runnertypeid as usize)
             .ok_or(ReadyTrackerClientError::NoSuchRunnerType)?;
+
+        if receiver.is_closed() {
+            // we're in soft shutdown mode
+            return Err(ReadyTrackerClientError::SoftShutdown);
+        }
 
         // Each task might be in multiple ready queues, one for each runner type that it's
         // eligible for. So within the ready queue we store an AtomicBool that represents
@@ -527,7 +547,7 @@ impl ReadyTrackerClient {
         // be to pop off receiver channel and then mutate all of the other channels to remove
         // the item, but instead we're using this tombstone idea.
         loop {
-            let (task, _priority) = reciever.recv().await?;
+            let (task, _priority) = receiver.recv().await?;
             if !task.taken.fetch_or(true, SeqCst) {
                 let mut x = self.queuestate.get_mut(&task.affinity.data).expect("bar");
                 x.num_ready -= 1;
@@ -714,6 +734,9 @@ pub enum ReadyTrackerClientError {
 
     #[error("No such runner type")]
     NoSuchRunnerType,
+
+    #[error("Soft shutdown")]
+    SoftShutdown,
 }
 
 #[derive(Eq, PartialEq)]
