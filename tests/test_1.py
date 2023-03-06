@@ -1116,3 +1116,63 @@ def test_admin_socket_shutdown_1(tmp_path):
     end = time.perf_counter()
     assert end - start < 4
     assert end - triggered_at[0] < 1
+
+
+def test_remote_cleanup(num_parallel, tmp_path):
+    admin_socket = "/run/user/%s/wrk-%s.sock" % (os.getuid(), os.getpid())
+    try:
+        with open(admin_socket, "w") as f:
+            pass
+        os.unlink(admin_socket)
+
+    except (PermissionError, FileNotFoundError):
+        return
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+
+    with open(tmp_path / "command", "w") as f:
+        print("#!/bin/sh", file=f)
+        print("echo Started", file=f)
+        print("trap 'trapped INT' INT", file=f)
+        print("trap 'trapped TERM' TERM", file=f)
+        print("sleep 60", file=f)
+    os.chmod(tmp_path / "command",  0o744)
+
+    eg.add_task(["sh", "-c", str(tmp_path / "command")], key="0")
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            f"""#!/bin/sh
+        set -e -x
+        execgraph-remote $1 0 &
+        echo $! > {tmp_path}/execgraph-remote.pid
+        wait
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+
+    def run_thread():
+        time.sleep(3)
+        subprocess.run(
+            """curl --no-buffer -XPOST --unix-socket %s http:/localhost/shutdown -H 'Content-Type: application/json' -d '{"soft": false}'"""
+            % admin_socket,
+            shell=True,
+        )
+
+    threading.Thread(target=run_thread).start()
+    # Run this for three seconds, and then trigger a shutdown from the other thread
+    nfailed, order = eg.execute(remote_provisioner_cmd=str(tmp_path / "simple-provisioner"))
+    assert nfailed == 1
+
+    # Wait a little bit for things to happen at shutdown.
+    time.sleep(30)
+
+    # Get the PID of the task and make sure it's been killed
+    loglines = [json.loads(x) for x in open(tmp_path / "foo")]
+    pid = [x["Started"]["pid"] for x in loglines if "Started" in x][0]
+    assert not os.path.exists(f"/proc/{pid}/status")
+
+    # Get the PID of execgraph-remote and make sure its been killed
+    pid = int(open(tmp_path / "execgraph-remote.pid").read())
+    assert pid > 0
+    assert not os.path.exists(f"/proc/{pid}/status")

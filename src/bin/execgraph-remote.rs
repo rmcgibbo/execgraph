@@ -78,6 +78,7 @@ async fn main() -> Result<(), RemoteError> {
     let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
     std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
     tracing::info!("execgraph-remote SLURM_JOB_ID={:?}", slurm_jobid);
+    tracing::info!("execgraph-remote pid={}", std::process::id());
     unsafe {
         libc::setpgid(libc::getpid(), libc::getpid());
     }
@@ -696,6 +697,7 @@ fn cleanup_child_processes_carefully() {
     // If we die before any of them them do, then they'll get re-parented under init(1)
     // which can cause something like slurmstepd to lose them when walking the process tree
     //
+    let mut sigtermed_at = std::collections::HashMap::<i32, std::time::Instant>::new();
     loop {
         let mut children = vec![];
         for x in procfs::process::all_processes().unwrap() {
@@ -705,26 +707,63 @@ fn cleanup_child_processes_carefully() {
                 children.push(process.pid);
             }
         }
-        // send another sigterm to all of our children
+        if children.is_empty() {
+            return;
+        }
+
+        // Send a signal to our children.
+        // If we've already SIGTERMED them and that was more than 5 seconds ago, SIGKILL them.
+        // If we haven't signaled them yet, SIGTERM them.
+        // If we sigtermed them within the last 5 seconds, don't signal them again.
+        let cutoff = std::time::Instant::now() - std::time::Duration::from_secs(5);
         for pid in children.iter() {
+            let signal = match sigtermed_at.get(pid) {
+                Some(t) if *t < cutoff => Some(libc::SIGKILL),
+                Some(_) => None,
+                None => Some(libc::SIGTERM),
+            };
+
             unsafe {
-                libc::kill(*pid, libc::SIGTERM);
+                if let Some(libc::SIGTERM) = signal {
+                    tracing::info!("Sending SIGTERM to {}", pid);
+                    libc::kill(*pid, libc::SIGTERM);
+                    sigtermed_at.insert(*pid, std::time::Instant::now());
+                }
+                if let Some(libc::SIGKILL) = signal {
+                    tracing::info!("Sending SIGKILL to {}", pid);
+                    libc::kill(*pid, libc::SIGKILL);
+                }
             }
         }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
         loop {
-            match nix::sys::wait::waitpid(Pid::from_raw(-1), None) {
-                Ok(_) => {}
+            match nix::sys::wait::waitpid(
+                Pid::from_raw(-1),
+                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+            ) {
+                Ok(s) if s.pid().is_some() => {
+                    // We reaped a child. Keep looping on waitpid()
+                    tracing::info!("Reaped child: {:?}", s.pid().unwrap());
+                }
+                Ok(_s) => {
+                    // No unawaited children, we exited ummediately from waitpid()
+                    // break out of this waitpid loop.
+                    break;
+                }
                 Err(nix::errno::Errno::ECHILD) => {
+                    // The calling process does not have any unwaited-for children.
                     break;
                 }
                 Err(e) => {
-                    eprintln!("Unexpected error: {:#?}", e);
+                    tracing::error!(
+                        "Unexpected error in cleanup_child_processes_carefully: {:#?}",
+                        e
+                    );
                     return;
                 }
             }
-        }
-        if children.is_empty() {
-            break;
         }
     }
 }
