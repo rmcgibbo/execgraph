@@ -976,6 +976,7 @@ def test_fork_2(tmp_path):
     del eg1
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
 def test_fd_input(tmp_path):
     eg = _execgraph.ExecGraph(
         2,

@@ -12,6 +12,8 @@
 , toxiproxy
 , procps
 , pstree
+, stdenv
+, darwin
 }:
 
 let
@@ -28,6 +30,7 @@ let
     "Cargo.lock"
     "Cargo.toml"
     "tests"
+    "build.rs"
   ];
 
   naerskLib = naersk.lib."${system}".override {
@@ -41,6 +44,9 @@ let
 
     nativeBuildInputs = [
       python
+    ] ++ lib.optionals (stdenv.isDarwin) [
+      darwin.apple_sdk.frameworks.CoreServices
+      darwin.apple_sdk.frameworks.SystemConfiguration
     ];
     copyLibs = true;
     singleStep = true;
@@ -61,7 +67,7 @@ in buildPythonPackage rec {
     mkdir -p $out/bin
     mkdir -p $out/${python.sitePackages}
     ln -s ${execgraph}/bin/execgraph-remote $out/bin/
-    ln -s ${execgraph}/lib/libexecgraph.so $out/${python.sitePackages}/execgraph.so
+    ln -s ${execgraph}/lib/libexecgraph${stdenv.hostPlatform.extensions.sharedLibrary} $out/${python.sitePackages}/execgraph.so
 
     export PYTHONPATH="$out/${python.sitePackages}:$PYTHONPATH"
     export PATH=$out/bin:$PATH

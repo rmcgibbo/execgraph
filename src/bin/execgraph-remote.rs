@@ -56,6 +56,19 @@ struct CommandLineArguments {
     disconnect_error_message: String,
 }
 
+#[cfg(target_os = "linux")]
+fn set_current_process_as_child_subreaper() {
+    unsafe {
+        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
+            tracing::error!("Unable to set myself as the subreaper");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_current_process_as_child_subreaper() {}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), RemoteError> {
     lazy_static::initialize(&START_TIME);
@@ -67,13 +80,7 @@ async fn main() -> Result<(), RemoteError> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    unsafe {
-        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
-            tracing::error!("Unable to set myself as the subreaper");
-            std::process::exit(1);
-        }
-    }
-
+    set_current_process_as_child_subreaper();
     let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
     let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
     std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
@@ -616,7 +623,10 @@ fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
 #[allow(clippy::drop_ref)]
 fn async_watcher(
     filename: Option<std::path::PathBuf>,
-) -> notify::Result<(notify::INotifyWatcher, tokio::sync::mpsc::Receiver<String>)> {
+) -> notify::Result<(
+    notify::RecommendedWatcher,
+    tokio::sync::mpsc::Receiver<String>,
+)> {
     use notify::EventKind;
     use notify::{Event, Result};
     let (tx, rx) = tokio::sync::mpsc::channel(1);
@@ -628,49 +638,43 @@ fn async_watcher(
             let mut file = std::fs::OpenOptions::new().read(true).open(&p)?;
             let mut buffer = Vec::new();
 
-            let mut watcher = notify::INotifyWatcher::new(
-                move |res: Result<Event>| {
-                    let event = res.unwrap();
+            let mut watcher = notify::recommended_watcher(move |res: Result<Event>| {
+                let event = res.unwrap();
 
-                    // When the file is modified, read it into the buffer
-                    let is_modify = matches!(event.kind, EventKind::Any | EventKind::Modify(_));
-                    if is_modify {
-                        // This appends to the current buffer
-                        file.read_to_end(&mut buffer).unwrap();
+                // When the file is modified, read it into the buffer
+                let is_modify = matches!(event.kind, EventKind::Any | EventKind::Modify(_));
+                if is_modify {
+                    // This appends to the current buffer
+                    file.read_to_end(&mut buffer).unwrap();
 
-                        // Okay, now look in the buffer for the string "CANCELLED". It seems like in
-                        // general, slurmstepd will write multiple lines to the file for certain kinds
-                        // of errors, and all of them are interesting. So if we fire off an event after
-                        // the first modification, then we'll miss the later ones. It appears that
-                        // "CANCELLED AT" is the last line in the file, so let's wait for that and then
-                        // fire it off.
-                        let s = std::str::from_utf8(&buffer)
-                            .unwrap_or("Unable to read slurm error file. Utf8 issue?");
-                        if re.is_match(s) || s.contains("Unable to read") {
-                            futures::executor::block_on(async {
-                                // send notification to channel, but if we can't don't panic
-                                if let Err(e) = tx.send(s.to_string()).await {
-                                    tracing::error!("Unable to send notifcation to channel {}", e);
-                                }
-                            })
-                        }
+                    // Okay, now look in the buffer for the string "CANCELLED". It seems like in
+                    // general, slurmstepd will write multiple lines to the file for certain kinds
+                    // of errors, and all of them are interesting. So if we fire off an event after
+                    // the first modification, then we'll miss the later ones. It appears that
+                    // "CANCELLED AT" is the last line in the file, so let's wait for that and then
+                    // fire it off.
+                    let s = std::str::from_utf8(&buffer)
+                        .unwrap_or("Unable to read slurm error file. Utf8 issue?");
+                    if re.is_match(s) || s.contains("Unable to read") {
+                        futures::executor::block_on(async {
+                            // send notification to channel, but if we can't don't panic
+                            if let Err(e) = tx.send(s.to_string()).await {
+                                tracing::error!("Unable to send notifcation to channel {}", e);
+                            }
+                        })
                     }
-                },
-                notify::Config::default(),
-            )?;
+                }
+            })?;
             watcher.watch(&p, notify::RecursiveMode::NonRecursive)?;
             watcher
         }
         // just create a dummy object so things typecheck
-        None => notify::INotifyWatcher::new(
-            move |_event: Result<Event>| {
-                // take a reference to `tx` to prevent it from getting dropped, so that the recv
-                // side of the channel remains in a valid state.
-                drop(&tx);
-                unreachable!("This should never get called");
-            },
-            notify::Config::default(),
-        )?,
+        None => notify::recommended_watcher(move |_event: Result<Event>| {
+            // take a reference to `tx` to prevent it from getting dropped, so that the recv
+            // side of the channel remains in a valid state.
+            drop(&tx);
+            unreachable!("This should never get called");
+        })?,
     };
     Ok((watcher, rx))
 }
@@ -689,7 +693,6 @@ fn cleanup_child_processes_carefully() {
     //  execgraph-remote (us) ->
     //      actual worker program
 
-    let mypid = std::process::id() as i32;
     //
     // Find all direct child processes of ourself. SIGTERM them. Wait for them.
     // Keep looping until there are no children. We want to ensure that everyone else
@@ -699,14 +702,7 @@ fn cleanup_child_processes_carefully() {
     //
     let mut sigtermed_at = std::collections::HashMap::<i32, std::time::Instant>::new();
     loop {
-        let mut children = vec![];
-        for x in procfs::process::all_processes().unwrap() {
-            let process = x.unwrap();
-            let ppid = process.stat().unwrap().ppid;
-            if ppid == mypid {
-                children.push(process.pid);
-            }
-        }
+        let children = current_child_processes();
         if children.is_empty() {
             return;
         }
@@ -766,4 +762,20 @@ fn cleanup_child_processes_carefully() {
             }
         }
     }
+}
+
+fn current_child_processes() -> Vec<i32> {
+    use sysinfo::{get_current_pid, PidExt, ProcessExt, System, SystemExt};
+
+    let mypid = get_current_pid().unwrap();
+    let mut children = vec![];
+    let s = System::new_all();
+    for (pid, process) in s.processes() {
+        let parent = process.parent().unwrap();
+        if parent == mypid {
+            children.push(pid.as_u32() as i32);
+        }
+    }
+
+    children
 }

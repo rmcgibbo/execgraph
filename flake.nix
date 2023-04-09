@@ -15,7 +15,7 @@
       execgraph = pkgs.callPackage ./. { inherit naersk; };
     });
   } //
-  utils.lib.eachSystem ["x86_64-linux"] (system:
+  utils.lib.eachSystem ["x86_64-linux" "aarch64-darwin"] (system:
     let
       pkgs = import nixpkgs {
         inherit system;
@@ -34,10 +34,8 @@
           cargo-flamegraph
           cargo-udeps
           cargo-edit
-          cargo-tarpaulin
 
           rustfmt
-          black
           isort
           mypy
 
@@ -48,7 +46,12 @@
           scipy
           curl
           toxiproxy
-        ] ++ [ pkgs.coz ];
+        ] ++ pkgs.lib.optionals (pkgs.stdenv.isLinux) [
+          black # broken on macos                    
+        ] ++ pkgs.lib.optionals (pkgs.stdenv.isDarwin) [
+            darwin.apple_sdk.frameworks.SystemConfiguration
+            darwin.apple_sdk.frameworks.CoreServices
+        ];
       };
     });
 }

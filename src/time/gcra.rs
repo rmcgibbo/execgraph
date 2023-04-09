@@ -113,6 +113,7 @@ impl RateLimiter {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn now() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -120,6 +121,19 @@ fn now() -> u64 {
     };
     unsafe {
         libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts);
+    }
+
+    (ts.tv_sec as u64) * NANOS_PER_SEC + (ts.tv_nsec as u64)
+}
+
+#[cfg(target_os = "macos")]
+fn now() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
     }
 
     (ts.tv_sec as u64) * NANOS_PER_SEC + (ts.tv_nsec as u64)
