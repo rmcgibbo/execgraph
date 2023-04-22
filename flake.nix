@@ -55,6 +55,7 @@
         ] ++ pkgs.lib.optionals (pkgs.stdenv.isDarwin) [
             darwin.apple_sdk.frameworks.SystemConfiguration
             darwin.apple_sdk.frameworks.CoreServices
+	    libiconv
         ];
       };
     });

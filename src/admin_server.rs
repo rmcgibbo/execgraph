@@ -64,11 +64,22 @@ pub async fn run_admin_service_forever(state: Arc<State<'static>>, token: Cancel
     let uid = unsafe { libc::getuid() };
     let pid = std::process::id();
 
-    let path = PathBuf::from(format!(
+    let mut path = PathBuf::from(format!(
         "/run/user/{}/{}-{}.sock",
         uid, ADMIN_SOCKET_PREFIX, pid
     ));
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+    if let Err(error) = std::fs::create_dir_all(path.parent().unwrap()) {
+        if (error.kind() == std::io::ErrorKind::PermissionDenied) && std::env::var("SLURM_JOBID").is_ok() {
+            path = PathBuf::from(format!("/scratch/slurm/{}/{}-{}.sock",
+                std::env::var("SLURM_JOBID").unwrap(),
+                ADMIN_SOCKET_PREFIX,
+                pid
+            ));
+        } else {
+            panic!("Error: {}", error);
+        }
+    }
 
     let service = admin_router(state).into_make_service();
     use tokio_stream::wrappers::UnixListenerStream;
