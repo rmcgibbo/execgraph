@@ -53,7 +53,7 @@ pub struct Cmd {
 lazy_static::lazy_static! {
     static ref ESCAPED_NEWLINE_OR_TAB: aho_corasick::AhoCorasick = aho_corasick::AhoCorasick::new(
         ["\\\n", "\t"]
-    );
+    ).unwrap();
 }
 
 #[derive(Debug, Clone)]
