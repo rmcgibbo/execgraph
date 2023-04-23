@@ -659,7 +659,7 @@ fn async_watcher(
                         futures::executor::block_on(async {
                             // send notification to channel, but if we can't don't panic
                             if let Err(e) = tx.send(s.to_string()).await {
-                                tracing::warning!("Unable to send notifcation to channel {}", e);
+                                tracing::warn!("Unable to send notifcation to channel {}", e);
                             }
                         })
                     }
