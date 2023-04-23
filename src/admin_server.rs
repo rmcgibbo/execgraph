@@ -70,8 +70,11 @@ pub async fn run_admin_service_forever(state: Arc<State<'static>>, token: Cancel
     ));
 
     if let Err(error) = std::fs::create_dir_all(path.parent().unwrap()) {
-        if (error.kind() == std::io::ErrorKind::PermissionDenied) && std::env::var("SLURM_JOBID").is_ok() {
-            path = PathBuf::from(format!("/scratch/slurm/{}/{}-{}.sock",
+        if (error.kind() == std::io::ErrorKind::PermissionDenied)
+            && std::env::var("SLURM_JOBID").is_ok()
+        {
+            path = PathBuf::from(format!(
+                "/scratch/slurm/{}/{}-{}.sock",
                 std::env::var("SLURM_JOBID").unwrap(),
                 ADMIN_SOCKET_PREFIX,
                 pid

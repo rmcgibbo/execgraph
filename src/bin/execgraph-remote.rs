@@ -767,13 +767,20 @@ fn cleanup_child_processes_carefully() {
 fn current_child_processes() -> Vec<i32> {
     use sysinfo::{get_current_pid, PidExt, ProcessExt, System, SystemExt};
 
-    let mypid = get_current_pid().unwrap();
+    let mypid = match get_current_pid() {
+        Ok(mypid) => mypid,
+        Err(_) => {
+            return vec![];
+        }
+    };
+
     let mut children = vec![];
     let s = System::new_all();
     for (pid, process) in s.processes() {
-        let parent = process.parent().unwrap();
-        if parent == mypid {
-            children.push(pid.as_u32() as i32);
+        if let Some(parent) = process.parent() {
+            if parent == mypid {
+                children.push(pid.as_u32() as i32);
+            }
         }
     }
 
