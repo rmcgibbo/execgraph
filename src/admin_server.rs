@@ -80,7 +80,8 @@ pub async fn run_admin_service_forever(state: Arc<State<'static>>, token: Cancel
                 pid
             ));
         } else {
-            panic!("Error: {}", error);
+            tracing::error!("Skipping admin socket. Not sure where to put it. Error: {}", error);
+            return
         }
     }
     let service = admin_router(state).into_make_service();

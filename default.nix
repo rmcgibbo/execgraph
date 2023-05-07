@@ -14,6 +14,7 @@
 , pstree
 , stdenv
 , darwin
+, gnugrep
 }:
 
 let
@@ -63,6 +64,10 @@ in buildPythonPackage rec {
     execgraph
   ];
 
+  preConfigure = lib.optional stdenv.isDarwin ''
+    export PATH=$PATH:/bin
+  '';
+
   installPhase = ''
     mkdir -p $out/bin
     mkdir -p $out/${python.sitePackages}
@@ -74,6 +79,7 @@ in buildPythonPackage rec {
   '';
 
   checkPhase = ''
+    export PATH=${pytest}/bin:${curl}/bin:${gnugrep}/bin:$PATH
     py.test -vvv
   '';
 
@@ -86,6 +92,7 @@ in buildPythonPackage rec {
     curl
     procps
     pstree
+    gnugrep
   ];
   pythonImportsCheck = [ "execgraph" ];
 }
