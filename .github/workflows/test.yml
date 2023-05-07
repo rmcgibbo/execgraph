@@ -13,11 +13,11 @@ jobs:
     steps:
     - uses: actions/checkout@v3.1.0
     - uses: cachix/install-nix-action@v17
-    - uses: cachix/cachix-action@v12
-      with:
-        name: wrk
-        authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-        pushFilter: "(-source$|nixpkgs.tar.gz$)"
+    # - uses: cachix/cachix-action@v12
+    #   with:
+    #     name: wrk
+    #     authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    #     pushFilter: "(-source$|nixpkgs.tar.gz$)"
     - name: Build
       run: |
         nix build -L
