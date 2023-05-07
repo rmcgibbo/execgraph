@@ -39,9 +39,15 @@ async fn post_shutdown_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     payload: Json<ShutdownRequest>,
 ) -> Result<Json<StatusReply>, AppError> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc2822;
+    let local = OffsetDateTime::now_local().unwrap();
+
     eprintln!(
-        "\x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin",
-        if payload.soft { "Soft" } else { "Hard" }
+        "{}: \x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin '{}'",
+        local.format(&Rfc2822).unwrap(),
+        if payload.soft { "Soft" } else { "Hard" },
+        payload.username,
     );
     if payload.soft {
         state.tracker.trigger_soft_shutdown();

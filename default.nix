@@ -79,7 +79,7 @@ in buildPythonPackage rec {
   '';
 
   checkPhase = ''
-    export PATH=${pytest}/bin:${curl}/bin:${gnugrep}/bin:$PATH
+    export PATH=${pytest}/bin:${curl}/bin:${gnugrep}/bin:${procps}/bin:${pstree}/bin:$PATH
     py.test -vvv
   '';
 

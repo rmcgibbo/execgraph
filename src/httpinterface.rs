@@ -27,6 +27,8 @@ pub struct UpdateRemoteProvisionerInfoRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ShutdownRequest {
+    #[serde(default)]
+    pub username: String,
     pub soft: bool,
 }
 #[derive(Serialize, Deserialize, Debug)]
