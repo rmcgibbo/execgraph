@@ -44,7 +44,7 @@ async fn post_shutdown_handler(
     let local = OffsetDateTime::now_local().unwrap();
 
     eprintln!(
-        "{}: \x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin '{}'",
+        "[{}]: \x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin '{}'",
         local.format(&Rfc2822).unwrap(),
         if payload.soft { "Soft" } else { "Hard" },
         payload.username,
