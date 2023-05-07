@@ -31,10 +31,10 @@
           export PS1="\n(${name}) \[\033[1;32m\][\[\e]0;\u@\h: \w\a\]\u@\h:\w]\[\033[0m\]\n$ "
         '';
         buildInputs = with pkgs; with python310Packages; [
-          cargo
-          rustc
-          clippy
-          maturin
+          # https://github.com/oxalica/rust-overlay#use-in-devshell-for-nix-develop
+          (pkgs.rust-bin.stable.latest.default.override {
+            extensions = [ "rust-src" "rust-analyzer" "rust-std" ];
+          })
           cargo-flamegraph
           cargo-udeps
           cargo-edit
@@ -55,7 +55,7 @@
         ] ++ pkgs.lib.optionals (pkgs.stdenv.isDarwin) [
             darwin.apple_sdk.frameworks.SystemConfiguration
             darwin.apple_sdk.frameworks.CoreServices
-	    libiconv
+	          libiconv
         ];
       };
     });
