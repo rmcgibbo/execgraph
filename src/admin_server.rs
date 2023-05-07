@@ -39,8 +39,8 @@ async fn post_shutdown_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     payload: Json<ShutdownRequest>,
 ) -> Result<Json<StatusReply>, AppError> {
-    use time::OffsetDateTime;
     use time::format_description::well_known::Rfc2822;
+    use time::OffsetDateTime;
     let local = OffsetDateTime::now_local().unwrap();
 
     eprintln!(
@@ -86,8 +86,11 @@ pub async fn run_admin_service_forever(state: Arc<State<'static>>, token: Cancel
                 pid
             ));
         } else {
-            tracing::error!("Skipping admin socket. Not sure where to put it. Error: {}", error);
-            return
+            tracing::error!(
+                "Skipping admin socket. Not sure where to put it. Error: {}",
+                error
+            );
+            return;
         }
     }
     let service = admin_router(state).into_make_service();
@@ -118,7 +121,7 @@ async fn clean_up_socket_dir(socket_dir: PathBuf) -> std::io::Result<()> {
     use std::os::unix::fs::FileTypeExt;
     use sysinfo::{Pid, SystemExt};
     let socket_re = Regex::new(&format!(r"{}-(\d+).sock", ADMIN_SOCKET_PREFIX)).unwrap();
-    let system = sysinfo::System::new();
+    let mut system = sysinfo::System::new();
 
     for entry in std::fs::read_dir(socket_dir)? {
         if let Ok(entry) = entry {
@@ -132,9 +135,12 @@ async fn clean_up_socket_dir(socket_dir: PathBuf) -> std::io::Result<()> {
                     .map_or("", |m| m.as_str())
                     .parse::<usize>()
                     .unwrap();
-                if system.process(Pid::from(pid)).is_none() {
-                    tracing::debug!("Removing unused socket file {:?}", path);
-                    std::fs::remove_file(path).unwrap();
+                if !system.refresh_process(Pid::from(pid)) {
+                    tracing::debug!(
+                        "No such process: {pid} Removing unused socket file {:?}",
+                        path
+                    );
+                    std::fs::remove_file(path)?;
                 }
             }
         }
