@@ -550,10 +550,31 @@ impl LogFileSnapshotReader {
         // keep iterating backward and put everything else into the outdated list
         result_outdated.extend(rev_iter);
 
-        let x: Vec<LogEntry> = result_current.into_iter().rev().collect();
-        let y: Vec<LogEntry> = result_outdated.into_iter().rev().collect();
-        assert!(x.len() + y.len() + nbackrefs == count);
-        Ok((x, y))
+        let current: Vec<LogEntry> = result_current.into_iter().rev().collect();
+        let outdated: Vec<LogEntry> = result_outdated.into_iter().rev().collect();
+        assert!(current.len() + outdated.len() + nbackrefs == count);
+
+        // Gather all current keys
+        let current_keys  = current.iter().filter_map(|x| match x {
+            LogEntry::Header(_v) => { None }
+            LogEntry::Ready(v) => { Some(&v.key) }
+            LogEntry::Started(v) => { Some(&v.key) }
+            LogEntry::Finished(v) => { Some(&v.key) }
+            LogEntry::Backref(v) => { Some(&v.key) }
+        }).collect::<HashSet<&String>>();
+
+        // And then filter out all outdated entries that have the same keys.
+        // the main use for this method is to delete work directories related to
+        // outdated keys, so we don't want to delete these.
+        let outdated_filtered = outdated.into_iter().filter(|x| match x {
+            LogEntry::Header(_v) => { true }
+            LogEntry::Ready(v) => { !current_keys.contains(&v.key) }
+            LogEntry::Started(v) => { !current_keys.contains(&v.key) }
+            LogEntry::Finished(v) => { !current_keys.contains(&v.key) }
+            LogEntry::Backref(v) => { !current_keys.contains(&v.key) }
+        }).collect::<Vec<LogEntry>>();
+
+        Ok((current, outdated_filtered))
     }
 
     pub fn read(&mut self) -> Result<Vec<LogEntry>> {
