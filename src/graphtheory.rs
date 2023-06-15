@@ -65,10 +65,19 @@ pub fn transitive_closure_dag<N: Clone, V>(graph: &DiGraph<N, V>) -> Result<DiGr
     Ok(tc)
 }
 
+///
+/// Computes the blevel ("Bottom level") of each node in a DAG
+///
+/// The b-level of a node is the length of a longest path from the node
+/// to an exit node
+///
+// http://charm.cs.uiuc.edu/users/arya/docs/6.pdf
+
 #[tracing::instrument(skip_all)]
 pub fn blevel_dag<N, V>(graph: &DiGraph<N, V>) -> Result<Vec<u32>> {
-    let toposort =
-        toposort(&graph, None).map_err(|e| anyhow!("Graph contains a cycle: {:?}", e))?;
+    let toposort = toposort(&graph, None).map_err(|e: petgraph::algo::Cycle<NodeIndex>| {
+        anyhow!("Graph contains a cycle: {:?}", e)
+    })?;
 
     let mut blevel = vec![0_u32; graph.node_count()];
     for &v in toposort.iter().rev() {
@@ -79,9 +88,29 @@ pub fn blevel_dag<N, V>(graph: &DiGraph<N, V>) -> Result<Vec<u32>> {
     Ok(blevel)
 }
 
+///
+/// Computes the tlevel ("top level") of each node in a DAG
+///
+/// The t-level of a node is the length of a longest path (there can be
+/// more than one longest path) from an entry node to the node in question.).
+///
+#[tracing::instrument(skip_all)]
+pub fn tlevel_dag<N, V>(graph: &DiGraph<N, V>) -> Result<Vec<u32>> {
+    let toposort = toposort(&graph, None).map_err(|e: petgraph::algo::Cycle<NodeIndex>| {
+        anyhow!("Graph contains a cycle: {:?}", e)
+    })?;
+    let mut tlevel = vec![0_u32; graph.node_count()];
+    for &v in toposort.iter() {
+        let upstream = graph.neighbors_directed(v, petgraph::Direction::Incoming);
+        tlevel[v.index()] = upstream.map(|x| 1 + tlevel[x.index()]).max().unwrap_or(0);
+    }
+
+    Ok(tlevel)
+}
+
 #[cfg(test)]
 mod test {
-    use crate::graphtheory::{blevel_dag, transitive_closure_dag};
+    use crate::graphtheory::{blevel_dag, tlevel_dag, transitive_closure_dag};
     use petgraph::graph::DiGraph;
 
     fn sorted_tc_dag_edges<N: Copy + Default, E>(g: DiGraph<N, E>) -> Vec<(usize, usize)> {
@@ -130,5 +159,27 @@ mod test {
         let mut g: DiGraph<i32, ()> = DiGraph::new();
         g.extend_with_edges(&[(0, 1), (1, 2), (2, 3), (2, 4), (0, 4)]);
         assert_eq!(blevel_dag(&g).unwrap(), [3, 2, 1, 0, 0]);
+    }
+
+    #[test]
+    fn test_tlevel_dag_1() {
+        let mut g: DiGraph<i32, ()> = DiGraph::new();
+        g.extend_with_edges(&[
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 6),
+            (1, 5),
+            (1, 6),
+            (2, 7),
+            (3, 7),
+            (5, 8),
+            (6, 8),
+            (7, 8),
+        ]);
+
+        assert_eq!(tlevel_dag(&g).unwrap(), [0, 1, 1, 1, 1, 2, 2, 2, 3]);
+        assert_eq!(blevel_dag(&g).unwrap(), [3, 2, 2, 2, 0, 1, 1, 1, 0]);
     }
 }

@@ -450,7 +450,7 @@ fn get_subgraph<'a, 'b: 'a>(
 ) -> Result<DiGraph<&'a Cmd, ()>> {
     // Compute the priority and just mutate the graph. Ugly, but it
     // keeps everything in the Cmd struct
-    let priority = crate::graphtheory::blevel_dag(deps)?;
+    let priority = crate::graphtheory::tlevel_dag(deps)?;
     for (i, p) in priority.iter().enumerate() {
         let i_u32: u32 = i.try_into().unwrap();
         deps[NodeIndex::from(i_u32)].priority = *p;
