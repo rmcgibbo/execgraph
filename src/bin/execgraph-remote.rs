@@ -672,7 +672,7 @@ fn async_watcher(
         None => notify::recommended_watcher(move |_event: Result<Event>| {
             // take a reference to `tx` to prevent it from getting dropped, so that the recv
             // side of the channel remains in a valid state.
-            drop(&tx);
+            let _ = format!("{:#?}", &tx);
             unreachable!("This should never get called");
         })?,
     };

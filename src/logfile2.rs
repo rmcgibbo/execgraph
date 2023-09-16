@@ -1,5 +1,5 @@
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
-use bufreaderwriter::BufReaderWriter;
+use bufreaderwriter::seq::BufReaderWriterSeq as BufReaderWriter;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},

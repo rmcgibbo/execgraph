@@ -1,6 +1,5 @@
 use anyhow::Context;
 use bitvec::array::BitArray;
-use osstrtools::OsStrTools;
 use pyo3::{
     exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
     prelude::*,
@@ -91,7 +90,7 @@ impl PyExecGraph {
             readonly_logfiles,
             storage_roots
                 .iter()
-                .map(|s| PathBuf::from(s.as_os_str().replace("$KEY", key.as_bytes())))
+                .map(|s| PathBuf::from(s.as_os_str().to_string_lossy().replace("$KEY", &key)))
                 .collect(),
         )?)?;
 

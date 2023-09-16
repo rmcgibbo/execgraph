@@ -431,7 +431,7 @@ impl<'a> ReadyTrackerServer<'a> {
             .edges_directed(e.id, Direction::Outgoing)
             .filter_map(|edge| {
                 let downstream_id = edge.target();
-                let mut status = statuses.get_mut(&downstream_id).expect("key doesn't exist");
+                let status = statuses.get_mut(&downstream_id).expect("key doesn't exist");
                 if is_success {
                     if !status.poisoned {
                         status.n_unmet_deps -= 1;
