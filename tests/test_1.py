@@ -1177,3 +1177,41 @@ def test_remote_cleanup(num_parallel, tmp_path):
     pid = int(open(tmp_path / "execgraph-remote.pid").read())
     assert pid > 0
     assert not os.path.exists(f"/proc/{pid}/status")
+
+
+def test_slurm_cancel(tmp_path):
+    # No job to runner that we know was cancelled.
+    eg = _execgraph.ExecGraph(0, tmp_path / "foo")
+
+    eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="0")
+    for i in range(1, 5):
+        eg.add_task(
+            ["sh", "-c", "echo foo; sleep 0.1; echo foo"],
+            key=f"{i}",
+            dependencies=[i - 1],
+        )
+
+    with open(tmp_path / "simple-provisioner", "w") as f:
+        print(
+            """#!/bin/sh
+        set -e -x
+        curl -X POST \\
+            -H "Content-type: application/json" \\
+            -H "Authorization: Bearer $EXECGRAPH_AUTHORIZATION_TOKEN" \\
+            -H "Accept: application/json" \\
+            -d '{"jobids": ["A_0", "A_1"]}' \\
+            $1/mark-slurm-job-cancelation
+
+        export SLURM_ARRAY_JOB_ID=A
+        export SLURM_ARRAY_TASK_ID=0
+        execgraph-remote $1 0
+        """,
+            file=f,
+        )
+    os.chmod(tmp_path / "simple-provisioner", 0o744)
+
+    nfailed, order = eg.execute(
+        remote_provisioner_cmd=str(tmp_path / "simple-provisioner")
+    )
+    assert order == []
+    assert nfailed == 0

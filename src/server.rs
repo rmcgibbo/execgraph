@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json, Router, TypedHeader,
 };
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use hyper::{header::AUTHORIZATION, Body, Request, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde_json::json;
@@ -81,6 +81,10 @@ pub struct State<'a> {
     /// The point of this bearer token is really to make sure that it's only the execgraph-remote
     /// runners from _this_ workflow that are contacting this server. It's not real security.
     authorization_token: String,
+
+    /// Avoid a race requires us to know slurm jobids that have been scanceled so we don't hand out tasks
+    /// to those runners.
+    cancelled_slurm_jobids: DashSet<String>
 }
 
 impl<'a> State<'a> {
@@ -99,6 +103,7 @@ impl<'a> State<'a> {
             timeouts: TimeWheel::new(Duration::from_millis(TIMEWHEEL_DURATION_MSECS)),
             provisioner: RwLock::new(provisioner),
             authorization_token,
+            cancelled_slurm_jobids: DashSet::new(),
         }
     }
 
@@ -255,15 +260,43 @@ async fn ping_handler(
     Ok((StatusCode::OK, "").into_response())
 }
 
+// POST /ping
+async fn mark_slurm_job_cancelation(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
+    Extension(state): Extension<Arc<State<'static>>>,
+    Json(request): Json<MarkSlurmJobCancelationRequest>,
+) -> Result<Response, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
+
+    // Add thes to the set that are canceled.
+    for jobid in request.jobids.into_iter() {
+        state.cancelled_slurm_jobids.insert(jobid);
+    };
+
+    Ok((StatusCode::OK, "").into_response())
+
+}
+
 // GET /start
 async fn start_handler(
     TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
+    headers: axum::http::header::HeaderMap,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<StartRequest>,
 ) -> Result<Postcard<StartResponse>, AppError> {
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
     };
+    if let Some(headervalue) = headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
+        if let Ok(jobid) = headervalue.to_str() {
+            if state.cancelled_slurm_jobids.contains(jobid) {
+                return Err(AppError::Shutdown);
+            }
+        }
+    };
+
     Ok(Postcard(start_request_impl(state, request).await?))
 }
 
@@ -493,6 +526,7 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/end", post(end_handler))
         .route("/ping", post(ping_handler))
         .route("/status", get(status_handler))
+        .route("/mark-slurm-job-cancelation", post(mark_slurm_job_cancelation))
         .fallback(fallback)
         .layer(middleware.into_inner())
 }

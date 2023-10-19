@@ -81,10 +81,12 @@ async fn main() -> Result<(), RemoteError> {
         .init();
 
     set_current_process_as_child_subreaper();
-    let slurm_jobid = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "".to_string());
+    let slurm_array_job_id = std::env::var("SLURM_ARRAY_JOB_ID").unwrap_or_else(|_| "".to_string());
+    let slurm_array_task_id = std::env::var("SLURM_ARRAY_TASK_ID").unwrap_or_else(|_| "".to_string());
+    let slurm_jobid = format!("{}_{}", slurm_array_job_id, slurm_array_task_id);
     let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
     std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
-    tracing::info!("execgraph-remote SLURM_JOB_ID={:?}", slurm_jobid);
+    tracing::info!("execgraph-remote SLURM_JOB_ID={}", slurm_jobid);
     tracing::info!("execgraph-remote pid={}", std::process::id());
     unsafe {
         libc::setpgid(libc::getpid(), libc::getpid());

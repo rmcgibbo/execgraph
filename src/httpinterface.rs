@@ -8,6 +8,12 @@ pub struct Ping {
     pub transaction_id: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct MarkSlurmJobCancelationRequest {
+    pub jobids: Vec<String>,
+}
+
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StatusRequest {
     pub etag: u64,
