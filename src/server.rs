@@ -20,7 +20,7 @@ use hyper::{header::AUTHORIZATION, Body, Request, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, RwLock},
     time::Instant,
 };
@@ -51,6 +51,7 @@ struct ConnectionState {
     start_time_approx: Instant,
     timer_id: TimerID,
     disconnect_error_message: String,
+    slurm_jobid: String,
 }
 
 pub struct State<'a> {
@@ -82,9 +83,11 @@ pub struct State<'a> {
     /// runners from _this_ workflow that are contacting this server. It's not real security.
     authorization_token: String,
 
-    /// Avoid a race requires us to know slurm jobids that have been scanceled so we don't hand out tasks
-    /// to those runners.
-    cancelled_slurm_jobids: DashSet<String>
+    /// Avoid a race requires us to know slurm jobids that have been
+    /// scanceled so we don't hand out tasks to those runners.
+    cancelled_slurm_jobids: RwLock<HashSet<String>>,
+
+
 }
 
 impl<'a> State<'a> {
@@ -103,7 +106,7 @@ impl<'a> State<'a> {
             timeouts: TimeWheel::new(Duration::from_millis(TIMEWHEEL_DURATION_MSECS)),
             provisioner: RwLock::new(provisioner),
             authorization_token,
-            cancelled_slurm_jobids: DashSet::new(),
+            cancelled_slurm_jobids: RwLock::new(HashSet::new()),
         }
     }
 
@@ -167,6 +170,7 @@ pub enum AppError {
     NoSuchRunnerType,
     RateLimited,
     Unauthorized,
+    BadRequest,
 }
 
 impl IntoResponse for AppError {
@@ -177,6 +181,7 @@ impl IntoResponse for AppError {
             AppError::NoSuchRunnerType => StatusCode::NOT_FOUND,
             AppError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AppError::BadRequest => StatusCode::BAD_REQUEST,
         };
         let body = Json(json!({ "message": format!("{:#?}", self) }));
 
@@ -260,23 +265,38 @@ async fn ping_handler(
     Ok((StatusCode::OK, "").into_response())
 }
 
-// POST /ping
+// POST /mark-slurm-job-cancelation
 async fn mark_slurm_job_cancelation(
     TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
     Extension(state): Extension<Arc<State<'static>>>,
     Json(request): Json<MarkSlurmJobCancelationRequest>,
-) -> Result<Response, AppError> {
+) -> Result<Postcard<MarkSlurmJobCancelationReply>, AppError> {
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
     };
 
-    // Add thes to the set that are canceled.
+    let mut reply_jobids = Vec::new();
+
+    // Acquire a write lock on cancelled_slurm_jobids
+    let mut cancelled_slurm_jobids = state.cancelled_slurm_jobids.write().unwrap();
+
+    // Find all running jobids
+    let running_jobids = state.connections.iter().map(|c| c.slurm_jobid.clone()).collect::<HashSet<String>>();
+    // Add the requested slurm jobids to the set that are canceled if
+    // they're not already running
+
     for jobid in request.jobids.into_iter() {
-        state.cancelled_slurm_jobids.insert(jobid);
+        if !running_jobids.contains(&jobid) {
+            reply_jobids.push(jobid.clone());
+            cancelled_slurm_jobids.insert(jobid);
+
+        }
     };
 
-    Ok((StatusCode::OK, "").into_response())
+    // Drop the write lock
+    drop(cancelled_slurm_jobids);
 
+    Ok(Postcard(MarkSlurmJobCancelationReply {jobids: reply_jobids}))
 }
 
 // GET /start
@@ -286,23 +306,39 @@ async fn start_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<StartRequest>,
 ) -> Result<Postcard<StartResponse>, AppError> {
+
+    // check auth token
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
     };
-    if let Some(headervalue) = headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
-        if let Ok(jobid) = headervalue.to_str() {
-            if state.cancelled_slurm_jobids.contains(jobid) {
-                return Err(AppError::Shutdown);
-            }
+
+    // extract required slurm jobid
+    let runner_slurm_jobid = match headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
+        Some(headervalue) => match headervalue.to_str() {
+            Ok(jobid) => jobid.to_owned(),
+            Err(_) => {return Err(AppError::BadRequest);}
         }
+        None => {return Err(AppError::BadRequest)}
     };
 
-    Ok(Postcard(start_request_impl(state, request).await?))
+    // If this jobid has been scanceled, don't give out a job and just tell the runner
+    // to shut down. This happens with a read lock on cancelled_slurm_jobids so if someone
+    // is modying the set of cancelled_slurm_jobids, we have to wait till they finish to
+    // know if we should tell this runner to shut down.
+    {
+        let cancelled_slurm_jobids = state.cancelled_slurm_jobids.read().unwrap();
+        if cancelled_slurm_jobids.contains(&runner_slurm_jobid) {
+            return Err(AppError::Shutdown);
+        }
+    }
+
+    Ok(Postcard(start_request_impl(state, request, runner_slurm_jobid).await?))
 }
 
 async fn start_request_impl(
     state: Arc<State<'static>>,
     request: StartRequest,
+    runner_slurm_jobid: String,
 ) -> Result<StartResponse, AppError> {
     // Grab the next task off the ready queue, which might pause if we're rate limited.
     // Hold the connection for up to ``HOLD_RATELIMITED_TIME`` (30 seconds), and then if
@@ -343,6 +379,7 @@ async fn start_request_impl(
             cmd: cmd.clone(),
             node_id,
             disconnect_error_message: request.disconnect_error_message,
+            slurm_jobid: runner_slurm_jobid,
         },
     );
 
@@ -378,12 +415,25 @@ async fn begun_handler(
 // POST /end
 async fn end_handler(
     TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
+    headers: axum::http::header::HeaderMap,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<EndRequest>,
 ) -> Result<Postcard<EndResponse>, AppError> {
+
+    // check auth token
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
     };
+
+    // extract required slurm jobid
+    let runner_slurm_jobid = match headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
+        Some(headervalue) => match headervalue.to_str() {
+            Ok(jobid) => jobid.to_owned(),
+            Err(_) => {return Err(AppError::BadRequest);}
+        }
+        None => {return Err(AppError::BadRequest)}
+    };
+
     let cstate = {
         let (_transaction_id, cstate) = state
             .connections
@@ -391,6 +441,12 @@ async fn end_handler(
             .ok_or(AppError::NoSuchTransaction)?;
         cstate
     };
+    // If the RPC trying to end a job is coming from a different slurm jobid
+    // than the RPC which started the job, something fishy is going on.
+    if cstate.slurm_jobid != runner_slurm_jobid {
+        return Err(AppError::NoSuchTransaction);
+    };
+
     state.timeouts.cancel(cstate.timer_id);
     let flag = AsyncFlag::new();
 
@@ -415,7 +471,7 @@ async fn end_handler(
             _ = state.token.hard_cancelled() => {}
             _ = flag.wait() => {}
             };
-            let resp = start_request_impl(state, start_request).await?;
+            let resp = start_request_impl(state, start_request, runner_slurm_jobid).await?;
             Ok(Postcard(EndResponse {
                 start_response: Some(resp),
             }))

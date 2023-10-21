@@ -14,6 +14,12 @@ pub struct MarkSlurmJobCancelationRequest {
 }
 
 
+#[derive(Serialize, Deserialize)]
+pub struct MarkSlurmJobCancelationReply {
+    pub jobids: Vec<String>,
+}
+
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StatusRequest {
     pub etag: u64,
