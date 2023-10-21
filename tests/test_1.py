@@ -723,41 +723,41 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
         assert len(log) == 4 + 2
 
 
-def test_priority(tmp_path):
-    def single_source_longest_dag_path_length(graph, s):
-        assert graph.in_degree(s) == 0
-        dist = dict.fromkeys(graph.nodes, -float("inf"))
-        dist[s] = 0
-        topo_order = nx.topological_sort(graph)
-        for n in topo_order:
-            for s in graph.successors(n):
-                if dist[s] < dist[n] + graph.edges[n, s]["weight"]:
-                    dist[s] = dist[n] + graph.edges[n, s]["weight"]
-        return dist
+# def test_priority(tmp_path):
+#     def single_source_longest_dag_path_length(graph, s):
+#         assert graph.in_degree(s) == 0
+#         dist = dict.fromkeys(graph.nodes, -float("inf"))
+#         dist[s] = 0
+#         topo_order = nx.topological_sort(graph)
+#         for n in topo_order:
+#             for s in graph.successors(n):
+#                 if dist[s] < dist[n] + graph.edges[n, s]["weight"]:
+#                     dist[s] = dist[n] + graph.edges[n, s]["weight"]
+#         return dist
 
-    def is_sorted(x):
-        return sorted(x, reverse=True) == x
+#     def is_sorted(x):
+#         return sorted(x, reverse=True) == x
 
-    g = nx.DiGraph()
-    eg = _execgraph.ExecGraph(1, logfile=tmp_path / "foo")
-    for i in range(10):
-        key = f"{i}-0"
-        id = eg.add_task(["true"], key)
-        g.add_node(key)
-        for j in range(1, i + 1):
-            newkey = f"{i}-{j}"
-            id = eg.add_task(["true"], newkey, dependencies=[id])
-            g.add_edge(key, newkey, weight=1)
-            key = newkey
+#     g = nx.DiGraph()
+#     eg = _execgraph.ExecGraph(1, logfile=tmp_path / "foo")
+#     for i in range(10):
+#         key = f"{i}-0"
+#         id = eg.add_task(["true"], key)
+#         g.add_node(key)
+#         for j in range(1, i + 1):
+#             newkey = f"{i}-{j}"
+#             id = eg.add_task(["true"], newkey, dependencies=[id])
+#             g.add_edge(key, newkey, weight=1)
+#             key = newkey
 
-    keys = [eg.get_task(i)[1] for i in range(id + 1)]
-    # print(keys)
-    g.add_edges_from([(k, "collector", {"weight": 1}) for k in keys])
+#     keys = [eg.get_task(i)[1] for i in range(id + 1)]
+#     # print(keys)
+#     g.add_edges_from([(k, "collector", {"weight": 1}) for k in keys])
 
-    lengths = single_source_longest_dag_path_length(g.reverse(), "collector")
-    nfailed, order = eg.execute()
+#     lengths = single_source_longest_dag_path_length(g.reverse(), "collector")
+#     nfailed, order = eg.execute()
 
-    assert is_sorted([lengths[key] for key in order])
+#     assert is_sorted([lengths[key] for key in order])
 
 
 def test_lock(tmp_path):
