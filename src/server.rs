@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json, Router, TypedHeader,
 };
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use hyper::{header::AUTHORIZATION, Body, Request, StatusCode};
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde_json::json;
@@ -270,7 +270,7 @@ async fn mark_slurm_job_cancelation(
     TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
     Extension(state): Extension<Arc<State<'static>>>,
     Json(request): Json<MarkSlurmJobCancelationRequest>,
-) -> Result<Postcard<MarkSlurmJobCancelationReply>, AppError> {
+) -> Result<Json<MarkSlurmJobCancelationReply>, AppError> {
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
     };
@@ -282,9 +282,9 @@ async fn mark_slurm_job_cancelation(
 
     // Find all running jobids
     let running_jobids = state.connections.iter().map(|c| c.slurm_jobid.clone()).collect::<HashSet<String>>();
+
     // Add the requested slurm jobids to the set that are canceled if
     // they're not already running
-
     for jobid in request.jobids.into_iter() {
         if !running_jobids.contains(&jobid) {
             reply_jobids.push(jobid.clone());
@@ -296,7 +296,7 @@ async fn mark_slurm_job_cancelation(
     // Drop the write lock
     drop(cancelled_slurm_jobids);
 
-    Ok(Postcard(MarkSlurmJobCancelationReply {jobids: reply_jobids}))
+    Ok(Json(MarkSlurmJobCancelationReply {jobids: reply_jobids}))
 }
 
 // GET /start
