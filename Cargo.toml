@@ -25,7 +25,6 @@ anyhow = "1.0.75"
 async-channel = "1.9.0"
 async-priority-channel = "0.1.0"
 axum = { version = "0.6.20", features = ["json", "headers"] }
-atty = "0.2.14"
 base64 = "0.21.4"
 bitvec = "1.0.1"
 bufreaderwriter = "*"
