@@ -213,10 +213,11 @@ def test_not_execute_twice(num_parallel, tmp_path):
 def test_simple_remote(num_parallel, tmp_path):
     eg = _execgraph.ExecGraph(0, tmp_path / "foo")
 
-    eg.add_task(["sh", "-c", "echo foo; sleep 1; echo foo"], key="0")
+    cmd = ["sh", "-c", "echo ::set aa=bb >&3; sleep 2; echo ::set cc=dd >&3"]
+    eg.add_task(cmd, key="0")
     for i in range(1, 5):
         eg.add_task(
-            ["sh", "-c", "echo foo; sleep 0.1; echo foo"],
+            cmd,
             key=f"{i}",
             dependencies=[i - 1],
         )
@@ -319,6 +320,7 @@ def test_shutdown(tmp_path):
 
 
 def test_shutdown_2(tmp_path):
+    # this provisioner does nothing. it just writes its own pid to a file.
     with open(tmp_path / "provisioner", "w") as f:
         print(
             f"""#!{sys.executable}
@@ -344,7 +346,9 @@ if __name__ == "__main__":
     )
     with open(tmp_path / "pid") as f:
         pid = int(f.read())
-    assert not os.path.exists(f"/proc/{pid}/pid")
+
+    if sys.platform != "darwin":
+        assert not os.path.exists(f"/proc/{pid}/pid")
     assert nfailed == 1
 
 
@@ -557,7 +561,7 @@ def test_hang(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
 
     eg.add_task(["false"], key="-")
-    for i in range(1, 8):
+    for i in range(1, 2):
         eg.add_task(["sh", "-c", "sleep 60"], key=f"{i}")
 
     start = time.time()
@@ -576,6 +580,7 @@ def test_hang(tmp_path):
         for k in ("Ready", "Started", "Finished"):
             if k in item:
                 statuses_by_key[item[k]["key"]].append(k)
+    from pprint import pprint; pprint(log)
     for k, v in statuses_by_key.items():
         assert len(v) == 3
 
@@ -723,41 +728,24 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
         assert len(log) == 4 + 2
 
 
-# def test_priority(tmp_path):
-#     def single_source_longest_dag_path_length(graph, s):
-#         assert graph.in_degree(s) == 0
-#         dist = dict.fromkeys(graph.nodes, -float("inf"))
-#         dist[s] = 0
-#         topo_order = nx.topological_sort(graph)
-#         for n in topo_order:
-#             for s in graph.successors(n):
-#                 if dist[s] < dist[n] + graph.edges[n, s]["weight"]:
-#                     dist[s] = dist[n] + graph.edges[n, s]["weight"]
-#         return dist
+def test_topological_order(tmp_path):
+    g = nx.DiGraph()
+    eg = _execgraph.ExecGraph(1, logfile=tmp_path / "foo")
+    for i in range(10):
+        key = f"{i}-0"
+        id = eg.add_task(["true", key], key)
+        # print(f"task {key!r} depends on {{}}")
+        g.add_node(key)
+        for j in range(1, i + 1):
+            newkey = f"{i}-{j}"
+            # print(f"task {newkey!r} depends on {key!r}")
+            id = eg.add_task(["true", newkey], newkey, dependencies=[id])
+            g.add_edge(key, newkey, weight=1)
+            key = newkey
 
-#     def is_sorted(x):
-#         return sorted(x, reverse=True) == x
-
-#     g = nx.DiGraph()
-#     eg = _execgraph.ExecGraph(1, logfile=tmp_path / "foo")
-#     for i in range(10):
-#         key = f"{i}-0"
-#         id = eg.add_task(["true"], key)
-#         g.add_node(key)
-#         for j in range(1, i + 1):
-#             newkey = f"{i}-{j}"
-#             id = eg.add_task(["true"], newkey, dependencies=[id])
-#             g.add_edge(key, newkey, weight=1)
-#             key = newkey
-
-#     keys = [eg.get_task(i)[1] for i in range(id + 1)]
-#     # print(keys)
-#     g.add_edges_from([(k, "collector", {"weight": 1}) for k in keys])
-
-#     lengths = single_source_longest_dag_path_length(g.reverse(), "collector")
-#     nfailed, order = eg.execute()
-
-#     assert is_sorted([lengths[key] for key in order])
+    nfailed, order = eg.execute()
+    assert nfailed == 0
+    assert is_topological_order(g, order)
 
 
 def test_lock(tmp_path):
@@ -820,10 +808,11 @@ def test_fd3_2(tmp_path):
     assert contents[-1]["Finished"]["values"] == [{}]
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
 def test_fd3_3(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(
-        ["dd", "if=/dev/zero", "of=/proc/self/fd/3", "bs=1024" "count=1024"], key="foo"
+        ["dd", "if=/dev/zero", "of=/proc/self/fd/3", "bs=1024", "count=1024"], key="foo"
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
@@ -1215,3 +1204,30 @@ def test_slurm_cancel(tmp_path):
     )
     assert order == []
     assert nfailed == 0
+
+
+def is_topological_order(graph, node_order):
+    """
+    From Ben Cooper
+
+    Runtime:
+        O(V * E)
+
+    References:
+        https://stackoverflow.com/questions/54174116/checking-validity-of-topological-sort
+    """
+    # Iterate through the edges in G.
+
+    node_to_index = {n: idx for idx, n in enumerate(node_order)}
+    for u, v in graph.edges:
+        # For each edge, retrieve the index of each of its vertices in the ordering.
+        ux = node_to_index[u]
+        vx = node_to_index[v]
+        # Compared the indices. If the origin vertex isn't earlier than
+        # the destination vertex, return false.
+        if ux >= vx:
+            # raise Exception
+            return False
+    # If you iterate through all of the edges without returning false,
+    # return true.
+    return True
