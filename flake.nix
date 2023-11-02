@@ -49,6 +49,7 @@
           numpy
           scipy
           curl
+          psutil
           toxiproxy
         ] ++ pkgs.lib.optionals (pkgs.stdenv.isLinux) [
           black # broken on macos                    

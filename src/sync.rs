@@ -220,6 +220,12 @@ impl<'a> ReadyTrackerServer<'a> {
                 e.values,
             ))?;
         }
+        unsafe {
+            // Block SIGTERM for a moment, then send SIGTERM to the whole process group to try to stop child-of-child processes
+            let sigterm_channel = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            libc::killpg(libc::getpgrp(), libc::SIGTERM);
+            drop(sigterm_channel);
+        }
         debug!("Finished drain");
         Ok(())
     }

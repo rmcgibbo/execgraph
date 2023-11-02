@@ -5,6 +5,7 @@ import signal
 import sys
 import time
 import threading
+import psutil
 import subprocess
 from typing import Optional
 from collections import defaultdict
@@ -1056,6 +1057,44 @@ def test_ratelimit_2(tmp_path):
     assert nfailed == 0
     assert end - start > 2
     assert end - start < 4
+
+
+def test_kill_sub_children(tmp_path):
+    eg = _execgraph.ExecGraph(2, tmp_path / "foo")
+    childpath = str(tmp_path / "child" )
+    with open(childpath, "w") as f:
+        f.write("""import os, time
+with open('%s/subchild-pid', 'w') as f:
+    f.write(str(os.getpid()))
+time.sleep(10)
+    """ % str(tmp_path))
+    os.chmod(childpath, 0o744)
+
+    eg.add_task(
+       ["python", "-c", "import os, subprocess;subprocess.run(['python', '%s'])" % childpath],
+       key="0"
+    )
+
+    def run_thread():
+        import time
+        time.sleep(1)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=run_thread).start()
+    try:
+        eg.execute()
+    except KeyboardInterrupt:
+        pass
+
+    subchild_pid = int(open(tmp_path / "subchild-pid").read())
+
+    try:
+        _ = psutil.Process(subchild_pid)
+        subchild_exists = True
+    except psutil.NoSuchProcess:
+        subchild_exists = False
+
+    assert subchild_exists is False
 
 
 def test_admin_socket_shutdown_1(tmp_path):
