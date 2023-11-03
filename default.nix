@@ -12,6 +12,7 @@
 , toxiproxy
 , procps
 , pstree
+, psutil
 , stdenv
 , darwin
 , gnugrep
