@@ -89,6 +89,7 @@ in buildPythonPackage rec {
     numpy
     scipy
     networkx
+    psutil
     curl
     procps
     pstree

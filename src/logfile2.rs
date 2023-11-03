@@ -13,6 +13,7 @@ use thiserror::Error;
 
 pub type Result<T> = core::result::Result<T, LogfileError>;
 pub type ValueMaps = Vec<HashMap<String, String>>;
+pub const LOGFILE_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum LogEntry {
@@ -57,6 +58,9 @@ pub struct StartedEntry {
     pub key: String,
     pub host: String,
     pub pid: u32,
+
+    #[serde(default)]
+    pub slurm_jobib: String, // If the value is not present when deserializing, use the Default::default().
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -80,7 +84,7 @@ impl LogEntry {
         storage_roots: Vec<PathBuf>,
     ) -> Result<LogEntry> {
         Ok(LogEntry::Header(HeaderEntry {
-            version: 4,
+            version: LOGFILE_VERSION,
             time: SystemTime::now(),
             user: whoami::username(),
             hostname: gethostname::gethostname().to_string_lossy().to_string(),
@@ -103,11 +107,12 @@ impl LogEntry {
         })
     }
 
-    pub fn new_started(key: &str, host: &str, pid: u32) -> LogEntry {
+    pub fn new_started(key: &str, host: &str, pid: u32, slurm_jobid: String) -> LogEntry {
         LogEntry::Started(StartedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             host: host.to_owned(),
+            slurm_jobib: slurm_jobid,
             pid,
         })
     }
@@ -437,6 +442,10 @@ impl<T> LogFile<T> {
             })
     }
 
+    pub fn header_version(&self) -> Option<u32> {
+        self.header.as_ref().map(|h| h.version)
+    }
+
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
         self.f.flush()
     }
@@ -598,8 +607,9 @@ impl LogFileSnapshotReader {
             line.truncate(len);
             match serde_json::from_str(&line) {
                 Ok(value) => v.push(value),
-                Err(_) => {
-                    break;
+                Err(e) if e.is_data() => {},
+                Err(e) => {
+                    tracing::error!("{}", e);
                 }
             };
         }

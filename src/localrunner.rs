@@ -98,7 +98,7 @@ pub async fn run_local_process_loop(
             Ok(child) => child,
             Err(e) => {
                 tracker
-                    .send_started(subgraph_node_id, cmd, &hostname, 0)
+                    .send_started(subgraph_node_id, cmd, &hostname, 0, "".to_string())
                     .await;
                 tracker
                     .send_finished(
@@ -119,7 +119,7 @@ pub async fn run_local_process_loop(
             .expect("child hasn't been waited for yet, so its pid should exist");
 
         tracker
-            .send_started(subgraph_node_id, cmd, &hostname, pid)
+            .send_started(subgraph_node_id, cmd, &hostname, pid, "".to_string())
             .await;
 
         let output: ChildOutput = tokio::select! {

@@ -177,7 +177,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 Ok(Event::Started(e)) => {
                     let cmd = self.g[e.id];
                     self.logfile
-                        .write(LogEntry::new_started(&cmd.key, "host", 0))?;
+                        .write(LogEntry::new_started(&cmd.key, "host", 0, "".to_string()))?;
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(Event::Finished(e)) => {
@@ -194,7 +194,7 @@ impl<'a> ReadyTrackerServer<'a> {
                         // But let's try to preserve the invariant that every Finished entry in the log
                         // is preceeded by a Started entry, which means that we need to fabricate a fake
                         // Started entry.
-                        self.logfile.write(LogEntry::new_started(&cmd.key, "", 0))?;
+                        self.logfile.write(LogEntry::new_started(&cmd.key, "", 0, "".to_string()))?;
                     }
                     self.logfile.write(LogEntry::new_finished(
                         &cmd.key,
@@ -273,6 +273,7 @@ impl<'a> ReadyTrackerServer<'a> {
                                 &cmd.key,
                                 &e.host,
                                 e.pid,
+                                e.slurm_jobid,
                             ))?;
                             assert!(self.inflight.insert(e.id, Instant::now()).is_none());
                         }
@@ -297,7 +298,7 @@ impl<'a> ReadyTrackerServer<'a> {
                                 // is preceeded by a Started entry, which means that we need to fabricate a fake
                                 // Started entry.
                                 self.logfile
-                                    .write(LogEntry::new_started(&cmd.key, "", 0))?;
+                                    .write(LogEntry::new_started(&cmd.key, "", 0, "".to_string()))?;
                             }
                             self.logfile.write(LogEntry::new_finished(
                                 &cmd.key,
@@ -566,7 +567,7 @@ impl ReadyTrackerClient {
     }
 
     /// When a task is started, notify the tracker by calling this.
-    pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, host: &str, pid: u32) {
+    pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, host: &str, pid: u32, slurm_jobid: String) {
         cmd.call_preamble();
         let r = self
             .s
@@ -574,6 +575,7 @@ impl ReadyTrackerClient {
                 id: v,
                 host: host.to_string(),
                 pid,
+                slurm_jobid,
             }))
             .await;
         if r.is_err() {
@@ -636,7 +638,9 @@ struct StartedEvent {
     id: NodeIndex,
     host: String,
     pid: u32,
+    slurm_jobid: String,
 }
+
 pub struct FinishedEvent {
     /// id of the command that finished in the graph
     pub id: NodeIndex,

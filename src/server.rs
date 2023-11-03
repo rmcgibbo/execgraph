@@ -394,6 +394,7 @@ async fn start_request_impl(
 // POST /begun
 async fn begun_handler(
     TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
+    headers: axum::http::header::HeaderMap,
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<BegunRequest>,
 ) -> Result<Response, AppError> {
@@ -405,9 +406,18 @@ async fn begun_handler(
         .get_mut(&request.transaction_id)
         .ok_or(AppError::NoSuchTransaction)?;
 
+    // extract required slurm jobid
+    let runner_slurm_jobid = match headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
+        Some(headervalue) => match headervalue.to_str() {
+            Ok(jobid) => jobid.to_owned(),
+            Err(_) => {return Err(AppError::BadRequest);}
+        }
+        None => {return Err(AppError::BadRequest)}
+    };
+
     state
         .tracker
-        .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid)
+        .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid, runner_slurm_jobid)
         .await;
     Ok((StatusCode::OK, "").into_response())
 }
