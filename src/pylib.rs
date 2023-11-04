@@ -77,11 +77,18 @@ impl PyExecGraph {
             LogFile::<LogFileRW>::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
         let readonly_logs = load_ro_logfiles_recursive(readonly_logfiles.clone())?;
 
-        if log.header_version().map(|v| v != logfile2::LOGFILE_VERSION).unwrap_or(false) {
+        if log
+            .header_version()
+            .map(|v| v != logfile2::LOGFILE_VERSION)
+            .unwrap_or(false)
+        {
             return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
         };
         for l in readonly_logs.iter() {
-            if l.header_version().map(|v| v != logfile2::LOGFILE_VERSION).unwrap_or(false) {
+            if l.header_version()
+                .map(|v| v != logfile2::LOGFILE_VERSION)
+                .unwrap_or(false)
+            {
                 return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
             };
         }

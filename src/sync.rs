@@ -176,8 +176,12 @@ impl<'a> ReadyTrackerServer<'a> {
             match self.completed.try_recv() {
                 Ok(Event::Started(e)) => {
                     let cmd = self.g[e.id];
-                    self.logfile
-                        .write(LogEntry::new_started(&cmd.key, "host", 0, "".to_string()))?;
+                    self.logfile.write(LogEntry::new_started(
+                        &cmd.key,
+                        "host",
+                        0,
+                        "".to_string(),
+                    ))?;
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(Event::Finished(e)) => {
@@ -194,7 +198,12 @@ impl<'a> ReadyTrackerServer<'a> {
                         // But let's try to preserve the invariant that every Finished entry in the log
                         // is preceeded by a Started entry, which means that we need to fabricate a fake
                         // Started entry.
-                        self.logfile.write(LogEntry::new_started(&cmd.key, "", 0, "".to_string()))?;
+                        self.logfile.write(LogEntry::new_started(
+                            &cmd.key,
+                            "",
+                            0,
+                            "".to_string(),
+                        ))?;
                     }
                     self.logfile.write(LogEntry::new_finished(
                         &cmd.key,
@@ -222,7 +231,8 @@ impl<'a> ReadyTrackerServer<'a> {
         }
         unsafe {
             // Block SIGTERM for a moment, then send SIGTERM to the whole process group to try to stop child-of-child processes
-            let sigterm_channel = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let sigterm_channel =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             libc::killpg(libc::getpgrp(), libc::SIGTERM);
             drop(sigterm_channel);
         }
@@ -567,7 +577,14 @@ impl ReadyTrackerClient {
     }
 
     /// When a task is started, notify the tracker by calling this.
-    pub async fn send_started(&self, v: NodeIndex, cmd: &Cmd, host: &str, pid: u32, slurm_jobid: String) {
+    pub async fn send_started(
+        &self,
+        v: NodeIndex,
+        cmd: &Cmd,
+        host: &str,
+        pid: u32,
+        slurm_jobid: String,
+    ) {
         cmd.call_preamble();
         let r = self
             .s

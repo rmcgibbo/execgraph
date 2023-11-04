@@ -86,8 +86,6 @@ pub struct State<'a> {
     /// Avoid a race requires us to know slurm jobids that have been
     /// scanceled so we don't hand out tasks to those runners.
     cancelled_slurm_jobids: RwLock<HashSet<String>>,
-
-
 }
 
 impl<'a> State<'a> {
@@ -281,7 +279,11 @@ async fn mark_slurm_job_cancelation(
     let mut cancelled_slurm_jobids = state.cancelled_slurm_jobids.write().unwrap();
 
     // Find all running jobids
-    let running_jobids = state.connections.iter().map(|c| c.slurm_jobid.clone()).collect::<HashSet<String>>();
+    let running_jobids = state
+        .connections
+        .iter()
+        .map(|c| c.slurm_jobid.clone())
+        .collect::<HashSet<String>>();
 
     // Add the requested slurm jobids to the set that are canceled if
     // they're not already running
@@ -289,14 +291,15 @@ async fn mark_slurm_job_cancelation(
         if !running_jobids.contains(&jobid) {
             reply_jobids.push(jobid.clone());
             cancelled_slurm_jobids.insert(jobid);
-
         }
-    };
+    }
 
     // Drop the write lock
     drop(cancelled_slurm_jobids);
 
-    Ok(Json(MarkSlurmJobCancelationReply {jobids: reply_jobids}))
+    Ok(Json(MarkSlurmJobCancelationReply {
+        jobids: reply_jobids,
+    }))
 }
 
 // GET /start
@@ -306,7 +309,6 @@ async fn start_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<StartRequest>,
 ) -> Result<Postcard<StartResponse>, AppError> {
-
     // check auth token
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
@@ -316,9 +318,11 @@ async fn start_handler(
     let runner_slurm_jobid = match headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
         Some(headervalue) => match headervalue.to_str() {
             Ok(jobid) => jobid.to_owned(),
-            Err(_) => {return Err(AppError::BadRequest);}
-        }
-        None => {return Err(AppError::BadRequest)}
+            Err(_) => {
+                return Err(AppError::BadRequest);
+            }
+        },
+        None => return Err(AppError::BadRequest),
     };
 
     // If this jobid has been scanceled, don't give out a job and just tell the runner
@@ -332,7 +336,9 @@ async fn start_handler(
         }
     }
 
-    Ok(Postcard(start_request_impl(state, request, runner_slurm_jobid).await?))
+    Ok(Postcard(
+        start_request_impl(state, request, runner_slurm_jobid).await?,
+    ))
 }
 
 async fn start_request_impl(
@@ -410,14 +416,22 @@ async fn begun_handler(
     let runner_slurm_jobid = match headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
         Some(headervalue) => match headervalue.to_str() {
             Ok(jobid) => jobid.to_owned(),
-            Err(_) => {return Err(AppError::BadRequest);}
-        }
-        None => {return Err(AppError::BadRequest)}
+            Err(_) => {
+                return Err(AppError::BadRequest);
+            }
+        },
+        None => return Err(AppError::BadRequest),
     };
 
     state
         .tracker
-        .send_started(cstate.node_id, &cstate.cmd, &request.host, request.pid, runner_slurm_jobid)
+        .send_started(
+            cstate.node_id,
+            &cstate.cmd,
+            &request.host,
+            request.pid,
+            runner_slurm_jobid,
+        )
         .await;
     Ok((StatusCode::OK, "").into_response())
 }
@@ -429,7 +443,6 @@ async fn end_handler(
     Extension(state): Extension<Arc<State<'static>>>,
     Postcard(request): Postcard<EndRequest>,
 ) -> Result<Postcard<EndResponse>, AppError> {
-
     // check auth token
     if authorization.token() != state.authorization_token {
         return Err(AppError::Unauthorized);
@@ -439,9 +452,11 @@ async fn end_handler(
     let runner_slurm_jobid = match headers.get("X-EXECGRAPH-SLURM-JOB-ID") {
         Some(headervalue) => match headervalue.to_str() {
             Ok(jobid) => jobid.to_owned(),
-            Err(_) => {return Err(AppError::BadRequest);}
-        }
-        None => {return Err(AppError::BadRequest)}
+            Err(_) => {
+                return Err(AppError::BadRequest);
+            }
+        },
+        None => return Err(AppError::BadRequest),
     };
 
     let cstate = {
@@ -592,7 +607,10 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/end", post(end_handler))
         .route("/ping", post(ping_handler))
         .route("/status", get(status_handler))
-        .route("/mark-slurm-job-cancelation", post(mark_slurm_job_cancelation))
+        .route(
+            "/mark-slurm-job-cancelation",
+            post(mark_slurm_job_cancelation),
+        )
         .fallback(fallback)
         .layer(middleware.into_inner())
 }

@@ -607,7 +607,7 @@ impl LogFileSnapshotReader {
             line.truncate(len);
             match serde_json::from_str(&line) {
                 Ok(value) => v.push(value),
-                Err(e) if e.is_data() => {},
+                Err(e) if e.is_data() => {}
                 Err(e) => {
                     tracing::error!("{}", e);
                 }

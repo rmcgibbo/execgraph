@@ -13,12 +13,10 @@ pub struct MarkSlurmJobCancelationRequest {
     pub jobids: Vec<String>,
 }
 
-
 #[derive(Serialize, Deserialize)]
 pub struct MarkSlurmJobCancelationReply {
     pub jobids: Vec<String>,
 }
-
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StatusRequest {

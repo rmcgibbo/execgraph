@@ -4,7 +4,7 @@ use clap::Parser;
 use execgraph::{
     http_extensions::reqwest::{RequestBuilderExt, ResponseExt},
     httpinterface::*,
-    localrunner::{wait_with_output, ChildOutput, ChildProcessError},
+    localrunner::{wait_with_output, ChildOutput, ChildProcessError, TIME_TO_GET_SUBPID},
     logfile2::ValueMaps,
 };
 use gethostname::gethostname;
@@ -16,6 +16,7 @@ use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
 use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::Instant;
 use tokio_command_fds::{CommandFdExt, FdMapping};
@@ -82,7 +83,8 @@ async fn main() -> Result<(), RemoteError> {
 
     set_current_process_as_child_subreaper();
     let slurm_array_job_id = std::env::var("SLURM_ARRAY_JOB_ID").unwrap_or_else(|_| "".to_string());
-    let slurm_array_task_id = std::env::var("SLURM_ARRAY_TASK_ID").unwrap_or_else(|_| "".to_string());
+    let slurm_array_task_id =
+        std::env::var("SLURM_ARRAY_TASK_ID").unwrap_or_else(|_| "".to_string());
     let slurm_jobid = format!("{}_{}", slurm_array_job_id, slurm_array_task_id);
     let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
     std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
@@ -273,7 +275,7 @@ async fn run_command(
         }
     });
 
-    let (read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
+    let (mut read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
     let (fd4_read_pipe, fd4_write_pipe) = if start.fd_input.is_some() {
         let (read, write) = tokio_pipe::pipe().expect("Cannot create pipe");
         (Some(read), Some(write))
@@ -357,9 +359,22 @@ async fn run_command(
         }
     };
 
-    let pid = child
-        .id()
-        .expect("hasn't been polled yet, so this id should exist");
+    // dump input into fd4 immediately
+    if let Some(p) = fd4_write_pipe {
+        let (_fd, buf) = start.fd_input.as_ref().unwrap();
+        let mut writer = tokio::io::BufWriter::new(p);
+        writer.write_all(buf).await.unwrap();
+        writer.flush().await.unwrap();
+    }
+
+    let pid =
+        if let Ok(Ok(pid)) = tokio::time::timeout(TIME_TO_GET_SUBPID, read_fd3.read_u32()).await {
+            pid
+        } else {
+            child
+                .id()
+                .expect("child hasn't been waited for yet, so its pid should exist")
+        };
 
     // Tell the server that we've started the command
     tokio::select! {
@@ -379,7 +394,7 @@ async fn run_command(
 
     // Wait for the command to finish
     let output: ChildOutput = tokio::select! {
-        output = wait_with_output(child, read_fd3, start.fd_input.as_ref().map(|(_fd, buf)| (fd4_write_pipe.unwrap(), &buf[..]))) => output.unwrap(),
+        output = wait_with_output(child, read_fd3) => output.unwrap(),
         _ = token3.cancelled() => {
             return Err(RemoteError::PingTimeout("Failed to receive server pong (343)".to_owned()))
         },
