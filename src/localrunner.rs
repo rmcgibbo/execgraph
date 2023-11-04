@@ -5,7 +5,6 @@ use crate::{
 use anyhow::Result;
 use petgraph::prelude::*;
 use std::{
-    collections::HashMap,
     os::unix::prelude::{AsRawFd, ExitStatusExt},
     process::Stdio,
     sync::Arc,
@@ -21,7 +20,6 @@ use tracing::debug;
 
 use crate::{
     execgraph::Cmd,
-    logfile2::ValueMaps,
     sync::{FinishedEvent, ReadyTrackerClient},
 };
 
@@ -35,7 +33,7 @@ pub enum LocalQueueType {
 
 pub async fn run_local_process_loop(
     subgraph: Arc<DiGraph<&Cmd, ()>>,
-    tracker: &ReadyTrackerClient,
+    tracker: Arc<ReadyTrackerClient>,
     token: CancellationToken,
     local_queue_type: LocalQueueType,
 ) {
@@ -45,7 +43,7 @@ pub async fn run_local_process_loop(
         LocalQueueType::ConsoleQueue => 1,
     };
 
-    while let Ok(subgraph_node_id) = tracker.recv(runnertypeid).await {
+    while let Ok((subgraph_node_id, runcount)) = tracker.recv(runnertypeid).await {
         let cmd = subgraph[subgraph_node_id];
         cmd.call_preamble();
 
@@ -75,6 +73,7 @@ pub async fn run_local_process_loop(
         let maybe_child = match &local_queue_type {
             LocalQueueType::NormalLocalQueue => command
                 .args(&cmd.cmdline[1..])
+                .env("EXECGRAPH_RUNCOUNT", format!("{}", runcount))
                 .kill_on_drop(true)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -139,6 +138,12 @@ pub async fn run_local_process_loop(
             .send_started(subgraph_node_id, cmd, &hostname, pid, "".to_string())
             .await;
 
+        let (fd3_channel_write, fd3_channel_read) = async_channel::unbounded();
+        let forward_messages_thread = tokio::spawn(forward_messages(
+            subgraph_node_id,
+            fd3_channel_read,
+            tracker.clone(),
+        ));
         let output: ChildOutput = tokio::select! {
             cancel = token.soft_cancelled(start_time) => {
                 if let CancellationState::CancelledAfterTime(_) = cancel {
@@ -150,14 +155,18 @@ pub async fn run_local_process_loop(
                 debug!("Received cancellation {:#?}", cmd.display);
                 return;
             },
-            output = wait_with_output(child, fd3_read_pipe) => {
+            output = wait_with_output(child, fd3_read_pipe, fd3_channel_write) => {
                 output.unwrap()
             }
         };
+        let execgraph_internal_nonretryable_error = forward_messages_thread
+            .await
+            .expect("Cannot join thread")
+            .expect("forward_messages crashed?");
 
         tracing::debug!("Finished cmd");
         tracker
-            .send_finished(cmd, output.to_event(subgraph_node_id))
+            .send_finished(cmd, output.to_event(subgraph_node_id, execgraph_internal_nonretryable_error))
             .await;
     }
 
@@ -170,7 +179,25 @@ pub async fn run_local_process_loop(
 pub async fn wait_with_output(
     mut child: tokio::process::Child,
     fd: PipeRead,
+    on_fd3: async_channel::Sender<Vec<u8>>,
 ) -> Result<ChildOutput, ChildProcessError> {
+    async fn read_fd3(
+        pipe: &mut Option<impl AsyncRead + std::marker::Unpin>,
+        on_fd3: async_channel::Sender<Vec<u8>>,
+    ) -> std::io::Result<()> {
+        if let Some(pipe) = pipe {
+            loop {
+                let mut buf = Vec::new();
+                let nread = pipe.read_buf(&mut buf).await?;
+                if nread == 0 {
+                    break;
+                } else if let Err(e) = on_fd3.send(buf).await {
+                    tracing::error!("Unable to send to channel: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
     async fn read_to_end(
         pipe: &mut Option<impl AsyncRead + std::marker::Unpin>,
     ) -> std::io::Result<Vec<u8>> {
@@ -186,9 +213,9 @@ pub async fn wait_with_output(
 
     let f1 = read_to_end(&mut stdout_pipe);
     let f2 = read_to_end(&mut stderr_pipe);
-    let f3 = read_to_end(&mut fd);
+    let f3 = read_fd3(&mut fd, on_fd3);
 
-    let (status, stdout, stderr, fd3bytes) =
+    let (status, stdout, stderr, _) =
         futures::future::try_join4(child.wait(), f1, f2, f3).await?;
     drop(stdout_pipe);
     drop(stderr_pipe);
@@ -198,7 +225,6 @@ pub async fn wait_with_output(
         status,
         stdout,
         stderr,
-        fd3bytes,
     })
 }
 
@@ -223,17 +249,16 @@ pub struct ChildOutput {
     pub status: std::process::ExitStatus,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub fd3bytes: Vec<u8>,
 }
 
 impl ChildOutput {
-    pub fn to_event(self, id: NodeIndex) -> FinishedEvent {
+    pub fn to_event(self, id: NodeIndex, nonretryable: bool) -> FinishedEvent {
         FinishedEvent {
             id,
             status: self.code(),
             stdout: self.stdout_str(),
             stderr: self.stderr_str(),
-            values: self.fd3_values(),
+            nonretryable,
             flag: None,
         }
     }
@@ -253,26 +278,26 @@ impl ChildOutput {
     pub fn stderr_str(&self) -> String {
         String::from_utf8_lossy(&self.stderr).to_string()
     }
+}
 
-    pub fn fd3_values(&self) -> ValueMaps {
-        fn parse_line(line: &str) -> Result<HashMap<String, String>, shell_words::ParseError> {
-            shell_words::split(line).map(|fields| {
-                fields
-                    .iter()
-                    .flat_map(|s| {
-                        s.find('=')
-                            .map(|pos| (s[..pos].to_string(), s[pos + 1..].to_string()))
-                    })
-                    .collect::<HashMap<String, String>>()
-            })
+async fn forward_messages(
+    node_index: NodeIndex,
+    fd3_channel_read: async_channel::Receiver<Vec<u8>>,
+    tracker: Arc<ReadyTrackerClient>,
+) -> anyhow::Result<bool> {
+    let mut execgraph_internal_nonretryable_error = false;
+    loop {
+        match fd3_channel_read.recv().await {
+            Ok(value) => {
+                if std::str::from_utf8(&value).is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n") {
+                    execgraph_internal_nonretryable_error = true;
+                } else {
+                    tracker.send_setvalue(node_index, value).await
+                }
+            }
+            Err(_) => {
+                return Ok(execgraph_internal_nonretryable_error);
+            }
         }
-
-        std::str::from_utf8(&self.fd3bytes)
-            .map(|s| {
-                s.lines()
-                    .filter_map(|line| parse_line(line).ok())
-                    .collect::<ValueMaps>()
-            })
-            .unwrap_or_default()
     }
 }

@@ -5,7 +5,6 @@ use execgraph::{
     http_extensions::reqwest::{RequestBuilderExt, ResponseExt},
     httpinterface::*,
     localrunner::{wait_with_output, ChildOutput, ChildProcessError, TIME_TO_GET_SUBPID},
-    logfile2::ValueMaps,
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
@@ -14,7 +13,7 @@ use execgraph::constants::HOLD_RATETIMITED_TIME;
 use nix::unistd::Pid;
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
-use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, time::Duration};
+use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
@@ -122,12 +121,14 @@ async fn main() -> Result<(), RemoteError> {
                 .as_bytes(),
         )?,
     );
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .http2_prior_knowledge()
-        .timeout(2 * HOLD_RATETIMITED_TIME)
-        .connect_timeout(Duration::from_secs(5))
-        .build()?;
+    let client = Arc::new(
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .http2_prior_knowledge()
+            .timeout(2 * HOLD_RATETIMITED_TIME)
+            .connect_timeout(Duration::from_secs(5))
+            .build()?,
+    );
     let base = reqwest::Url::parse(&opt.url)?;
 
     // An infinite stream of SIGERM signals.
@@ -144,7 +145,16 @@ async fn main() -> Result<(), RemoteError> {
     let mut timing_info = TimingInfo::default();
     let mut start_response = None;
     loop {
-        match run_command(&opt, &base, &client, &mut sigterms, &mut rx, start_response).await {
+        match run_command(
+            &opt,
+            &base,
+            client.clone(),
+            &mut sigterms,
+            &mut rx,
+            start_response,
+        )
+        .await
+        {
             Err(e) => {
                 tracing::info!("Finishing loop due to {:#?}", e);
                 break;
@@ -175,7 +185,7 @@ async fn main() -> Result<(), RemoteError> {
 async fn run_command(
     opt: &CommandLineArguments,
     base: &reqwest::Url,
-    client: &reqwest::Client,
+    client: Arc<reqwest::Client>,
     sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
     start: Option<StartResponse>,
@@ -183,6 +193,7 @@ async fn run_command(
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
+    let msg_route = base.join("msg")?;
     let end_route = base.join("end")?;
     let t_before_start_request = Instant::now();
 
@@ -301,6 +312,7 @@ async fn run_command(
     let t_before_spawn = std::time::Instant::now();
     let maybe_child = command
         .args(&start.cmdline[1..])
+        .env("EXECGRAPH_RUNCOUNT", format!("{}", start.runcount))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -341,8 +353,8 @@ async fn run_command(
                     transaction_id,
                     status: 127,
                     stdout: "".to_owned(),
+                    nonretryable: false,
                     stderr: format!("No such command: {:#?}", &start.cmdline[0]),
-                    values: ValueMaps::new(),
                     start_request: still_accepting_tasks(opt).then(make_start_request),
                 })?
                 .send() => {
@@ -392,11 +404,27 @@ async fn run_command(
         }
     };
 
+    let (fd3_channel_write, fd3_channel_read) = async_channel::unbounded();
+    let child_futures = wait_with_output(
+        child,
+        read_fd3,
+        fd3_channel_write.clone(),
+    );
+    let forward_messages_thread = tokio::spawn(forward_messages(
+        fd3_channel_read,
+        client.clone(),
+        msg_route,
+        transaction_id,
+    ));
+
     // Wait for the command to finish
     let output: ChildOutput = tokio::select! {
-        output = wait_with_output(child, read_fd3) => output.unwrap(),
+        maybe_output = child_futures => {
+            maybe_output?
+        },
         _ = token3.cancelled() => {
-            return Err(RemoteError::PingTimeout("Failed to receive server pong (343)".to_owned()))
+            fd3_channel_write.close();
+            return Err(RemoteError::PingTimeout("Failed to receive server pong (343)".to_owned()));
         },
         maybe_slurm_error_message = notify_rx.recv() => {
             let slurm_error_message = maybe_slurm_error_message.unwrap_or_else(||"Logic error. This channel should not have been dropped.".to_string());
@@ -419,11 +447,12 @@ async fn run_command(
                     status: 128+16,
                     stdout: "".to_string(),
                     stderr: slurm_error_message,
-                    values: vec![],
                     start_request: None,
+                    nonretryable: true,
                 })?.send().await {
                     tracing::error!("Unable to send lasp-gasp message {}", e);
                 }
+            fd3_channel_write.close();
             return Err(RemoteError::Sigterm)
         },
         _ = sigterms.recv() => {
@@ -441,14 +470,22 @@ async fn run_command(
                     status: 128+15,
                     stdout: "".to_string(),
                     stderr: slurm_error_logfile_contents,
-                    values: vec![],
                     start_request: None,
+                    nonretryable: true,
                 })?.send().await {
                     tracing::error!("Unable to send lasp-gasp message {}", e);
                 }
+            fd3_channel_write.close();
             return Err(RemoteError::Sigterm)
         }
     };
+
+    // Closing fd3_write_channel should cause the forward_message_thread to terminate
+    fd3_channel_write.close();
+    let execgraph_internal_nonretryable_error = forward_messages_thread
+        .await
+        .map_err(|e| RemoteError::AnyhowError(e.into()))??;
+
     let t_finished = std::time::Instant::now();
 
     let time_executing_command = t_finished - t_before_spawn;
@@ -460,7 +497,7 @@ async fn run_command(
         status: output.code().as_i32(),
         stdout: output.stdout_str(),
         stderr: output.stderr_str(),
-        values: output.fd3_values(),
+        nonretryable: execgraph_internal_nonretryable_error,
         start_request: still_accepting_tasks(opt).then(make_start_request),
     };
     tokio::select! {
@@ -637,7 +674,7 @@ fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
 }
 
 // https://github.com/notify-rs/notify/blob/d7e22791faffb7bd9bd10f031c260ae019d7f474/examples/async_monitor.rs
-#[allow(clippy::drop_ref)]
+#[allow(dropping_references)]
 fn async_watcher(
     filename: Option<std::path::PathBuf>,
 ) -> notify::Result<(
@@ -802,4 +839,38 @@ fn current_child_processes() -> Vec<i32> {
     }
 
     children
+}
+
+async fn forward_messages(
+    fd3_channel_read: async_channel::Receiver<Vec<u8>>,
+    client: Arc<reqwest::Client>,
+    msg_route: reqwest::Url,
+    transaction_id: u32,
+) -> anyhow::Result<bool> {
+    let mut execgraph_internal_nonretryable_error = false;
+    loop {
+        // receive from channel that contains lines outputted by the child process
+        // to file descriptor 3. once the channel is closed on the write side,
+        // that means the process must have exited or something, so we just return
+        let value = match fd3_channel_read.recv().await {
+            Ok(v) => {
+                if std::str::from_utf8(&v).is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n") {
+                    execgraph_internal_nonretryable_error = true;
+                    return Ok(execgraph_internal_nonretryable_error);
+                } else {
+                    v
+                }
+            }
+            Err(_) => { return Ok(execgraph_internal_nonretryable_error); }
+        };
+        client
+            .post(msg_route.clone())
+            .postcard(&MsgRequest {
+                transaction_id,
+                value,
+            })
+            .unwrap()
+            .send()
+            .await.context("Failed to send to /msg endpoint on server")?;
+    }
 }

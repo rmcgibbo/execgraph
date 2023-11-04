@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ffi::OsString};
 
-use crate::logfile2::ValueMaps;
-
 #[derive(Serialize, Deserialize)]
 pub struct Ping {
     pub transaction_id: u32,
@@ -86,6 +84,7 @@ pub struct StartRequest {
 pub struct StartResponse {
     pub transaction_id: u32,
     pub cmdline: Vec<OsString>,
+    pub runcount: u32,
     pub fd_input: Option<(i32, Vec<u8>)>,
     pub ping_interval_msecs: u64,
 }
@@ -97,13 +96,19 @@ pub struct BegunRequest {
     pub pid: u32,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MsgRequest {
+    pub transaction_id: u32,
+    pub value: Vec<u8>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct EndRequest {
     pub transaction_id: u32,
     pub status: i32,
     pub stdout: String,
     pub stderr: String,
-    pub values: ValueMaps,
+    pub nonretryable: bool,
     pub start_request: Option<StartRequest>,
 }
 

@@ -33,7 +33,7 @@ pub struct Cmd {
     pub display: Option<String>,
     pub affinity: BitArray<u64>,
 
-    pub runcount: u32,
+    pub runcount_base: u32,
     pub priority: u32,
     pub storage_root: u32,
 
@@ -48,6 +48,8 @@ pub struct Cmd {
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
     pub postamble: Option<Capsule>,
+
+    pub max_retries: u32,
 }
 
 lazy_static::lazy_static! {
@@ -244,13 +246,10 @@ impl ExecGraph {
         provisioner: Option<RemoteProvisionerSpec>,
         ratelimit_per_second: u32,
     ) -> Result<(u32, Vec<String>)> {
-        fn extend_graph_lifetime<'a>(
-            g: Arc<DiGraph<&'a Cmd, ()>>,
+        fn extend_graph_lifetime(
+            g: Arc<DiGraph<&Cmd, ()>>,
         ) -> Arc<DiGraph<&'static Cmd, ()>> {
             unsafe { std::mem::transmute::<_, Arc<DiGraph<&'static Cmd, ()>>>(g) }
-        }
-        fn transmute_lifetime<'a, T>(x: &'a T) -> &'static T {
-            unsafe { std::mem::transmute::<_, _>(x) }
         }
 
         let count_offset = self.completed.len().try_into().unwrap();
@@ -291,7 +290,7 @@ impl ExecGraph {
                 let token = token.clone();
                 tokio::spawn(run_local_process_loop(
                     subgraph,
-                    transmute_lifetime(&tracker),
+                    tracker.clone(),
                     token,
                     LocalQueueType::NormalLocalQueue, // 0 for local queue
                 ))
@@ -303,7 +302,7 @@ impl ExecGraph {
                         let token = token.clone();
                         tokio::spawn(run_local_process_loop(
                             subgraph,
-                            transmute_lifetime(&tracker),
+                            tracker.clone(),
                             token,
                             LocalQueueType::ConsoleQueue, // 1 for console queue
                         ))
@@ -322,7 +321,7 @@ impl ExecGraph {
             let authorization_token = b64.encode(rand::random::<u128>().to_le_bytes());
             let state = Arc::new(ServerState::new(
                 subgraph,
-                transmute_lifetime(&tracker),
+                tracker.clone(),
                 token1.clone(),
                 provisioner.clone(),
                 authorization_token.clone(),

@@ -1,4 +1,3 @@
-use anyhow::Context;
 use bitvec::array::BitArray;
 use pyo3::{
     exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
@@ -135,84 +134,52 @@ impl PyExecGraph {
         result
     }
 
+    /// Get the set of burned keys. These are keys that have started entries but no finished
+    /// entries, or are explicitly marked in the log files as being burned.
+    /// This is a union over the current logfile and all upstream readonly logfiles.
+    fn burned_keys(&self) -> Vec<String> {
+        let mut out = self.g.logfile.burned_keys();
+        for l in self.g.readonly_logfiles.iter() {
+            out.extend(l.burned_keys());
+        }
+        out
+    }
+
     /// Get the number of tasks in the graph
     fn ntasks(&self) -> usize {
         self.g.ntasks()
     }
 
-    /// Get the runcount that should be used for a task with this key.
-    fn logfile_runcount(&self, key: &str) -> (u32, Option<PathBuf>) {
-        let from_current_logfile = match self.g.logfile.runcount(key) {
-            // The task is new and has never been executed before.
-            // obviously this calls for a runcount of zero, and we don't
-            // know the task directory yet -- caller will be able to choose.
-            None => (0, None),
-            // During the last round, the task was added to the task graph,
-            // became ready, but was not started. so no directory would have
-            // been created, and we can reuse the prior run count.
-            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => (runcount, None),
-            // The task was previously started, but not finished. this shouldn't
-            // happen, because we should create a "fake" finished record with a
-            // fake timeout_status, but maybe we got sigkilled or something. Anyways,
-            // we're going to need a new directory. This is basically like a failure.
-            Some(logfile2::RuncountStatus::Started { runcount, .. }) => (runcount + 1, None),
-            // The task previously finished successfully. We reuse the old run count
-            // because we're not going to actually run it again -- this lets us refer
-            // to the assets in the correct directory.
-            Some(logfile2::RuncountStatus::Finished {
-                runcount,
-                storage_root,
-                success,
-            }) if success => (
-                runcount,
-                Some(
+    /// If, according to the logfile, this task has previously been run and succeeded,
+    /// get the storageroot.
+    fn storageroot(&self, key: &str) -> Option<PathBuf> {
+        if let Some(logfile2::RuncountStatus::Finished { storage_root, success, .. }) = self.g.logfile.runcount(key) {
+            if success {
+                return Some(
                     self.g
                         .logfile
                         .storage_root(storage_root)
-                        .with_context(|| {
-                            format!("getting {}th entry from this logfile", storage_root)
-                        })
-                        .expect("Unable to find storage root")
-                        .join(format!("{}.{}", key, runcount)),
-                ),
-            ),
-            // New directory for the next run, as above.
-            Some(logfile2::RuncountStatus::Finished { runcount, .. }) => (runcount + 1, None),
-        };
-        // if the current logfile gave a cache hit, go with that.
-        if from_current_logfile.1.is_some() {
-            return from_current_logfile;
+                        .expect("Unable to find storage root"))
+            }
         }
 
-        // if any of the prior log files gave a cache hit, go with that
         for l in self.g.readonly_logfiles.iter() {
             if let Some(logfile2::RuncountStatus::Finished {
-                runcount,
                 storage_root,
                 success,
+                ..
             }) = l.runcount(key)
             {
                 if success {
-                    return (
-                        runcount,
-                        Some(
+                    return Some(
                             l.storage_root(storage_root)
-                                .with_context(|| {
-                                    format!(
-                                        "getting {}th entry from upstream logfile",
-                                        storage_root
-                                    )
-                                })
-                                .expect("Unable to find storage root")
-                                .join(format!("{}.{}", key, runcount)),
-                        ),
-                    );
+                            .expect("Unable to find storage root")
+                        )
                 }
             }
         }
 
-        // otherwise vall back to the cache miss from the current log file.
-        from_current_logfile
+        None
     }
 
     /// Get the workflow-level key, created by the ``newkeyfn``
@@ -298,7 +265,8 @@ impl PyExecGraph {
         fd_input = None,
         preamble = None,
         postamble = None,
-        storage_root = 0
+        storage_root = 0,
+        max_retries = 0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn add_task(
@@ -312,19 +280,29 @@ impl PyExecGraph {
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
         storage_root: u32,
+        max_retries: u32,
     ) -> PyResult<u32> {
-        let runcount = self.logfile_runcount(&key as &str).0;
+        // Question: if it was previously a success, why are we even adding it to the graph? Why not
+        // just skip it.
+        // Answer: I think so that we can record a Backref in the log file.
+        let runcount_base = match self.g.logfile.runcount(&key as &str) {
+            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => {runcount},
+            Some(logfile2::RuncountStatus::Started { runcount, .. }) => {runcount + 1},
+            Some(logfile2::RuncountStatus::Finished {runcount, success, .. }) => {if success { runcount } else {runcount + 1} },
+            None => 0,
+        };
         let cmd = Cmd {
             cmdline,
             key,
             display,
             fd_input: fd_input.map(|(fd, buf)| (fd, buf.extract::<Vec<u8>>().unwrap())),
             storage_root,
-            runcount,
+            runcount_base,
             priority: 0,
             affinity: BitArray::<u64>::new(affinity),
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
+            max_retries,
         };
         self.g
             .add_task(cmd, dependencies)

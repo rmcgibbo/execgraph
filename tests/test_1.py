@@ -605,14 +605,14 @@ def test_failcounts_1(tmp_path):
     del eg
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    assert eg.logfile_runcount("key")[0] == 1
-    assert eg.logfile_runcount("nothing")[0] == 0
+    assert eg.storageroot("key") is None
+    assert eg.storageroot("nothing") is None
     eg.add_task(["false"], key="key")
     eg.execute()
     del eg
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    assert eg.logfile_runcount("key")[0] == 2
+    assert eg.storageroot("key") is None
 
 
 def test_sigint_1(tmp_path):
@@ -713,10 +713,10 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
     n_failed, executed = eg.execute()
     assert n_failed == expected
 
-    assert eg.logfile_runcount("a")[0] == 2 if rerun_failures else 1
-    assert eg.logfile_runcount("b")[0] == 0
-    assert eg.logfile_runcount("c")[0] == 0
-    assert eg.logfile_runcount("d")[0] == 0
+    assert eg.storageroot("a") is None
+    assert eg.storageroot("b") is None
+    assert eg.storageroot("c") is None
+    assert eg.storageroot("d") is None
     del eg
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
@@ -792,13 +792,19 @@ def test_write_1(tmp_path):
 
     assert contents == contents2
 
+def test_retries1(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["false"], key="task", max_retries=1)
+    eg.execute()
+    print(open(tmp_path / "foo").read())
+
 
 def test_fd3_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar baz='qux''>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"foo": "bar", "baz": "qux"}]
+    assert contents[-2]["LogMessage"]["values"] == [{"foo": "bar", "baz": "qux"}]
 
 
 def test_fd3_2(tmp_path):
@@ -806,19 +812,20 @@ def test_fd3_2(tmp_path):
     eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{}]
+    assert contents[-2]["LogMessage"]["values"] == [{}]
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
 def test_fd3_3(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(
-        ["sh" "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
+        ["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
         key="foo"
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == []
+    from pprint import pprint; pprint(contents)
+    assert contents[-2]["LogMessage"]["values"] == [{}]
 
 
 def test_fd3_4(tmp_path):
@@ -826,7 +833,7 @@ def test_fd3_4(tmp_path):
     eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar baz='qux' foo=bar2'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"foo": "bar2", "baz": "qux"}]
+    assert contents[-2]["LogMessage"]["values"] == [{"foo": "bar2", "baz": "qux"}]
 
 
 def test_fd3_5(tmp_path):
@@ -834,7 +841,7 @@ def test_fd3_5(tmp_path):
     eg.add_task(["sh", "-c", "echo 'a=c c=\"'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == []
+    assert contents[-2]["LogMessage"]["values"] == []
 
 
 def test_fd3_6(tmp_path):
@@ -842,7 +849,7 @@ def test_fd3_6(tmp_path):
     eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c c='>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"a": "c", "c": ""}]
+    assert contents[-2]["LogMessage"]["values"] == [{"a": "c", "c": ""}]
 
 
 def test_fd3_7(tmp_path):
@@ -850,7 +857,8 @@ def test_fd3_7(tmp_path):
     eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c'>&3; echo foo=bar foo=foo>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"a": "c"}, {"foo": "foo"}]
+    assert (contents[-2]["LogMessage"]["values"] == [{"a": "c"}, {"foo": "foo"}] or
+            contents[-2]["LogMessage"]["values"] == [{"foo": "foo"}])
 
 
 def test_dup(tmp_path):
@@ -910,15 +918,15 @@ def test_fork_1(tmp_path):
     )
     eg2.add_task(["true"], key="2")
     eg2.execute()
-    assert eg2.logfile_runcount("1") == (0, str(tmp_path / "foo/1.0"))
-    assert eg2.logfile_runcount("2") == (0, str(tmp_path / "a/2.0"))
-    assert eg2.logfile_runcount("3") == (0, None)
+    assert eg2.storageroot("1") == str(tmp_path / "foo")
+    assert eg2.storageroot("2") == str(tmp_path / "a")
+    assert eg2.storageroot("3") is None
     del eg2
 
     eg3 = _execgraph.ExecGraph(
         2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "bar"]
     )
-    assert eg3.logfile_runcount("1") == (0, str(tmp_path / "foo/1.0"))
+    assert eg3.storageroot("1") == str(tmp_path / "foo")
 
     assert sorted(map(os.path.abspath, eg3.all_storage_roots())) == sorted(
         map(

@@ -13,7 +13,7 @@ use thiserror::Error;
 
 pub type Result<T> = core::result::Result<T, LogfileError>;
 pub type ValueMaps = Vec<HashMap<String, String>>;
-pub const LOGFILE_VERSION: u32 = 4;
+pub const LOGFILE_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum LogEntry {
@@ -22,6 +22,8 @@ pub enum LogEntry {
     Started(StartedEntry),
     Finished(FinishedEntry),
     Backref(BackrefEntry),
+    LogMessage(LogMessageEntry),
+    BurnedKey(BurnedKeyEntry)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -68,12 +70,23 @@ pub struct FinishedEntry {
     pub time: SystemTime,
     pub key: String,
     pub status: i32,
-    #[serde(default)]
-    pub values: ValueMaps, // If the value is not present when deserializing, use the Default::default().
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LogMessageEntry {
+    pub time: SystemTime,
+    pub key: String,
+    pub runcount: u32,
+    pub values: ValueMaps,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct BackrefEntry {
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BurnedKeyEntry {
     pub key: String,
 }
 
@@ -117,17 +130,31 @@ impl LogEntry {
         })
     }
 
-    pub fn new_finished(key: &str, status: i32, values: ValueMaps) -> LogEntry {
+    pub fn new_finished(key: &str, status: i32) -> LogEntry {
         LogEntry::Finished(FinishedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
-            values,
             status,
+        })
+    }
+
+    pub fn new_logmessage(key: &str, runcount: u32, values: ValueMaps) -> LogEntry {
+        LogEntry::LogMessage(LogMessageEntry {
+            time: SystemTime::now(),
+            key: key.to_owned(),
+            runcount,
+            values,
         })
     }
 
     pub fn new_backref(key: &str) -> LogEntry {
         LogEntry::Backref(BackrefEntry {
+            key: key.to_owned(),
+        })
+    }
+
+    pub fn new_burnedkey(key: &str) -> LogEntry {
+        LogEntry::BurnedKey(BurnedKeyEntry {
             key: key.to_owned(),
         })
     }
@@ -161,6 +188,7 @@ pub struct LogFile<T> {
     lockf: Option<(std::io::BufWriter<std::fs::File>, std::path::PathBuf)>,
     header: Option<HeaderEntry>,
     runcounts: HashMap<String, RuncountStatus>,
+    burned_keys: Vec<String>,
     mode: PhantomData<T>,
 }
 pub struct LogFileSnapshotReader {
@@ -203,12 +231,13 @@ impl LogFile<LogFileRW> {
             .create(true)
             .write(true)
             .open(&path)?;
-        let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts,burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
+            burned_keys,
             lockf: Some((lockf, lockf_path)),
             mode: PhantomData::<LogFileRW>,
         })
@@ -247,7 +276,7 @@ impl LogFile<LogFileRW> {
                         },
                     );
                 } else {
-                    panic!("Malformed?");
+                    panic!("Malformed started entry? {:#?}", r);
                 }
             }
             LogEntry::Finished(ref f) => {
@@ -269,10 +298,12 @@ impl LogFile<LogFileRW> {
                         },
                     );
                 } else {
-                    panic!("Malformed");
+                    tracing::warn!("Malformed finished entry {:#?} r={:#?}", f, r);
                 }
             }
             LogEntry::Backref(_) => {}
+            LogEntry::LogMessage(_) => {}
+            LogEntry::BurnedKey(_) => {}
         }
 
         serde_json::to_writer(&mut self.f, &e)?;
@@ -310,12 +341,13 @@ impl LogFile<LogFileRO> {
     #[tracing::instrument]
     fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
         let mut f = std::fs::OpenOptions::new().read(true).open(&path)?;
-        let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
+            burned_keys,
             lockf: None,
             mode: PhantomData::<LogFileRO>,
         })
@@ -325,10 +357,12 @@ impl LogFile<LogFileRO> {
 impl<T> LogFile<T> {
     fn load_runcounts(
         f: &mut std::fs::File,
-    ) -> Result<(HashMap<String, RuncountStatus>, Option<HeaderEntry>)> {
+    ) -> Result<(HashMap<String, RuncountStatus>, Vec<String>, Option<HeaderEntry>)> {
         let mut runcounts = HashMap::new();
         let mut header = None;
         let mut workflow_key = None;
+        let mut started_but_not_finished = HashSet::new();
+        let mut burned_keys = Vec::new();
 
         let mut reader = std::io::BufReader::new(f);
         let mut line = String::new();
@@ -374,6 +408,7 @@ impl<T> LogFile<T> {
                         storage_root: srt,
                     } = r
                     {
+                        started_but_not_finished.insert(s.key.clone());
                         runcounts.insert(
                             s.key,
                             RuncountStatus::Started {
@@ -394,6 +429,7 @@ impl<T> LogFile<T> {
                         storage_root: srt,
                     } = r
                     {
+                        started_but_not_finished.remove(&f.key);
                         runcounts.insert(
                             f.key,
                             RuncountStatus::Finished {
@@ -406,11 +442,15 @@ impl<T> LogFile<T> {
                         panic!("Malformed");
                     }
                 }
+                LogEntry::BurnedKey(f) => {
+                    burned_keys.push(f.key);
+                },
                 _ => {}
             }
         }
 
-        Ok((runcounts, header))
+        burned_keys.extend(started_but_not_finished);
+        Ok((runcounts, burned_keys, header))
     }
 
     pub fn workflow_key(&self) -> Option<String> {
@@ -448,6 +488,10 @@ impl<T> LogFile<T> {
 
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
         self.f.flush()
+    }
+
+    pub fn burned_keys(&self) -> Vec<String> {
+        self.burned_keys.clone()
     }
 
     pub fn runcount(&self, key: &str) -> Option<RuncountStatus> {
@@ -572,6 +616,8 @@ impl LogFileSnapshotReader {
                 LogEntry::Started(v) => Some(&v.key),
                 LogEntry::Finished(v) => Some(&v.key),
                 LogEntry::Backref(v) => Some(&v.key),
+                LogEntry::LogMessage(v) => Some(&v.key),
+                LogEntry::BurnedKey(_) => None,
             })
             .collect::<HashSet<&String>>();
 
@@ -586,6 +632,8 @@ impl LogFileSnapshotReader {
                 LogEntry::Started(v) => !current_keys.contains(&v.key),
                 LogEntry::Finished(v) => !current_keys.contains(&v.key),
                 LogEntry::Backref(v) => !current_keys.contains(&v.key),
+                LogEntry::LogMessage(v) => !current_keys.contains(&v.key),
+                LogEntry::BurnedKey(_) => true,
             })
             .collect::<Vec<LogEntry>>();
 

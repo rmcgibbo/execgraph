@@ -58,6 +58,7 @@ struct TaskItem {
     id: NodeIndex,
     affinity: BitArray<u64>,
     taken: Arc<AtomicBool>,
+    runcount: u32,
 }
 
 pub struct ReadyTrackerServer<'a> {
@@ -74,12 +75,13 @@ pub struct ReadyTrackerServer<'a> {
     n_pending: u32,
     pending_increased_event: AsyncCounter,
     count_offset: u32,
-    failures_allowed: u32,
+    fizzles_allowed: u32,
     queuestate: Arc<DashMap<u64, Snapshot>>,
     inflight: HashMap<NodeIndex, std::time::Instant>,
     statuses: HashMap<NodeIndex, TaskStatus>,
     shutdown_state: ShutdownState,
     soft_shutdown_trigger: AsyncFlag,
+    n_attempts: HashMap<NodeIndex, u32>,
 }
 
 pub struct ReadyTrackerClient {
@@ -101,9 +103,9 @@ pub fn new_ready_tracker<'a>(
     g: Arc<DiGraph<&'a Cmd, ()>>,
     logfile: &'a mut LogFile<LogFileRW>,
     count_offset: u32,
-    failures_allowed: u32,
+    fizzles_allowed: u32,
     ratelimit_per_second: u32,
-) -> (ReadyTrackerServer<'a>, ReadyTrackerClient) {
+) -> (ReadyTrackerServer<'a>, Arc<ReadyTrackerClient>) {
     let mut ready_s = vec![];
     let mut ready_r = vec![];
 
@@ -147,15 +149,16 @@ pub fn new_ready_tracker<'a>(
             n_pending: 0,
             pending_increased_event: pending_increased_event.clone(),
             count_offset,
-            failures_allowed,
+            fizzles_allowed,
             queuestate: queuestate.clone(),
             inflight: HashMap::new(),
             logfile,
             statuses,
             shutdown_state: ShutdownState::Normal,
             soft_shutdown_trigger: soft_shutdown_trigger.clone(),
+            n_attempts: HashMap::new(),
         },
-        ReadyTrackerClient {
+        Arc::new(ReadyTrackerClient {
             r: ready_r.try_into().unwrap(),
             s: finished_s,
             queuestate,
@@ -163,7 +166,7 @@ pub fn new_ready_tracker<'a>(
             ratelimiter: RateLimiter::new(ratelimit_per_second.into()),
             ratecounter: RateCounter::new(DEFAULT_RATE_COUNTER_TIMESCALE),
             soft_shutdown_trigger,
-        },
+        }),
     )
 }
 
@@ -175,6 +178,7 @@ impl<'a> ReadyTrackerServer<'a> {
         loop {
             match self.completed.try_recv() {
                 Ok(Event::Started(e)) => {
+                    debug!("pulled a started event off the drain queue");
                     let cmd = self.g[e.id];
                     self.logfile.write(LogEntry::new_started(
                         &cmd.key,
@@ -185,34 +189,24 @@ impl<'a> ReadyTrackerServer<'a> {
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(Event::Finished(e)) => {
+                    debug!("pulled a started event off the drain queue");
                     let cmd = self.g[e.id];
-                    self._finished_bookkeeping_1(&e)?;
-                    if inflight.remove(&e.id).is_none() {
-                        // With execgraph-remote workers, it's  possible to get a FinishedEvent
-                        // without having previously received a StartedEvent because of the heartbeat
-                        // (ping timeout)-caused disconnect happening before /begun request was
-                        // transmitted. Maybe the /begun request was just lost into the ether because
-                        // the task was started on a node that was so slow it never was able to send either
-                        // a ping or a /begun.
-                        //
-                        // But let's try to preserve the invariant that every Finished entry in the log
-                        // is preceeded by a Started entry, which means that we need to fabricate a fake
-                        // Started entry.
-                        self.logfile.write(LogEntry::new_started(
+                    self._finished_bookkeeping_1(&e, false)?;
+                    self.logfile
+                        .write(LogEntry::new_finished(&cmd.key, e.status.as_i32()))?;
+                    if e.nonretryable && !e.status.is_success() {
+                        self.logfile.write(LogEntry::new_burnedkey(
                             &cmd.key,
-                            "",
-                            0,
-                            "".to_string(),
                         ))?;
                     }
-                    self.logfile.write(LogEntry::new_finished(
-                        &cmd.key,
-                        e.status.as_i32(),
-                        e.values,
-                    ))?;
                 }
                 Err(_) => {
                     break;
+                }
+                Ok(Event::LogValue(e)) => {
+                    let cmd = self.g[e.id];
+                    let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
+                    self.logfile.write(LogEntry::new_logmessage(&cmd.key, runcount, e.values))?;
                 }
             }
         }
@@ -222,11 +216,11 @@ impl<'a> ReadyTrackerServer<'a> {
         for (k, _) in inflight.iter() {
             let cmd = self.g[*k];
             let e = FinishedEvent::new_disconnected(k.to_owned(), "".to_owned());
-            self._finished_bookkeeping_1(&e)?;
-            self.logfile.write(LogEntry::new_finished(
+            self._finished_bookkeeping_1(&e, true)?;
+            self.logfile
+                .write(LogEntry::new_finished(&cmd.key, e.status.as_i32()))?;
+            self.logfile.write(LogEntry::new_burnedkey(
                 &cmd.key,
-                e.status.as_i32(),
-                e.values,
             ))?;
         }
         unsafe {
@@ -292,33 +286,14 @@ impl<'a> ReadyTrackerServer<'a> {
                             {
                                 coz::progress!();
                             }
-                            let cmd = self.g[e.id];
                             self.finished_order.push(e.id);
                             self._finished_bookkeeping(&mut e).await?;
-
-                            if self.inflight.remove(&e.id).is_none() {
-                                // With execgraph-remote workers, it's  possible to get a FinishedEvent
-                                // without having previously received a StartedEvent because of the heartbeat
-                                // (ping timeout)-caused disconnect happening before /begun request was
-                                // transmitted. Maybe the /begun request was just lost into the ether because
-                                // the task was started on a node that was so slow it never was able to send either
-                                // a ping or a /begun.
-                                //
-                                // But let's try to preserve the invariant that every Finished entry in the log
-                                // is preceeded by a Started entry, which means that we need to fabricate a fake
-                                // Started entry.
-                                self.logfile
-                                    .write(LogEntry::new_started(&cmd.key, "", 0, "".to_string()))?;
-                            }
-                            self.logfile.write(LogEntry::new_finished(
-                                &cmd.key,
-                                e.status.as_i32(),
-                                e.values,
-                            ))?;
-
-                            if self.n_fizzled >= self.failures_allowed {
-                                debug!("background serve triggering soft shutdown because n_bootfailed={} >= failures_allowed={}. note n_pending={}",
-                                self.n_fizzled, self.failures_allowed, self.n_pending);
+                            debug!("removing {:#?} from self.inflight", e.id);
+                            self.inflight.remove(&e.id);
+                            
+                            if self.n_fizzled >= self.fizzles_allowed {
+                                debug!("background serve triggering soft shutdown because n_bootfailed={} >= fizzles_allowed={}. note n_pending={}",
+                                self.n_fizzled, self.fizzles_allowed, self.n_pending);
                                 // cancel any tasks that have been going for less than FIZZLED_TIME_CUTOFF
                                 token.cancel(CancellationState::CancelledAfterTime(Instant::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
@@ -331,12 +306,20 @@ impl<'a> ReadyTrackerServer<'a> {
                                 // break the run_local_process_loop runners at the point where they're
                                 // waiting to get a task from the ready task receiver
                                 self.ready = None;
-                                debug!("background_serve breaking on n_failed={} failures_allowed={} n_pending={}",
-                                    self.n_failed, self.failures_allowed, self.n_pending);
+                                debug!("background_serve breaking on n_failed={} fizzles_allowed={} n_pending={}",
+                                    self.n_failed, self.fizzles_allowed, self.n_pending);
                                 break;
                             }
+                        },
+                        Event::LogValue(e) => {
+                            let cmd = self.g[e.id];
+                            self.logfile.write(LogEntry::new_logmessage(
+                                &cmd.key,
+                                cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0),
+                                e.values))?;
                         }
-                    }
+                    };
+                    debug!("backgroundserve inflight={:#?}", self.inflight);
                 },
                 _ = self.soft_shutdown_trigger.wait() => {
                     info!("Background serve received soft_shutdown_trigger");
@@ -361,7 +344,7 @@ impl<'a> ReadyTrackerServer<'a> {
     }
 
     async fn _finished_bookkeeping(&mut self, e: &mut FinishedEvent) -> Result<()> {
-        self._finished_bookkeeping_1(e)?;
+        self._finished_bookkeeping_1(e, false)?;
         let out = self._finished_bookkeeping_2(e).await;
         if let Some(ref mut flag) = &mut e.flag {
             flag.set();
@@ -369,7 +352,7 @@ impl<'a> ReadyTrackerServer<'a> {
         out
     }
 
-    fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent) -> Result<()> {
+    fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent, skip_writing_to_log_file: bool) -> Result<()> {
         let is_success = e.status.is_success();
         let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
@@ -379,13 +362,27 @@ impl<'a> ReadyTrackerServer<'a> {
         let now = Instant::now();
         let elapsed = self.inflight.get(&e.id).map(|&started| now - started);
 
+        if elapsed.is_none() && !skip_writing_to_log_file {
+            // With execgraph-remote workers, it's  possible to get a FinishedEvent
+            // without having previously received a StartedEvent because of the heartbeat
+            // (ping timeout)-caused disconnect happening before /begun request was
+            // transmitted. Maybe the /begun request was just lost into the ether because
+            // the task was started on a node that was so slow it never was able to send either
+            // a ping or a /begun.
+            //
+            // But let's try to preserve the invariant that every Finished entry in the log
+            // is preceeded by a Started entry, which means that we need to fabricate a fake
+            // Started entry.
+            self.logfile.write(LogEntry::new_started(&cmd.key, "", 0, "".to_string()))?;
+        }
+
         {
             self.n_pending = self.n_pending.saturating_sub(1);
             let mut v = self
                 .queuestate
                 .get_mut(&cmd.affinity.data)
                 .expect("No such queue");
-            v.value_mut().num_inflight = v.value().num_inflight.checked_sub(1).expect("Underflow");
+            v.value_mut().num_inflight = v.value().num_inflight.saturating_sub(1);
         }
 
         if is_success {
@@ -398,9 +395,14 @@ impl<'a> ReadyTrackerServer<'a> {
                 cmd.display()
             )?;
         } else {
-            self.n_failed += 1;
+            let will_retry = (*self.n_attempts.get(&e.id).unwrap_or(&0) < cmd.max_retries) && (!e.nonretryable);
             let fizzled = matches!(elapsed, Some(elapsed) if elapsed < FIZZLED_TIME_CUTOFF);
-            if fizzled {
+            if !will_retry {
+                self.n_failed += 1;
+            }
+            if fizzled && !will_retry {
+                // we don't increase the fizzled counter when we have a retry-able failure because we exit
+                // immediately when the number of fizzles is too large.
                 self.n_fizzled += 1;
             }
 
@@ -410,7 +412,7 @@ impl<'a> ReadyTrackerServer<'a> {
                     e.status.fail_description(fizzled),
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
-                    cmd.runcount,
+                    cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0),
                     cmd.display()
                 );
             }
@@ -429,6 +431,17 @@ impl<'a> ReadyTrackerServer<'a> {
     }
 
     async fn _finished_bookkeeping_2(&mut self, e: &FinishedEvent) -> Result<()> {
+        let cmd = self.g[e.id];
+        self.logfile.write(LogEntry::new_finished(
+            &cmd.key,
+            e.status.as_i32(),
+        ))?;
+        if e.nonretryable && !e.status.is_success() {
+            self.logfile.write(LogEntry::new_burnedkey(
+                &cmd.key,
+            ))?;
+        }
+
         if self.shutdown_state == ShutdownState::SoftShutdown {
             // if we're in a soft shutdown state, that's because we've seen a failure and
             // we're not submitting any more tasks to the ready queue and we've triggered
@@ -442,6 +455,13 @@ impl<'a> ReadyTrackerServer<'a> {
         }
 
         let is_success = e.status.is_success();
+        let n_attempts = *self.n_attempts.get(&e.id).unwrap_or(&0);
+        if (!is_success) && (n_attempts < cmd.max_retries) && (!e.nonretryable) {
+            self.n_attempts.insert(e.id, n_attempts + 1);
+            self.add_to_ready_queue(vec![e.id]).await?;
+            return Ok(());
+        }
+
         let statuses = &mut self.statuses;
         let ready = self
             .g
@@ -464,6 +484,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 None
             })
             .collect();
+
         self.add_to_ready_queue(ready).await?;
         Ok(())
     }
@@ -480,10 +501,12 @@ impl<'a> ReadyTrackerServer<'a> {
 
         for index in ready.into_iter() {
             let cmd = self.g[index];
+            debug!("Adding {:#} to ready queue", cmd.key);
             let priority = cmd.priority;
+            let runcount = cmd.runcount_base + self.n_attempts.get(&index).unwrap_or(&0);
             self.logfile.write(LogEntry::new_ready(
                 &cmd.key,
-                cmd.runcount,
+                runcount,
                 &cmd.display(),
                 cmd.storage_root,
             ))?;
@@ -503,6 +526,7 @@ impl<'a> ReadyTrackerServer<'a> {
                         id: index,
                         taken: taken.clone(),
                         affinity: cmd.affinity,
+                        runcount,
                     },
                     priority,
                 ));
@@ -544,7 +568,7 @@ impl ReadyTrackerClient {
         self.soft_shutdown_trigger.set();
     }
 
-    pub async fn recv(&self, runnertypeid: u32) -> Result<NodeIndex, ReadyTrackerClientError> {
+    pub async fn recv(&self, runnertypeid: u32) -> Result<(NodeIndex, u32), ReadyTrackerClientError> {
         // wait for the rate limiter
         self.ratelimiter.until_ready().await;
 
@@ -571,9 +595,45 @@ impl ReadyTrackerClient {
                 x.num_inflight += 1;
 
                 self.ratecounter.update(std::time::Instant::now());
-                return Ok(task.id);
+                return Ok((task.id, task.runcount));
             }
         }
+    }
+
+    /// When a task sends something to file descriptor 3 ("fd3") it gets sets here.
+    /// This is used to return numeric values outside of the typical return code, and also
+    /// for out of band control messages.
+    pub async fn send_setvalue(&self, v: NodeIndex, value: Vec<u8>) {
+        fn parse_line(line: &str) -> Result<HashMap<String, String>, shell_words::ParseError> {
+            shell_words::split(line).map(|fields| {
+                fields
+                    .iter()
+                    .flat_map(|s| {
+                        s.find('=')
+                            .map(|pos| (s[..pos].to_string(), s[pos + 1..].to_string()))
+                    })
+                    .collect::<HashMap<String, String>>()
+            })
+        }
+
+        let values = std::str::from_utf8(&value)
+            .map(|s| {
+                s.lines()
+                    .filter_map(|line| parse_line(line).ok())
+                    .collect::<ValueMaps>()
+            })
+            .unwrap_or_default();
+
+        let r = self
+            .s
+            .send(Event::LogValue(LogMessageEvent {
+                id: v,
+                values,
+            }))
+            .await;
+        if r.is_err() {
+            debug!("send_started: cannot send to channel: {:#?}", r);
+        };
     }
 
     /// When a task is started, notify the tracker by calling this.
@@ -651,6 +711,7 @@ impl ReadyTrackerClient {
     }
 }
 
+#[derive(Debug)]
 struct StartedEvent {
     id: NodeIndex,
     host: String,
@@ -658,6 +719,7 @@ struct StartedEvent {
     slurm_jobid: String,
 }
 
+#[derive(Debug)]
 pub struct FinishedEvent {
     /// id of the command that finished in the graph
     pub id: NodeIndex,
@@ -667,11 +729,19 @@ pub struct FinishedEvent {
     pub stdout: String,
     /// stderr from the command
     pub stderr: String,
-    /// key-value pairs from the command produced on fd3
-    pub values: ValueMaps,
+    /// (only if we exited with failure), is there a special reason
+    /// that this task cannot be retried
+    pub nonretryable: bool,
+
     /// an optional event that will be triggered once the servicer thread has finished
     /// processing downstream dependencies of this task.
     pub flag: Option<AsyncFlag>,
+}
+
+#[derive(Debug)]
+struct LogMessageEvent {
+    id: NodeIndex,
+    values: ValueMaps,
 }
 
 impl FinishedEvent {
@@ -681,8 +751,8 @@ impl FinishedEvent {
             status: ExitStatus::Cancelled,
             stdout: "".to_string(),
             stderr: "".to_string(),
-            values: vec![],
             flag: None,
+            nonretryable: false,
         }
     }
     pub fn new_disconnected(id: NodeIndex, stderr: String) -> Self {
@@ -691,8 +761,8 @@ impl FinishedEvent {
             status: ExitStatus::Disconnected,
             stdout: "".to_string(),
             stderr,
-            values: vec![],
             flag: None,
+            nonretryable: false,
         }
     }
 
@@ -702,15 +772,17 @@ impl FinishedEvent {
             status: ExitStatus::Code(code),
             stdout: "".to_owned(),
             stderr,
-            values: ValueMaps::new(),
             flag: None,
+            nonretryable: false,
         }
     }
 }
 
+#[derive(Debug)]
 enum Event {
     Started(StartedEvent),
     Finished(FinishedEvent),
+    LogValue(LogMessageEvent),
 }
 
 #[derive(Debug)]

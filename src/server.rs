@@ -64,7 +64,7 @@ pub struct State<'a> {
     /// the ReadyTrackerClient is the datastructure in sync.rs that maintains the queues
     /// of which taks are ready. this is where the server gets tasks from to respond to clients
     /// with, and what it informs when tasks finish.
-    pub(crate) tracker: &'a ReadyTrackerClient,
+    pub(crate) tracker: Arc<ReadyTrackerClient>,
     /// this some metadata that can be maniupated and is used by the provisioner to launch
     /// more runners.
     pub(crate) provisioner: RwLock<RemoteProvisionerSpec>,
@@ -74,7 +74,7 @@ pub struct State<'a> {
     /// this datastructure is used to figure out when tasks haven't pinged recently enough
     /// and should be considered dead
     timeouts: TimeWheel<u32>,
-    /// the /start, /begun, /end, and /ping endpoints are designed to only be called from
+    /// the /start, /msg, /begun, /end, and /ping endpoints are designed to only be called from
     /// execgraph-remote, so they required a bearer token to be set in the http headers,
     /// and we check whether it's equal to this. the /status endpoint can be called by anyone,
     /// and the functions in the auth_server.rs server which is listening on a unix socket
@@ -91,7 +91,7 @@ pub struct State<'a> {
 impl<'a> State<'a> {
     pub fn new(
         subgraph: Arc<DiGraph<&'a Cmd, ()>>,
-        tracker: &'a ReadyTrackerClient,
+        tracker: Arc<ReadyTrackerClient>,
         token: fancy_cancellation_token::CancellationToken,
         provisioner: RemoteProvisionerSpec,
         authorization_token: String,
@@ -235,6 +235,26 @@ pub async fn status_handler(
     }))
 }
 
+async fn msg_handler(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
+    Extension(state): Extension<Arc<State<'static>>>,
+    Postcard(request): Postcard<MsgRequest>,
+) -> Result<Response, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
+    let cstate = match state.connections.get(&request.transaction_id) {
+        Some(cstate) => cstate,
+        None => return Ok((StatusCode::OK, "").into_response()),
+    };
+    state
+        .tracker
+        .send_setvalue(cstate.node_id, request.value)
+        .await;
+
+    Ok((StatusCode::OK, "").into_response())
+}
+
 // POST /ping
 async fn ping_handler(
     TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
@@ -350,7 +370,7 @@ async fn start_request_impl(
     // Hold the connection for up to ``HOLD_RATELIMITED_TIME`` (30 seconds), and then if
     // we're still rate limited, respond to the execgraph-remote with a "RateLimited"
     // (a 429 http code) which will cause it to exit.
-    let node_id = async {
+    let (node_id, runcount) = async {
         tokio::select! {
             _ = state.token.hard_cancelled() => {
                 Err(AppError::Shutdown)
@@ -391,6 +411,7 @@ async fn start_request_impl(
 
     Ok(StartResponse {
         transaction_id,
+        runcount,
         cmdline: cmd.cmdline.clone(),
         fd_input: cmd.fd_input.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
@@ -484,8 +505,8 @@ async fn end_handler(
                 status: ExitStatus::Code(request.status),
                 stdout: request.stdout,
                 stderr: request.stderr,
-                values: request.values,
                 flag: Some(flag.clone()),
+                nonretryable: request.nonretryable,
             },
         )
         .await;
@@ -606,6 +627,7 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/begun", post(begun_handler))
         .route("/end", post(end_handler))
         .route("/ping", post(ping_handler))
+        .route("/msg", post(msg_handler))
         .route("/status", get(status_handler))
         .route(
             "/mark-slurm-job-cancelation",
