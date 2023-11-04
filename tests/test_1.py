@@ -813,7 +813,9 @@ def test_fd3_2(tmp_path):
 def test_fd3_3(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(
-        ["dd", "if=/dev/zero", "of=/proc/self/fd/3", "bs=1024", "count=1024"], key="foo"
+        ["sh" "-c" b"printf '%b' '\x00\x00\x00\xff' >&3; dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
+        # ["dd", "if=/dev/zero", "of=/proc/self/fd/3", "bs=1024", "count=1024"],
+        key="foo"
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
