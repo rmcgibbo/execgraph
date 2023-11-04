@@ -15,9 +15,9 @@ import numpy as np
 import pytest
 import scipy.sparse
 
-if os.path.exists("target/debug/libexecgraph.so") or os.path.exists("target/debug/libexecgraph.dylib"):    
+if os.path.exists("target/debug/libexecgraph.so") or os.path.exists("target/debug/libexecgraph.dylib"):
     sys.path.insert(0, ".")
-    os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"    
+    os.environ["PATH"] = f"{os.path.abspath('target/debug/')}:{os.environ['PATH']}"
     if not os.path.exists("target/debug/libexecgraph.so"):
         os.symlink("libexecgraph.dylib", "target/debug/libexecgraph.so")
 
