@@ -407,6 +407,10 @@ impl ExecGraph {
         }
         debug!("nfailed={}, ncompleted={}", n_failed, completed.len());
         self.logfile.flush()?;
+
+        self.key_to_nodeid.clear();
+        self.deps.clear();
+
         Ok((n_failed, completed))
     }
 }

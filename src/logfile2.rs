@@ -421,26 +421,33 @@ impl<T> LogFile<T> {
                     }
                 }
                 LogEntry::Finished(f) => {
-                    let r = runcounts
+                    match runcounts
                         .remove(&f.key)
-                        .expect("I see a Finished entry, but no prior entry");
-                    if let RuncountStatus::Started {
-                        runcount: c,
-                        storage_root: srt,
-                    } = r
-                    {
-                        started_but_not_finished.remove(&f.key);
-                        runcounts.insert(
-                            f.key,
-                            RuncountStatus::Finished {
-                                runcount: c,
-                                storage_root: srt,
-                                success: f.status == 0,
+                        .expect("I see a Finished entry, but no prior entry") {
+                            RuncountStatus::Ready { runcount, storage_root } => {
+                                tracing::warn!("Finished entry without a prior started entry");
+                                runcounts.insert(
+                                    f.key,
+                                    RuncountStatus::Finished {
+                                        runcount,
+                                        storage_root,
+                                        success: f.status == 0,
+                                    },
+                                );
                             },
-                        );
-                    } else {
-                        panic!("Malformed");
-                    }
+                            RuncountStatus::Started { runcount, storage_root } => {
+                                started_but_not_finished.remove(&f.key);
+                                runcounts.insert(
+                                    f.key,
+                                    RuncountStatus::Finished {
+                                        runcount,
+                                        storage_root,
+                                        success: f.status == 0,
+                                    },
+                                );
+                            }
+                            RuncountStatus::Finished { .. } => { panic!("Logic error"); }
+                        };
                 }
                 LogEntry::BurnedKey(f) => {
                     burned_keys.push(f.key);
@@ -542,7 +549,7 @@ impl LogFileSnapshotReader {
         let mut pending_backrefs = std::collections::HashSet::new();
         let mut header = None;
 
-        // iterate backward adding LogEntries to result_current until we hit the first header
+        // 1. Iterate backward adding LogEntries to result_current until we hit the first header
         for item in rev_iter.by_ref() {
             match &item {
                 LogEntry::Header(_) => {
@@ -559,7 +566,7 @@ impl LogFileSnapshotReader {
         }
         let nbackrefs = pending_backrefs.len();
 
-        // keep iterating backward and adding LogEntries if they're in the pending_backrefs
+        // 2. Keep iterating backward and adding LogEntries if they're in the pending_backrefs
         // until we clear all of the pending backrefs
         let mut result_outdated: Vec<LogEntry> = vec![];
         for item in rev_iter.by_ref() {
@@ -586,6 +593,9 @@ impl LogFileSnapshotReader {
                         result_outdated.push(item);
                     }
                 }
+                LogEntry::BurnedKey(_) => {
+                    result_current.push(item);
+                },
                 _ => {
                     result_outdated.push(item);
                 }
@@ -595,15 +605,22 @@ impl LogFileSnapshotReader {
             }
         }
 
-        // put the header on the front
+        // 3. Keep iterating backward and put everything else into the outdated list
+        // except burned keys, which always go in the current list
+        for item in rev_iter {
+            if let LogEntry::BurnedKey(ref _x) = item {
+                result_current.push(item);
+            } else {
+                result_outdated.push(item);
+            }
+        }
+
+        // 4. Put the header on the front
         if let Some(header) = header {
             result_current.push(header);
         }
 
-        // keep iterating backward and put everything else into the outdated list
-        result_outdated.extend(rev_iter);
-
-        let current: Vec<LogEntry> = result_current.into_iter().rev().collect();
+        let mut current: Vec<LogEntry> = result_current.into_iter().rev().collect();
         let outdated: Vec<LogEntry> = result_outdated.into_iter().rev().collect();
         assert!(current.len() + outdated.len() + nbackrefs == count);
 
@@ -617,9 +634,34 @@ impl LogFileSnapshotReader {
                 LogEntry::Finished(v) => Some(&v.key),
                 LogEntry::Backref(v) => Some(&v.key),
                 LogEntry::LogMessage(v) => Some(&v.key),
-                LogEntry::BurnedKey(_) => None,
+                LogEntry::BurnedKey(v) => Some(&v.key),
             })
-            .collect::<HashSet<&String>>();
+            .cloned()
+            .collect::<HashSet<String>>();
+
+        // Gather all unfinished or outdated keys
+        // First the unfinished ones
+        let mut unfinished_or_outdated = std::collections::HashSet::new();
+        for entry in current.iter().chain(outdated.iter()) {
+            match entry {
+                LogEntry::Started(k) => {unfinished_or_outdated.insert(k.key.clone());},
+                LogEntry::Finished(k) => {unfinished_or_outdated.remove(&k.key);},
+                _ => {}
+            }
+        }
+        // Next the outdated ones
+        for entry in outdated.iter() {
+            if let LogEntry::Finished(k) = entry {
+                unfinished_or_outdated.insert(k.key.clone());
+            }
+        }
+
+        // Burn keys associated with tasks that never finished
+        for k in unfinished_or_outdated {
+            if !current_keys.contains(&k) {
+                current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: k }));
+            }
+        }
 
         // And then filter out all outdated entries that have the same keys.
         // the main use for this method is to delete work directories related to
@@ -628,12 +670,13 @@ impl LogFileSnapshotReader {
             .into_iter()
             .filter(|x| match x {
                 LogEntry::Header(_v) => true,
+                // keep entries that are not in current keys.
                 LogEntry::Ready(v) => !current_keys.contains(&v.key),
                 LogEntry::Started(v) => !current_keys.contains(&v.key),
                 LogEntry::Finished(v) => !current_keys.contains(&v.key),
                 LogEntry::Backref(v) => !current_keys.contains(&v.key),
                 LogEntry::LogMessage(v) => !current_keys.contains(&v.key),
-                LogEntry::BurnedKey(_) => true,
+                LogEntry::BurnedKey(_) => { panic!("logic error; shouldn't happen"); },
             })
             .collect::<Vec<LogEntry>>();
 

@@ -182,16 +182,16 @@ impl<'a> ReadyTrackerServer<'a> {
                     let cmd = self.g[e.id];
                     self.logfile.write(LogEntry::new_started(
                         &cmd.key,
-                        "host",
-                        0,
-                        "".to_string(),
+                        &e.host,
+                        e.pid,
+                        e.slurm_jobid.to_owned(),
                     ))?;
                     assert!(inflight.insert(e.id, Instant::now()).is_none());
                 }
                 Ok(Event::Finished(e)) => {
                     debug!("pulled a started event off the drain queue");
                     let cmd = self.g[e.id];
-                    self._finished_bookkeeping_1(&e, false)?;
+                    self._finished_bookkeeping_1(&e)?;
                     self.logfile
                         .write(LogEntry::new_finished(&cmd.key, e.status.as_i32()))?;
                     if e.nonretryable && !e.status.is_success() {
@@ -199,6 +199,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             &cmd.key,
                         ))?;
                     }
+                    inflight.remove(&e.id);
                 }
                 Err(_) => {
                     break;
@@ -216,7 +217,7 @@ impl<'a> ReadyTrackerServer<'a> {
         for (k, _) in inflight.iter() {
             let cmd = self.g[*k];
             let e = FinishedEvent::new_disconnected(k.to_owned(), "".to_owned());
-            self._finished_bookkeeping_1(&e, true)?;
+            self._finished_bookkeeping_1(&e)?;
             self.logfile
                 .write(LogEntry::new_finished(&cmd.key, e.status.as_i32()))?;
             self.logfile.write(LogEntry::new_burnedkey(
@@ -290,7 +291,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             self._finished_bookkeeping(&mut e).await?;
                             debug!("removing {:#?} from self.inflight", e.id);
                             self.inflight.remove(&e.id);
-                            
+
                             if self.n_fizzled >= self.fizzles_allowed {
                                 debug!("background serve triggering soft shutdown because n_bootfailed={} >= fizzles_allowed={}. note n_pending={}",
                                 self.n_fizzled, self.fizzles_allowed, self.n_pending);
@@ -344,7 +345,7 @@ impl<'a> ReadyTrackerServer<'a> {
     }
 
     async fn _finished_bookkeeping(&mut self, e: &mut FinishedEvent) -> Result<()> {
-        self._finished_bookkeeping_1(e, false)?;
+        self._finished_bookkeeping_1(e)?;
         let out = self._finished_bookkeeping_2(e).await;
         if let Some(ref mut flag) = &mut e.flag {
             flag.set();
@@ -352,7 +353,7 @@ impl<'a> ReadyTrackerServer<'a> {
         out
     }
 
-    fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent, skip_writing_to_log_file: bool) -> Result<()> {
+    fn _finished_bookkeeping_1(&mut self, e: &FinishedEvent) -> Result<()> {
         let is_success = e.status.is_success();
         let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
@@ -361,20 +362,6 @@ impl<'a> ReadyTrackerServer<'a> {
         // called during the drain() shutdown phase on tasks that never began.
         let now = Instant::now();
         let elapsed = self.inflight.get(&e.id).map(|&started| now - started);
-
-        if elapsed.is_none() && !skip_writing_to_log_file {
-            // With execgraph-remote workers, it's  possible to get a FinishedEvent
-            // without having previously received a StartedEvent because of the heartbeat
-            // (ping timeout)-caused disconnect happening before /begun request was
-            // transmitted. Maybe the /begun request was just lost into the ether because
-            // the task was started on a node that was so slow it never was able to send either
-            // a ping or a /begun.
-            //
-            // But let's try to preserve the invariant that every Finished entry in the log
-            // is preceeded by a Started entry, which means that we need to fabricate a fake
-            // Started entry.
-            self.logfile.write(LogEntry::new_started(&cmd.key, "", 0, "".to_string()))?;
-        }
 
         {
             self.n_pending = self.n_pending.saturating_sub(1);
