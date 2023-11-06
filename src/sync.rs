@@ -677,7 +677,7 @@ impl ReadyTrackerClient {
 
     /// When a task is finished, notify the tracker by calling this.
     pub async fn send_finished(&self, cmd: &Cmd, event: FinishedEvent) {
-        cmd.call_postamble();
+        cmd.call_postamble(event.status.is_success());
         let r = self.s.send(Event::Finished(event)).await;
         if r.is_err() {
             debug!("send_finished: cannot send to channel: {:#?}", r);
