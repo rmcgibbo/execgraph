@@ -367,6 +367,8 @@ impl<'a> ReadyTrackerServer<'a> {
         let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
 
+        cmd.call_postamble(is_success, cmd.runcount_base + *self.n_attempts.get(&e.id).unwrap_or(&0));
+
         // elapsed is none if the task never started, which happens if we're being
         // called during the drain() shutdown phase on tasks that never began.
         let now = Instant::now();
@@ -676,8 +678,7 @@ impl ReadyTrackerClient {
     }
 
     /// When a task is finished, notify the tracker by calling this.
-    pub async fn send_finished(&self, cmd: &Cmd, event: FinishedEvent) {
-        cmd.call_postamble(event.status.is_success());
+    pub async fn send_finished(&self, event: FinishedEvent) {
         let r = self.s.send(Event::Finished(event)).await;
         if r.is_err() {
             debug!("send_finished: cannot send to channel: {:#?}", r);

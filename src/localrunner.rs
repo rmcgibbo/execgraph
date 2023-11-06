@@ -104,7 +104,6 @@ pub async fn run_local_process_loop(
                     .await;
                 tracker
                     .send_finished(
-                        cmd,
                         FinishedEvent::new_error(
                             subgraph_node_id,
                             127,
@@ -150,7 +149,7 @@ pub async fn run_local_process_loop(
                 if let CancellationState::CancelledAfterTime(_) = cancel {
                     // if we were soft canceled, send a finished notification.
                     tracker
-                        .send_finished(cmd, FinishedEvent::new_cancelled(subgraph_node_id))
+                        .send_finished(FinishedEvent::new_cancelled(subgraph_node_id))
                         .await;
                 }
                 debug!("Received cancellation {:#?}", cmd.display);
@@ -167,7 +166,7 @@ pub async fn run_local_process_loop(
 
         tracing::debug!("Finished cmd");
         tracker
-            .send_finished(cmd, output.to_event(subgraph_node_id, execgraph_internal_nonretryable_error))
+            .send_finished(output.to_event(subgraph_node_id, execgraph_internal_nonretryable_error))
             .await;
     }
 
