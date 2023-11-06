@@ -792,11 +792,19 @@ def test_write_1(tmp_path):
 
     assert contents == contents2
 
-def test_retries1(tmp_path):
+def test_retries_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(["false"], key="task", max_retries=1)
     eg.execute()
+    assert open(tmp_path / "foo").read().count("Finished") == 2
+
+
+def test_retries_2(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo", retry_mode="only_signaled_or_lost")
+    eg.add_task(["false"], key="task", max_retries=1)
+    eg.execute()
     print(open(tmp_path / "foo").read())
+    assert open(tmp_path / "foo").read().count("Finished") == 1
 
 
 def test_fd3_1(tmp_path):

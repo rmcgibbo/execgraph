@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ffi::OsString};
 
+use crate::localrunner::ExitDisposition;
+
 #[derive(Serialize, Deserialize)]
 pub struct Ping {
     pub transaction_id: u32,
@@ -110,6 +112,7 @@ pub struct EndRequest {
     pub stderr: String,
     pub nonretryable: bool,
     pub start_request: Option<StartRequest>,
+    pub disposition: ExitDisposition,
 }
 
 #[derive(Serialize, Deserialize)]

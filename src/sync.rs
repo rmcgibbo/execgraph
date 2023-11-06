@@ -5,7 +5,7 @@ use crate::{
     fancy_cancellation_token::{CancellationState, CancellationToken},
     logfile2::{self, LogFileRW},
     time::gcra::RateLimiter,
-    time::ratecounter::RateCounter,
+    time::ratecounter::RateCounter, localrunner::ExitDisposition,
 };
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
@@ -61,6 +61,12 @@ struct TaskItem {
     runcount: u32,
 }
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum RetryMode {
+    AllFailures,
+    OnlySignaledOrLost,
+}
+
 pub struct ReadyTrackerServer<'a> {
     pub finished_order: Vec<NodeIndex>,
     pub n_failed: u32,
@@ -82,6 +88,7 @@ pub struct ReadyTrackerServer<'a> {
     shutdown_state: ShutdownState,
     soft_shutdown_trigger: AsyncFlag,
     n_attempts: HashMap<NodeIndex, u32>,
+    retry_mode: RetryMode,
 }
 
 pub struct ReadyTrackerClient {
@@ -105,6 +112,7 @@ pub fn new_ready_tracker<'a>(
     count_offset: u32,
     fizzles_allowed: u32,
     ratelimit_per_second: u32,
+    retry_mode: RetryMode,
 ) -> (ReadyTrackerServer<'a>, Arc<ReadyTrackerClient>) {
     let mut ready_s = vec![];
     let mut ready_r = vec![];
@@ -157,6 +165,7 @@ pub fn new_ready_tracker<'a>(
             shutdown_state: ShutdownState::Normal,
             soft_shutdown_trigger: soft_shutdown_trigger.clone(),
             n_attempts: HashMap::new(),
+            retry_mode
         },
         Arc::new(ReadyTrackerClient {
             r: ready_r.try_into().unwrap(),
@@ -382,7 +391,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 cmd.display()
             )?;
         } else {
-            let will_retry = (*self.n_attempts.get(&e.id).unwrap_or(&0) < cmd.max_retries) && (!e.nonretryable);
+            let will_retry = self.get_will_retry(cmd, e);
             let fizzled = matches!(elapsed, Some(elapsed) if elapsed < FIZZLED_TIME_CUTOFF);
             if !will_retry {
                 self.n_failed += 1;
@@ -417,6 +426,25 @@ impl<'a> ReadyTrackerServer<'a> {
         Ok(())
     }
 
+    fn get_will_retry(&self, cmd: &Cmd, e: &FinishedEvent) -> bool {
+        if e.status.is_success() {
+            return false;
+        }
+
+        if *self.n_attempts.get(&e.id).unwrap_or(&0) >= cmd.max_retries {
+            return false;
+        }
+
+        if e.nonretryable {
+            return false;
+        }
+
+        match self.retry_mode {
+            RetryMode::AllFailures => true,
+            RetryMode::OnlySignaledOrLost => e.disposition.is_signaled_or_lost()
+        }
+    }
+
     async fn _finished_bookkeeping_2(&mut self, e: &FinishedEvent) -> Result<()> {
         let cmd = self.g[e.id];
         self.logfile.write(LogEntry::new_finished(
@@ -443,7 +471,7 @@ impl<'a> ReadyTrackerServer<'a> {
 
         let is_success = e.status.is_success();
         let n_attempts = *self.n_attempts.get(&e.id).unwrap_or(&0);
-        if (!is_success) && (n_attempts < cmd.max_retries) && (!e.nonretryable) {
+        if self.get_will_retry(cmd, e) {
             self.n_attempts.insert(e.id, n_attempts + 1);
             self.add_to_ready_queue(vec![e.id]).await?;
             return Ok(());
@@ -720,6 +748,9 @@ pub struct FinishedEvent {
     /// that this task cannot be retried
     pub nonretryable: bool,
 
+    // did it exit via a signal rather than via exiting normally?
+    pub disposition: ExitDisposition,
+
     /// an optional event that will be triggered once the servicer thread has finished
     /// processing downstream dependencies of this task.
     pub flag: Option<AsyncFlag>,
@@ -736,6 +767,7 @@ impl FinishedEvent {
         FinishedEvent {
             id,
             status: ExitStatus::Cancelled,
+            disposition: ExitDisposition::Lost,
             stdout: "".to_string(),
             stderr: "".to_string(),
             flag: None,
@@ -746,6 +778,7 @@ impl FinishedEvent {
         FinishedEvent {
             id,
             status: ExitStatus::Disconnected,
+            disposition: ExitDisposition::Lost,
             stdout: "".to_string(),
             stderr,
             flag: None,
@@ -757,6 +790,7 @@ impl FinishedEvent {
         FinishedEvent {
             id,
             status: ExitStatus::Code(code),
+            disposition: ExitDisposition::Exited,
             stdout: "".to_owned(),
             stderr,
             flag: None,

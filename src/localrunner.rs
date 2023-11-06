@@ -2,6 +2,7 @@ use crate::{
     fancy_cancellation_token::{CancellationState, CancellationToken},
     sync::ExitStatus,
 };
+use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use petgraph::prelude::*;
 use std::{
@@ -245,6 +246,23 @@ pub enum ChildProcessError {
     ),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ExitDisposition {
+    Exited,
+    Signaled,
+    Lost,
+}
+
+impl ExitDisposition {
+    pub fn is_signaled_or_lost(&self) -> bool {
+        match self {
+            ExitDisposition::Exited => false,
+            ExitDisposition::Signaled => true,
+            ExitDisposition::Lost => true,
+        }
+    }
+}
+
 pub struct ChildOutput {
     pub status: std::process::ExitStatus,
     pub stdout: Vec<u8>,
@@ -258,8 +276,17 @@ impl ChildOutput {
             status: self.code(),
             stdout: self.stdout_str(),
             stderr: self.stderr_str(),
+            disposition: self.disposition(),
             nonretryable,
             flag: None,
+        }
+    }
+
+    pub fn disposition(&self) -> ExitDisposition {
+        if self.status.signal().is_some() {
+            ExitDisposition::Signaled
+        } else {
+            ExitDisposition::Exited
         }
     }
 

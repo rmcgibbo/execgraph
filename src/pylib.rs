@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
-    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW},
+    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW}, sync::RetryMode,
 };
 
 /// Parallel execution of shell commands with DAG dependencies.
@@ -42,6 +42,7 @@ pub struct PyExecGraph {
     failures_allowed: u32,
     key: String,
     rerun_failures: bool,
+    retry_mode: RetryMode
 }
 
 #[pymethods]
@@ -54,7 +55,8 @@ impl PyExecGraph {
         storage_roots = vec![PathBuf::from("")],
         failures_allowed = 1,
         newkeyfn = None,
-        rerun_failures=true
+        rerun_failures = true,
+        retry_mode = "all_failures".to_owned(),
     ))]
     #[tracing::instrument(skip(py))]
     #[allow(clippy::too_many_arguments)]
@@ -67,6 +69,7 @@ impl PyExecGraph {
         failures_allowed: u32,
         newkeyfn: Option<PyObject>,
         rerun_failures: bool,
+        retry_mode: String,
     ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = std::thread::available_parallelism()?.get().try_into()?;
@@ -110,6 +113,14 @@ impl PyExecGraph {
                 .collect(),
         )?)?;
 
+        let retry_mode = match &retry_mode as &str {
+            "all_failures" => RetryMode::AllFailures,
+            "only_signaled_or_lost" => RetryMode::OnlySignaledOrLost,
+            _ => {
+                return Err(PyRuntimeError::new_err(format!("Unrecognized option {}. Use either 'all_failures' or 'only_signaled_or_lost'", retry_mode)));
+            }
+        };
+
         Ok(PyExecGraph {
             g: ExecGraph::new(log, readonly_logs),
             num_parallel: num_parallel as u32,
@@ -120,6 +131,7 @@ impl PyExecGraph {
             }),
             key,
             rerun_failures,
+            retry_mode,
         })
     }
 
@@ -364,7 +376,7 @@ impl PyExecGraph {
             }
         }
 
-        let x = remote_provisioner_cmd.map(|cmd| RemoteProvisionerSpec {
+        let provisioner = remote_provisioner_cmd.map(|cmd| RemoteProvisionerSpec {
             cmd,
             info: remote_provisioner_info,
         });
@@ -378,8 +390,9 @@ impl PyExecGraph {
                         self.num_parallel,
                         self.failures_allowed,
                         self.rerun_failures,
-                        x,
+                        provisioner,
                         ratelimit_per_second,
+                        self.retry_mode,
                     )
                     .await
             })

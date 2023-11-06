@@ -5,7 +5,7 @@ use crate::{
     localrunner::{run_local_process_loop, LocalQueueType},
     logfile2::{LogEntry, LogFile, LogFileRO, LogFileRW},
     server::{router, State as ServerState},
-    sync::new_ready_tracker,
+    sync::{new_ready_tracker, RetryMode},
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as b64, Engine};
@@ -245,6 +245,7 @@ impl ExecGraph {
         rerun_failures: bool,
         provisioner: Option<RemoteProvisionerSpec>,
         ratelimit_per_second: u32,
+        retry_mode: RetryMode,
     ) -> Result<(u32, Vec<String>)> {
         fn extend_graph_lifetime(
             g: Arc<DiGraph<&Cmd, ()>>,
@@ -277,6 +278,7 @@ impl ExecGraph {
             count_offset,
             failures_allowed,
             ratelimit_per_second,
+            retry_mode
         );
 
         // Run local processes

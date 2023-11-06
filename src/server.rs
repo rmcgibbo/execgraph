@@ -503,6 +503,7 @@ async fn end_handler(
             FinishedEvent {
                 id: cstate.node_id,
                 status: ExitStatus::Code(request.status),
+                disposition: request.disposition,
                 stdout: request.stdout,
                 stderr: request.stderr,
                 flag: Some(flag.clone()),

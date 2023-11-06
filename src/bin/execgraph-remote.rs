@@ -4,7 +4,7 @@ use clap::Parser;
 use execgraph::{
     http_extensions::reqwest::{RequestBuilderExt, ResponseExt},
     httpinterface::*,
-    localrunner::{wait_with_output, ChildOutput, ChildProcessError, TIME_TO_GET_SUBPID},
+    localrunner::{wait_with_output, ChildOutput, ChildProcessError, TIME_TO_GET_SUBPID, ExitDisposition},
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
@@ -354,6 +354,7 @@ async fn run_command(
                     status: 127,
                     stdout: "".to_owned(),
                     nonretryable: false,
+                    disposition: ExitDisposition::Exited,
                     stderr: format!("No such command: {:#?}", &start.cmdline[0]),
                     start_request: still_accepting_tasks(opt).then(make_start_request),
                 })?
@@ -446,6 +447,7 @@ async fn run_command(
                     transaction_id,
                     status: 128+16,
                     stdout: "".to_string(),
+                    disposition: ExitDisposition::Lost,
                     stderr: slurm_error_message,
                     start_request: None,
                     nonretryable: true,
@@ -469,6 +471,7 @@ async fn run_command(
                     transaction_id,
                     status: 128+15,
                     stdout: "".to_string(),
+                    disposition: ExitDisposition::Lost,
                     stderr: slurm_error_logfile_contents,
                     start_request: None,
                     nonretryable: true,
@@ -495,6 +498,7 @@ async fn run_command(
     let end_request = EndRequest {
         transaction_id,
         status: output.code().as_i32(),
+        disposition: output.disposition(),
         stdout: output.stdout_str(),
         stderr: output.stderr_str(),
         nonretryable: execgraph_internal_nonretryable_error,
