@@ -406,7 +406,7 @@ impl<'a> ReadyTrackerServer<'a> {
 
             if self.shutdown_state != ShutdownState::SoftShutdown {
                 eprintln!(
-                    "\x1b[1;31m{}:\x1b[0m {}{}.{:x}: {}",
+                    "\x1b[1;31m{}:\x1b[0m {}{}.{}: {}",
                     e.status.fail_description(fizzled),
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
