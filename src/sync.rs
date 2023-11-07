@@ -655,6 +655,10 @@ impl ReadyTrackerClient {
             })
             .unwrap_or_default();
 
+        if values.len() == 0 {
+            return;
+        }
+
         let r = self
             .s
             .send(Event::LogValue(LogMessageEvent {

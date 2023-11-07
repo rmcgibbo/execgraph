@@ -450,7 +450,7 @@ async fn run_command(
                     disposition: ExitDisposition::Lost,
                     stderr: slurm_error_message,
                     start_request: None,
-                    nonretryable: true,
+                    nonretryable: false,
                 })?.send().await {
                     tracing::error!("Unable to send lasp-gasp message {}", e);
                 }
@@ -474,7 +474,7 @@ async fn run_command(
                     disposition: ExitDisposition::Lost,
                     stderr: slurm_error_logfile_contents,
                     start_request: None,
-                    nonretryable: true,
+                    nonretryable: false,
                 })?.send().await {
                     tracing::error!("Unable to send lasp-gasp message {}", e);
                 }
