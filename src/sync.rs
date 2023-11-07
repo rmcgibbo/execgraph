@@ -430,20 +430,34 @@ impl<'a> ReadyTrackerServer<'a> {
 
     fn get_will_retry(&self, cmd: &Cmd, e: &FinishedEvent) -> bool {
         if e.status.is_success() {
+            debug!("Will not retry because task succeeded");
             return false;
         }
 
         if *self.n_attempts.get(&e.id).unwrap_or(&0) >= cmd.max_retries {
+            debug!("Will not retry because we've exausted the number of retries");
             return false;
         }
 
         if e.nonretryable {
+            debug!("Will not retry flagged as nonretryable");
             return false;
         }
 
         match self.retry_mode {
-            RetryMode::AllFailures => true,
-            RetryMode::OnlySignaledOrLost => e.disposition.is_signaled_or_lost()
+            RetryMode::AllFailures => {
+                debug!("Will retry because we retry all failures");
+                true
+            },
+            RetryMode::OnlySignaledOrLost => {
+                let r = e.disposition.is_signaled_or_lost();
+                if r {
+                    debug!("Will retry because signaled or lost");
+                } else {
+                    debug!("Will not retry because neither signaled nor lost");
+                }
+                r
+            }
         }
     }
 

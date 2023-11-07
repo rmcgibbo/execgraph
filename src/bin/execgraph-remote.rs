@@ -458,9 +458,9 @@ async fn run_command(
             return Err(RemoteError::Sigterm)
         },
         _ = sigterms.recv() => {
-            // propagate sigterm to child process
+            // Propagate sigterm to child process
             unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
-            // read the slurm logfile, which might contant some informationg
+            // Read the slurm logfile, which might contain some information
             let slurm_error_logfile_contents = match &opt.slurm_error_logfile {
                 Some(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
                 None => "".to_string()
