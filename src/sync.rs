@@ -653,7 +653,10 @@ impl ReadyTrackerClient {
                     .filter_map(|line| parse_line(line).ok())
                     .collect::<ValueMaps>()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|x| x.len() > 0)
+            .collect::<ValueMaps>();
 
         if values.len() == 0 {
             return;
