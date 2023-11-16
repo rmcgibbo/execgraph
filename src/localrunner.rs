@@ -245,7 +245,7 @@ pub enum ChildProcessError {
     ),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum ExitDisposition {
     Exited,
     Signaled,

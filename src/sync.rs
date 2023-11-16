@@ -367,7 +367,7 @@ impl<'a> ReadyTrackerServer<'a> {
         let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
 
-        cmd.call_postamble(is_success, cmd.runcount_base + *self.n_attempts.get(&e.id).unwrap_or(&0));
+        cmd.call_postamble(is_success, cmd.runcount_base + *self.n_attempts.get(&e.id).unwrap_or(&0), e.disposition);
 
         // elapsed is none if the task never started, which happens if we're being
         // called during the drain() shutdown phase on tasks that never began.
