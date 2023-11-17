@@ -227,6 +227,7 @@ async fn run_command(
     let client1 = client.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(Instant::now() + ping_interval, ping_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = interval.tick() => {

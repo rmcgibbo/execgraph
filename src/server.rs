@@ -109,12 +109,13 @@ impl<'a> State<'a> {
     }
 
     pub async fn reap_pings_forever(&self, mut stop: oneshot::Receiver<()>) {
-        let start = tokio::time::Instant::now();
         // the ping timeout is 30 seconds, so we've got a time wheel with 256 slots which gives
         // about 117ms per tick, which seems totally fine. that means that rather than timing out after
         // precisely 30 seconds it might be timing out after 30.117 seconds.
         let tick_time = self.timeouts.tick_duration();
-        let mut count = 0;
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + tick_time, tick_time);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             let ticked = self.timeouts.tick();
             let mut expired = vec![];
@@ -152,11 +153,9 @@ impl<'a> State<'a> {
             }
 
             tokio::select! {
-                _ = tokio::time::sleep_until(start + count * tick_time) => {},
+                _ = interval.tick() => {},
                 _ = &mut stop => {return;}
             };
-
-            count += 1;
         }
     }
 }
