@@ -238,27 +238,31 @@ async fn run_command(
     let client1 = client.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval_at(Instant::now() + ping_interval, ping_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            let pongs_tx = pongs_tx.clone();
+            let token2 = token1.clone();
             tokio::select! {
                 _ = interval.tick() => {
-                    match client1.post(ping_route.clone())
+                    let request = client1.post(ping_route.clone())
                         .postcard(&Ping{transaction_id})
                         .expect("Unable to encode ping as postcard?")
-                        .send()
-                        .await {
+                        .send();
+                    tokio::spawn(async move {
+                        match request.await {
                             Ok(r) if r.status() == StatusCode::OK => {
                                 // add to the pongs channel, but if the channel
                                 // has been dropped that's okay, just break
                                 if pongs_tx.send(()).await.is_err() {
-                                    token1.cancel();
-                                    break;
+                                    token2.cancel();
                                 }
                             }
                             e => {
                                 warn!("Ping endpoint response error: {:#?}", e);
-                                token1.cancel();
+                                token2.cancel();
                             }
                         }
+                    });
                 }
                 _ = token1.cancelled() => {
                     break
@@ -659,11 +663,15 @@ fn parse_slurm_error_logfile(s: &str) -> anyhow::Result<std::path::PathBuf> {
 }
 
 fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
+    let slurm_array_job_id = std::env::var("SLURM_ARRAY_JOB_ID").unwrap_or_else(|_| "".to_string());
+    let slurm_array_task_id =
+        std::env::var("SLURM_ARRAY_TASK_ID").unwrap_or_else(|_| "".to_string());
+    let slurm_jobid = format!("{}_{}", slurm_array_job_id, slurm_array_task_id);
     let out = s
         .replace("%u", &username())
         .replace(
             "%j",
-            &std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "%j".to_string()),
+            &slurm_jobid,
         )
         .replace(
             "%x",

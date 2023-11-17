@@ -421,7 +421,7 @@ impl<'a> ReadyTrackerServer<'a> {
                 write!(self.stdout, "{}", e.stdout)?;
             }
             if !e.stderr.is_empty() {
-                eprint!("{}", e.stderr);
+                eprintln!("{}", e.stderr);
             }
         }
 

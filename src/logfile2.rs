@@ -62,7 +62,7 @@ pub struct StartedEntry {
     pub pid: u32,
 
     #[serde(default)]
-    pub slurm_jobib: String, // If the value is not present when deserializing, use the Default::default().
+    pub slurm_jobid: String, // If the value is not present when deserializing, use the Default::default().
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -125,7 +125,7 @@ impl LogEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             host: host.to_owned(),
-            slurm_jobib: slurm_jobid,
+            slurm_jobid: slurm_jobid,
             pid,
         })
     }
