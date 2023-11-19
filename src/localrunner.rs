@@ -24,7 +24,8 @@ use crate::{
     sync::{FinishedEvent, ReadyTrackerClient},
 };
 
-pub const TIME_TO_GET_SUBPID: std::time::Duration = std::time::Duration::from_millis(10);
+// This averages about 5ms, so 25 gives us some buffer without too much
+pub const TIME_TO_GET_SUBPID: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[derive(Debug)]
 pub enum LocalQueueType {
