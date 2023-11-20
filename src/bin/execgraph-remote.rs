@@ -369,7 +369,7 @@ async fn run_command(
                 value = client.post(end_route)
                 .postcard(&EndRequest{
                     transaction_id,
-                    status: 127,
+                    status: -1,
                     stdout: "".to_owned(),
                     nonretryable: false,
                     disposition: ExitDisposition::Exited,
@@ -462,7 +462,7 @@ async fn run_command(
                 if let Err(e) = client.post(end_route)
                     .postcard(&EndRequest {
                         transaction_id,
-                        status: 128+16,
+                        status: -15,
                         stdout: "".to_string(),
                         disposition: ExitDisposition::Lost,
                         stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), slurm_error_message),
@@ -493,7 +493,7 @@ async fn run_command(
                 if let Err(e) = client.post(end_route)
                     .postcard(&EndRequest {
                         transaction_id,
-                        status: 128+15,
+                        status: -15,
                         stdout: "".to_string(),
                         disposition: ExitDisposition::Lost,
                         stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), slurm_error_logfile_contents),

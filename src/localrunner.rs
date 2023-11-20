@@ -107,7 +107,7 @@ pub async fn run_local_process_loop(
                     .send_finished(
                         FinishedEvent::new_error(
                             subgraph_node_id,
-                            127,
+                            -1,
                             format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
                         ),
                     )
@@ -293,7 +293,7 @@ impl ChildOutput {
     pub fn code(&self) -> ExitStatus {
         let code = match self.status.code() {
             Some(code) => code,
-            None => self.status.signal().expect("No exit code and no signal?"),
+            None => -self.status.signal().expect("No exit code and no signal?"),
         };
         ExitStatus::Code(code)
     }
