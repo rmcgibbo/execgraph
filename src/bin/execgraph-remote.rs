@@ -32,6 +32,12 @@ const SEND_SIGTERM_BEFORE_DEADLINE: std::time::Duration = std::time::Duration::f
 
 lazy_static::lazy_static! {
     static ref START_TIME: std::time::Instant = std::time::Instant::now();
+    static ref SLURM_JOBID: String = (|| {
+        let slurm_array_job_id = std::env::var("SLURM_ARRAY_JOB_ID").unwrap_or_else(|_| "".to_string());
+        let slurm_array_task_id = std::env::var("SLURM_ARRAY_TASK_ID").unwrap_or_else(|_| "".to_string());
+        let slurm_jobid = format!("{}_{}", slurm_array_job_id, slurm_array_task_id);
+        slurm_jobid
+    })();
 }
 
 #[derive(Debug, Parser)]
@@ -87,15 +93,11 @@ async fn main() -> Result<(), RemoteError> {
         .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-
     set_current_process_as_child_subreaper();
-    let slurm_array_job_id = std::env::var("SLURM_ARRAY_JOB_ID").unwrap_or_else(|_| "".to_string());
-    let slurm_array_task_id =
-        std::env::var("SLURM_ARRAY_TASK_ID").unwrap_or_else(|_| "".to_string());
-    let slurm_jobid = format!("{}_{}", slurm_array_job_id, slurm_array_task_id);
-    let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
+
+    let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").context("Reading EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
     std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
-    tracing::info!("execgraph-remote SLURM_JOB_ID={}", slurm_jobid);
+    tracing::info!("execgraph-remote SLURM_JOB_ID={}", *SLURM_JOBID);
     tracing::info!("execgraph-remote pid={}", std::process::id());
     unsafe {
         libc::setpgid(libc::getpid(), libc::getpid());
@@ -113,7 +115,7 @@ async fn main() -> Result<(), RemoteError> {
     );
     headers.insert(
         "X-EXECGRAPH-SLURM-JOB-ID",
-        HeaderValue::from_bytes(slurm_jobid.as_bytes())?,
+        HeaderValue::from_bytes((*SLURM_JOBID).as_bytes())?,
     );
     headers.insert(
         "X-EXECGRAPH-HOSTNAME",
@@ -147,16 +149,6 @@ async fn main() -> Result<(), RemoteError> {
     // SIGKILLed afterwards anyways, but it would be preferable.
     let mut sigterms = signal(SignalKind::terminate())?;
 
-    // SIGTERM our child process 60 seconds before the end
-    let time_to_sigterm_child = ({
-        let duration = opt.duration.unwrap_or(std::time::Duration::MAX);
-        let time_allocated_for_upload_and_stuff = if duration > SEND_SIGTERM_BEFORE_DEADLINE * 2 {
-            SEND_SIGTERM_BEFORE_DEADLINE
-        } else {
-            std::time::Duration::from_secs(0)
-        };
-        (*START_TIME) + duration - time_allocated_for_upload_and_stuff
-     }).into();
 
     // Slurm error logfile events Notify
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
@@ -171,7 +163,7 @@ async fn main() -> Result<(), RemoteError> {
             &mut sigterms,
             &mut rx,
             start_response,
-            time_to_sigterm_child
+            SigtermChildBeforeSchedulerDeadline::new(&opt)
         )
         .await
         {
@@ -209,7 +201,7 @@ async fn run_command(
     sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
     start: Option<StartResponse>,
-    time_to_sigterm_child: tokio::time::Instant,
+    time_to_sigterm_child: SigtermChildBeforeSchedulerDeadline,
 ) -> Result<(TimingInfo, Option<StartResponse>), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
@@ -440,6 +432,8 @@ async fn run_command(
         transaction_id,
     ));
 
+    let mut stderr_prefix: Option<String> = None;
+
     // Wait for the command to finish
     let output: ChildOutput = loop {
         let output = tokio::select! {
@@ -471,7 +465,7 @@ async fn run_command(
                         status: 128+16,
                         stdout: "".to_string(),
                         disposition: ExitDisposition::Lost,
-                        stderr: slurm_error_message,
+                        stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), slurm_error_message),
                         start_request: None,
                         nonretryable: false,
                     })?.send().await {
@@ -480,10 +474,11 @@ async fn run_command(
                 fd3_channel_write.close();
                 return Err(RemoteError::Sigterm)
             },
-            _ = tokio::time::sleep_until(time_to_sigterm_child) => {
+            _ = tokio::time::sleep_until(time_to_sigterm_child.deadline) => {
                 // send sigterm to child, but then go back into this loop and continue, waiting for the child to
                 // hopefully actually exit itself.
                 unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
+                stderr_prefix = Some(time_to_sigterm_child.message());
                 continue;
             },
             _ = sigterms.recv() => {
@@ -501,7 +496,7 @@ async fn run_command(
                         status: 128+15,
                         stdout: "".to_string(),
                         disposition: ExitDisposition::Lost,
-                        stderr: slurm_error_logfile_contents,
+                        stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), slurm_error_logfile_contents),
                         start_request: None,
                         nonretryable: false,
                     })?.send().await {
@@ -531,7 +526,7 @@ async fn run_command(
         status: output.code().as_i32(),
         disposition: output.disposition(),
         stdout: output.stdout_str(),
-        stderr: output.stderr_str(),
+        stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), output.stderr_str()),
         nonretryable: execgraph_internal_nonretryable_error,
         start_request: still_accepting_tasks(opt).then(make_start_request),
     };
@@ -913,5 +908,38 @@ async fn forward_messages(
             .send()
             .await
             .context("Failed to send to /msg endpoint on server")?;
+    }
+}
+
+
+struct SigtermChildBeforeSchedulerDeadline {
+    deadline: tokio::time::Instant,
+    description: String
+}
+
+impl SigtermChildBeforeSchedulerDeadline {
+    fn new(opt: &CommandLineArguments) -> Self {
+        let duration = opt.duration.unwrap_or(std::time::Duration::MAX);
+        let time_allocated_for_upload_and_stuff = if duration > SEND_SIGTERM_BEFORE_DEADLINE * 2 {
+            SEND_SIGTERM_BEFORE_DEADLINE
+        } else {
+            std::time::Duration::from_secs(0)
+        };
+        Self {
+            deadline: ((*START_TIME) + duration - time_allocated_for_upload_and_stuff).into(),
+            description: format!("{} (minus {})",
+                humantime::format_duration(duration),
+                humantime::format_duration(SEND_SIGTERM_BEFORE_DEADLINE))
+        }
+    }
+
+    fn message(&self) -> String {
+        let current_time = time::OffsetDateTime::now_local().unwrap().format(&time::format_description::well_known::Rfc3339).unwrap();
+        format!("{} SLURM JOB {} on {} CANCELLED DUE TO TIME LIMIT AFTER {}\n",
+            current_time,
+            (*SLURM_JOBID),
+            gethostname().to_string_lossy(),
+            self.description,
+        )
     }
 }
