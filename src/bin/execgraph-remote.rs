@@ -927,18 +927,23 @@ impl SigtermChildBeforeSchedulerDeadline {
         };
         Self {
             deadline: ((*START_TIME) + duration - time_allocated_for_upload_and_stuff).into(),
-            description: format!("{} (minus {})",
+            description: format!("{} ({} minus {} for cleanup)",
+                humantime::format_duration(duration - time_allocated_for_upload_and_stuff),
                 humantime::format_duration(duration),
                 humantime::format_duration(SEND_SIGTERM_BEFORE_DEADLINE))
         }
     }
 
     fn message(&self) -> String {
+        let hostname = gethostname();
+        let hostname_cow = hostname.to_string_lossy();
+        let hostname0 = hostname_cow.split(".").next().unwrap_or(&hostname_cow);
+
         let current_time = time::OffsetDateTime::now_local().unwrap().format(&time::format_description::well_known::Rfc3339).unwrap();
-        format!("{} SLURM JOB {} on {} CANCELLED DUE TO TIME LIMIT AFTER {}\n",
+        format!("{} TASK IN SLURM JOB {} on {} CANCELLED DUE TO TIME LIMIT AFTER {}\n",
             current_time,
             (*SLURM_JOBID),
-            gethostname().to_string_lossy(),
+            hostname0,
             self.description,
         )
     }
