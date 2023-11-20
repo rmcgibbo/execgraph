@@ -4,7 +4,9 @@ use clap::Parser;
 use execgraph::{
     http_extensions::reqwest::{RequestBuilderExt, ResponseExt},
     httpinterface::*,
-    localrunner::{wait_with_output, ChildOutput, ChildProcessError, TIME_TO_GET_SUBPID, ExitDisposition},
+    localrunner::{
+        wait_with_output, ChildOutput, ChildProcessError, ExitDisposition, TIME_TO_GET_SUBPID,
+    },
 };
 use gethostname::gethostname;
 use hyper::StatusCode;
@@ -17,7 +19,6 @@ use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, sync::Arc, tim
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::time::Instant;
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -25,6 +26,9 @@ use whoami::username;
 
 // https://github.com/SchedMD/slurm/blob/791f9c39e0db919e02ef8857be0faff09a3656b2/src/slurmd/slurmstepd/req.c#L724
 const FINAL_SLURM_ERROR_MESSAGE_STRINGS: &str = "CANCELLED|FAILED|ERROR";
+
+// send SIGTERM to child this long before the `duration` expires.
+const SEND_SIGTERM_BEFORE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 lazy_static::lazy_static! {
     static ref START_TIME: std::time::Instant = std::time::Instant::now();
@@ -42,6 +46,10 @@ struct CommandLineArguments {
     /// Stop accepting new tasks after this amount of time, in seconds.
     #[clap(long = "max-time-accepting-tasks", value_parser = parse_seconds)]
     max_time_accepting_tasks: Option<Duration>,
+
+    /// Total duration.
+    #[clap(long = "duration", value_parser = parse_seconds)]
+    duration: Option<Duration>,
 
     /// Path to the log file where slurmstepd will write errors. This should be a file
     /// on a local disk, so that we can watch it with inotify and report back any errors
@@ -139,6 +147,17 @@ async fn main() -> Result<(), RemoteError> {
     // SIGKILLed afterwards anyways, but it would be preferable.
     let mut sigterms = signal(SignalKind::terminate())?;
 
+    // SIGTERM our child process 60 seconds before the end
+    let time_to_sigterm_child = ({
+        let duration = opt.duration.unwrap_or(std::time::Duration::MAX);
+        let time_allocated_for_upload_and_stuff = if duration > SEND_SIGTERM_BEFORE_DEADLINE * 2 {
+            SEND_SIGTERM_BEFORE_DEADLINE
+        } else {
+            std::time::Duration::from_secs(0)
+        };
+        (*START_TIME) + duration - time_allocated_for_upload_and_stuff
+     }).into();
+
     // Slurm error logfile events Notify
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
 
@@ -152,6 +171,7 @@ async fn main() -> Result<(), RemoteError> {
             &mut sigterms,
             &mut rx,
             start_response,
+            time_to_sigterm_child
         )
         .await
         {
@@ -189,13 +209,14 @@ async fn run_command(
     sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
     start: Option<StartResponse>,
+    time_to_sigterm_child: tokio::time::Instant,
 ) -> Result<(TimingInfo, Option<StartResponse>), RemoteError> {
     let start_route = base.join("start")?;
     let ping_route = base.join("ping")?;
     let begun_route = base.join("begun")?;
     let msg_route = base.join("msg")?;
     let end_route = base.join("end")?;
-    let t_before_start_request = Instant::now();
+    let t_before_start_request = std::time::Instant::now();
 
     let make_start_request = || StartRequest {
         runnertypeid: opt.runnertypeid,
@@ -215,7 +236,7 @@ async fn run_command(
             .await
             .context("Unable to receive /start")?,
     };
-    let start_time_request_elapsed = Instant::now() - t_before_start_request;
+    let start_time_request_elapsed = std::time::Instant::now() - t_before_start_request;
 
     let ping_interval = Duration::from_millis(start.ping_interval_msecs);
     let transaction_id = start.transaction_id;
@@ -237,7 +258,8 @@ async fn run_command(
     // a channel
     let client1 = client.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval_at(Instant::now() + ping_interval, ping_interval);
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + ping_interval, ping_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let pongs_tx = pongs_tx.clone();
@@ -410,11 +432,7 @@ async fn run_command(
     };
 
     let (fd3_channel_write, fd3_channel_read) = async_channel::unbounded();
-    let child_futures = wait_with_output(
-        child,
-        read_fd3,
-        fd3_channel_write.clone(),
-    );
+    let mut child_futures = std::pin::pin!(wait_with_output(child, read_fd3, fd3_channel_write.clone()));
     let forward_messages_thread = tokio::spawn(forward_messages(
         fd3_channel_read,
         client.clone(),
@@ -423,69 +441,78 @@ async fn run_command(
     ));
 
     // Wait for the command to finish
-    let output: ChildOutput = tokio::select! {
-        maybe_output = child_futures => {
-            maybe_output?
-        },
-        _ = token3.cancelled() => {
-            fd3_channel_write.close();
-            return Err(RemoteError::PingTimeout("Failed to receive server pong (343)".to_owned()));
-        },
-        maybe_slurm_error_message = notify_rx.recv() => {
-            let slurm_error_message = maybe_slurm_error_message.unwrap_or_else(||"Logic error. This channel should not have been dropped.".to_string());
-            // This channel is giving us events from inotify when someone (likely slurmstepd)
-            // writes to the `slurm_error_logfile`. The assumption is that this happens when
-            // SLURM decides to cancel our allocation due to overuse of some resource (time,
-            // memory), or because of some user- or administrator- triggered event like
-            // scancel or taking the node offline for maintainance. In this case slurmstepd
-            // will send us a SIGKILL (and maybe a sigterm, if we're lucky), but it will also
-            // write the reason (which is more useful) to its error log, which hopefully is
-            // being sent to a file on the local filesystem, so we can watch it with inotify.
+    let output: ChildOutput = loop {
+        let output = tokio::select! {
+            maybe_output = &mut child_futures => {
+                maybe_output?
+            },
+            _ = token3.cancelled() => {
+                fd3_channel_write.close();
+                return Err(RemoteError::PingTimeout("Failed to receive server pong (343)".to_owned()));
+            },
+            maybe_slurm_error_message = notify_rx.recv() => {
+                let slurm_error_message = maybe_slurm_error_message.unwrap_or_else(||"Logic error. This channel should not have been dropped.".to_string());
+                // This channel is giving us events from inotify when someone (likely slurmstepd)
+                // writes to the `slurm_error_logfile`. The assumption is that this happens when
+                // SLURM decides to cancel our allocation due to overuse of some resource (time,
+                // memory), or because of some user- or administrator- triggered event like
+                // scancel or taking the node offline for maintainance. In this case slurmstepd
+                // will send us a SIGKILL (and maybe a sigterm, if we're lucky), but it will also
+                // write the reason (which is more useful) to its error log, which hopefully is
+                // being sent to a file on the local filesystem, so we can watch it with inotify.
 
-            // propagate sigterm to child process
-            unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
+                // propagate sigterm to child process
+                unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
 
-            // send a notification back to the controller if possible
-            if let Err(e) = client.post(end_route)
-                .postcard(&EndRequest {
-                    transaction_id,
-                    status: 128+16,
-                    stdout: "".to_string(),
-                    disposition: ExitDisposition::Lost,
-                    stderr: slurm_error_message,
-                    start_request: None,
-                    nonretryable: false,
-                })?.send().await {
-                    tracing::error!("Unable to send lasp-gasp message {}", e);
-                }
-            fd3_channel_write.close();
-            return Err(RemoteError::Sigterm)
-        },
-        _ = sigterms.recv() => {
-            // Propagate sigterm to child process
-            unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
-            // Read the slurm logfile, which might contain some information
-            let slurm_error_logfile_contents = match &opt.slurm_error_logfile {
-                Some(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
-                None => "".to_string()
-            };
-            // send a notification back to the controller if possible
-            if let Err(e) = client.post(end_route)
-                .postcard(&EndRequest {
-                    transaction_id,
-                    status: 128+15,
-                    stdout: "".to_string(),
-                    disposition: ExitDisposition::Lost,
-                    stderr: slurm_error_logfile_contents,
-                    start_request: None,
-                    nonretryable: false,
-                })?.send().await {
-                    tracing::error!("Unable to send lasp-gasp message {}", e);
-                }
-            fd3_channel_write.close();
-            return Err(RemoteError::Sigterm)
-        }
-    };
+                // send a notification back to the controller if possible
+                if let Err(e) = client.post(end_route)
+                    .postcard(&EndRequest {
+                        transaction_id,
+                        status: 128+16,
+                        stdout: "".to_string(),
+                        disposition: ExitDisposition::Lost,
+                        stderr: slurm_error_message,
+                        start_request: None,
+                        nonretryable: false,
+                    })?.send().await {
+                        tracing::error!("Unable to send lasp-gasp message {}", e);
+                    }
+                fd3_channel_write.close();
+                return Err(RemoteError::Sigterm)
+            },
+            _ = tokio::time::sleep_until(time_to_sigterm_child) => {
+                // send sigterm to child, but then go back into this loop and continue, waiting for the child to
+                // hopefully actually exit itself.
+                unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
+                continue;
+            },
+            _ = sigterms.recv() => {
+                // Propagate sigterm to child process and exit super quickly.
+                unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
+                // Read the slurm logfile, which might contain some information
+                let slurm_error_logfile_contents = match &opt.slurm_error_logfile {
+                    Some(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
+                    None => "".to_string()
+                };
+                // send a notification back to the controller if possible
+                if let Err(e) = client.post(end_route)
+                    .postcard(&EndRequest {
+                        transaction_id,
+                        status: 128+15,
+                        stdout: "".to_string(),
+                        disposition: ExitDisposition::Lost,
+                        stderr: slurm_error_logfile_contents,
+                        start_request: None,
+                        nonretryable: false,
+                    })?.send().await {
+                        tracing::error!("Unable to send lasp-gasp message {}", e);
+                    }
+                fd3_channel_write.close();
+                return Err(RemoteError::Sigterm)
+            }
+        };
+        break output;
+    }; // loop
 
     // Closing fd3_write_channel should cause the forward_message_thread to terminate
     fd3_channel_write.close();
@@ -496,7 +523,7 @@ async fn run_command(
     let t_finished = std::time::Instant::now();
 
     let time_executing_command = t_finished - t_before_spawn;
-    let t_before_end_request = Instant::now();
+    let t_before_end_request = std::time::Instant::now();
 
     // Tell the server that we've finished the command
     let end_request = EndRequest {
@@ -520,7 +547,7 @@ async fn run_command(
                     .await
                     .context("Decoding response from /end")?;
                 token3.cancel();
-                let end_request_elapsed = Instant::now() - t_before_end_request;
+                let end_request_elapsed = std::time::Instant::now() - t_before_end_request;
                 Ok((TimingInfo {
                     subprocess: time_executing_command,
                     start_request: start_time_request_elapsed,
@@ -669,10 +696,7 @@ fn parse_disconnect_error_message(s: &str) -> anyhow::Result<String> {
     let slurm_jobid = format!("{}_{}", slurm_array_job_id, slurm_array_task_id);
     let out = s
         .replace("%u", &username())
-        .replace(
-            "%j",
-            &slurm_jobid,
-        )
+        .replace("%j", &slurm_jobid)
         .replace(
             "%x",
             &std::env::var("SLURM_JOB_NAME").unwrap_or_else(|_| "%x".to_string()),
@@ -866,14 +890,18 @@ async fn forward_messages(
         // that means the process must have exited or something, so we just return
         let value = match fd3_channel_read.recv().await {
             Ok(v) => {
-                if std::str::from_utf8(&v).is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n") {
+                if std::str::from_utf8(&v)
+                    .is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n")
+                {
                     execgraph_internal_nonretryable_error = true;
                     return Ok(execgraph_internal_nonretryable_error);
                 } else {
                     v
                 }
             }
-            Err(_) => { return Ok(execgraph_internal_nonretryable_error); }
+            Err(_) => {
+                return Ok(execgraph_internal_nonretryable_error);
+            }
         };
         client
             .post(msg_route.clone())
@@ -883,6 +911,7 @@ async fn forward_messages(
             })
             .unwrap()
             .send()
-            .await.context("Failed to send to /msg endpoint on server")?;
+            .await
+            .context("Failed to send to /msg endpoint on server")?;
     }
 }
