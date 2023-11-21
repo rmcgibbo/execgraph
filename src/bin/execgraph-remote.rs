@@ -28,6 +28,8 @@ const FINAL_SLURM_ERROR_MESSAGE_STRINGS: &str = "CANCELLED|FAILED|ERROR";
 
 // send SIGTERM to child this long before the `duration` expires.
 const SEND_SIGTERM_BEFORE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+const ONE_YEAR: std::time::Duration = std::time::Duration::from_secs(31536000);
+
 
 lazy_static::lazy_static! {
     static ref START_TIME: std::time::Instant = std::time::Instant::now();
@@ -883,14 +885,14 @@ struct SigtermChildBeforeSchedulerDeadline {
 
 impl SigtermChildBeforeSchedulerDeadline {
     fn new(opt: &CommandLineArguments) -> Self {
-        let duration = opt.duration.unwrap_or(std::time::Duration::MAX);
+        let duration = opt.duration.unwrap_or(ONE_YEAR).min(ONE_YEAR);
         let time_allocated_for_upload_and_stuff = if duration > SEND_SIGTERM_BEFORE_DEADLINE * 2 {
             SEND_SIGTERM_BEFORE_DEADLINE
         } else {
             std::time::Duration::from_secs(0)
         };
         Self {
-            deadline: ((*START_TIME) + duration - time_allocated_for_upload_and_stuff).into(),
+            deadline: ((*START_TIME) + duration.saturating_sub(time_allocated_for_upload_and_stuff)).into(),
             description: format!("{} ({} minus {} for cleanup)",
                 humantime::format_duration(duration - time_allocated_for_upload_and_stuff),
                 humantime::format_duration(duration),
