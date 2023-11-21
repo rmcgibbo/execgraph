@@ -643,7 +643,7 @@ eg.execute()
     assert "user" in log[0]["Header"]
     assert log[1]["Ready"]["key"] == "key"
     assert log[2]["Started"]["key"] == "key"
-    assert log[3]["Finished"]["status"] == 127
+    assert log[3]["Finished"]["status"] == -1
 
 
 def test_sigint_2(tmp_path):
@@ -820,7 +820,8 @@ def test_fd3_2(tmp_path):
     eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-2]["LogMessage"]["values"] == [{}]
+    assert [list(c.keys())[0] for c in contents] == ["Header", "Ready", "Started", "Finished"]
+    assert contents[2]["Started"]["pid"] == 255
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
@@ -832,8 +833,8 @@ def test_fd3_3(tmp_path):
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    from pprint import pprint; pprint(contents)
-    assert contents[-2]["LogMessage"]["values"] == [{}]
+    assert [list(c.keys())[0] for c in contents] == ["Header", "Ready", "Started", "Finished"]
+    assert contents[2]["Started"]["pid"] == 255
 
 
 def test_fd3_4(tmp_path):
@@ -846,10 +847,10 @@ def test_fd3_4(tmp_path):
 
 def test_fd3_5(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", "echo 'a=c c=\"'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c c=\"'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-2]["LogMessage"]["values"] == []
+    assert contents[-2]["LogMessage"]["values"] == [{"a": "c", "c": '"'},]
 
 
 def test_fd3_6(tmp_path):
