@@ -50,7 +50,7 @@ def test_3(tmp_path):
 def test_4(tmp_path):
     # Check that log messages end up in the log file even if no Finished event is sent, or at least that they show up well before.
     eg = execgraph.ExecGraph(8, logfile=tmp_path / "example.log")
-    eg.add_task(["sh", "-c", "echo 'foo=bar'>&3; sleep 1; exit 1"], key="foo")
+    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar'>&3; sleep 1; exit 1"], key="foo")
     eg.execute()
     del eg
 
@@ -200,3 +200,20 @@ def test_12(tmp_path):
     for record in (c["LogMessage"] for c in contents if "LogMessage" in c):
         runcount = record["runcount"]
         assert record["values"] == [{"runcount": str(runcount)}]
+
+
+def test_13(tmp_path):
+    with open(tmp_path / "example.log", "w") as f:
+        f.write("""{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":[""]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"python-y4begakspvwurs3yw5qzl27t","runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"python-y4begakspvwurs3yw5qzl27t","host":"dhmgena138.dhm.desres.deshaw.com","pid":24267,"slurm_jobid":"19811878_0"}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"python-y4begakspvwurs3yw5qzl27t","status":0}}
+{"Ready":{"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":693635928},"key":"sh-ile3rikuhdy6vxiqpxfu6gvd","runcount":0,"command":"sh","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522117,"nanos_since_epoch":307764354},"key":"sh-ile3rikuhdy6vxiqpxfu6gvd","host":"dhmgena138.dhm.desres.deshaw.com","pid":25458,"slurm_jobid":"19811885_0"}}
+{"LogMessage":{"time":{"secs_since_epoch":1700522117,"nanos_since_epoch":386873255},"key":"sh-ile3rikuhdy6vxiqpxfu6gvd","runcount":0,"values":[{"foo":"bar","time":"1700522117"}]}}
+{"LogMessage":{"time":{"secs_since_epoch":1700522119,"nanos_since_epoch":449919213},"key":"sh-ile3rikuhdy6vxiqpxfu6gvd","runcount":0,"values":[{"baz":"qux","time":"1700522119"}]}}
+{"Finished":{"time":{"secs_since_epoch":1700522119,"nanos_since_epoch":458240798},"key":"sh-ile3rikuhdy6vxiqpxfu6gvd","status":0}}
+{"Header":{"version":5,"time":{"secs_since_epoch":1700523215,"nanos_since_epoch":578977006},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":87532,"upstreams":[],"storage_roots":[""]}}
+{"Backref":{"key":"sh-ile3rikuhdy6vxiqpxfu6gvd"}}""")
+    current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+    assert sum(1 for c in current if "LogMessage" in c) == 2

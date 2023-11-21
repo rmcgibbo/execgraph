@@ -18,7 +18,6 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::signal::unix::{signal, SignalKind};
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -141,15 +140,6 @@ async fn main() -> Result<(), RemoteError> {
     );
     let base = reqwest::Url::parse(&opt.url)?;
 
-    // An infinite stream of SIGERM signals.
-    // TODO: there are short sections of the run_command function below where we're not
-    // listening on the SIGTERM channel. That's not ideal. The best thing would be to
-    // always be listening on the channel and trigger the shutdown sequence immediately
-    // in all cases. It's not a big deal if we miss some because we'll probably get
-    // SIGKILLed afterwards anyways, but it would be preferable.
-    let mut sigterms = signal(SignalKind::terminate())?;
-
-
     // Slurm error logfile events Notify
     let (watcher, mut rx) = async_watcher(opt.slurm_error_logfile.clone())?;
 
@@ -160,7 +150,6 @@ async fn main() -> Result<(), RemoteError> {
             &opt,
             &base,
             client.clone(),
-            &mut sigterms,
             &mut rx,
             start_response,
             SigtermChildBeforeSchedulerDeadline::new(&opt)
@@ -198,7 +187,6 @@ async fn run_command(
     opt: &CommandLineArguments,
     base: &reqwest::Url,
     client: Arc<reqwest::Client>,
-    sigterms: &mut tokio::signal::unix::Signal,
     notify_rx: &mut tokio::sync::mpsc::Receiver<String>,
     start: Option<StartResponse>,
     time_to_sigterm_child: SigtermChildBeforeSchedulerDeadline,
@@ -481,30 +469,6 @@ async fn run_command(
                 stderr_prefix = Some(time_to_sigterm_child.message());
                 continue;
             },
-            _ = sigterms.recv() => {
-                // Propagate sigterm to child process and exit super quickly.
-                unsafe { libc::kill(pid.try_into().unwrap(), libc::SIGTERM); }
-                // Read the slurm logfile, which might contain some information
-                let slurm_error_logfile_contents = match &opt.slurm_error_logfile {
-                    Some(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
-                    None => "".to_string()
-                };
-                // send a notification back to the controller if possible
-                if let Err(e) = client.post(end_route)
-                    .postcard(&EndRequest {
-                        transaction_id,
-                        status: -15,
-                        stdout: "".to_string(),
-                        disposition: ExitDisposition::Lost,
-                        stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), slurm_error_logfile_contents),
-                        start_request: None,
-                        nonretryable: false,
-                    })?.send().await {
-                        tracing::error!("Unable to send lasp-gasp message {}", e);
-                    }
-                fd3_channel_write.close();
-                return Err(RemoteError::Sigterm)
-            }
         };
         break output;
     }; // loop

@@ -586,6 +586,13 @@ impl LogFileSnapshotReader {
                         result_outdated.push(item);
                     }
                 }
+                LogEntry::LogMessage(v) => {
+                    if pending_backrefs.contains(&v.key) {
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
                 LogEntry::Finished(v) => {
                     if pending_backrefs.contains(&v.key) {
                         result_current.push(item);
