@@ -70,6 +70,9 @@ pub struct FinishedEntry {
     pub time: SystemTime,
     pub key: String,
     pub status: i32,
+
+    #[serde(default, rename="values")]
+    pub _deprecated_values: ValueMaps
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -135,6 +138,7 @@ impl LogEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             status,
+            _deprecated_values: vec![],
         })
     }
 
