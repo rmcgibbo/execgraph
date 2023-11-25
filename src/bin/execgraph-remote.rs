@@ -816,7 +816,7 @@ fn cleanup_child_processes_carefully() {
 }
 
 fn current_child_processes() -> Vec<i32> {
-    use sysinfo::{get_current_pid, PidExt, ProcessExt, System, SystemExt};
+    use sysinfo::{get_current_pid, PidExt, ProcessExt, System, SystemExt, RefreshKind};
 
     let mypid = match get_current_pid() {
         Ok(mypid) => mypid,
@@ -826,7 +826,7 @@ fn current_child_processes() -> Vec<i32> {
     };
 
     let mut children = vec![];
-    let s = System::new_all();
+    let s = System::new_with_specifics(RefreshKind::new().with_processes(sysinfo::ProcessRefreshKind::new()));
     for (pid, process) in s.processes() {
         if let Some(parent) = process.parent() {
             if parent == mypid {
