@@ -407,7 +407,7 @@ impl<'a> ReadyTrackerServer<'a> {
             if self.shutdown_state != ShutdownState::SoftShutdown {
                 eprintln!(
                     "\x1b[1;31m{}:\x1b[0m {}{}.{}: {}",
-                    e.status.fail_description(fizzled),
+                    e.status.fail_description(fizzled, will_retry),
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
                     cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0),
@@ -847,13 +847,17 @@ impl ExitStatus {
         matches!(self, ExitStatus::Code(0))
     }
 
-    fn fail_description(&self, fizzled: bool) -> &str {
+    fn fail_description(&self, fizzled: bool, will_retry: bool) -> &str {
         assert!(!self.is_success());
-        match self {
-            ExitStatus::Code(_) if fizzled => "FIZZLED",
-            ExitStatus::Code(_) => "FAILED",
-            ExitStatus::Cancelled => "CANCELLED",
-            ExitStatus::Disconnected => "DISCONNECTED",
+        if will_retry {
+            "RETRYING"
+        } else {
+            match self {
+                ExitStatus::Code(_) if fizzled => "FIZZLED",
+                ExitStatus::Code(_) => "FAILED",
+                ExitStatus::Cancelled => "CANCELLED",
+                ExitStatus::Disconnected => "DISCONNECTED",
+            }
         }
     }
 }
