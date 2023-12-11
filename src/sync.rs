@@ -443,6 +443,10 @@ impl<'a> ReadyTrackerServer<'a> {
             debug!("Will not retry flagged as nonretryable");
             return false;
         }
+        if self.ready.is_none() {
+            debug!("Will not retry because we're in a shutdown sequence");
+            return false;
+        }
 
         match self.retry_mode {
             RetryMode::AllFailures => {
