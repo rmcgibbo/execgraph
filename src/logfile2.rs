@@ -70,6 +70,9 @@ pub struct FinishedEntry {
     pub time: SystemTime,
     pub key: String,
     pub status: i32,
+
+    #[serde(default, rename="values")]
+    pub _deprecated_values: ValueMaps
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -135,6 +138,7 @@ impl LogEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             status,
+            _deprecated_values: vec![],
         })
     }
 
@@ -635,16 +639,21 @@ impl LogFileSnapshotReader {
         let current_keys = current
             .iter()
             .filter_map(|x| match x {
-                LogEntry::Header(_v) => None,
+                LogEntry::Header(_) => None,
                 LogEntry::Ready(v) => Some(&v.key),
                 LogEntry::Started(v) => Some(&v.key),
                 LogEntry::Finished(v) => Some(&v.key),
                 LogEntry::Backref(v) => Some(&v.key),
                 LogEntry::LogMessage(v) => Some(&v.key),
-                LogEntry::BurnedKey(v) => Some(&v.key),
+                LogEntry::BurnedKey(_) => None,
             })
             .cloned()
             .collect::<HashSet<String>>();
+        let burned_keys = current.iter().filter_map(|x| match x {
+            LogEntry::BurnedKey(k) => Some(&k.key),
+            _ => None,
+        }).cloned()
+        .collect::<HashSet<String>>();
 
         // Gather all unfinished or outdated keys
         // First the unfinished ones
@@ -665,7 +674,7 @@ impl LogFileSnapshotReader {
 
         // Burn keys associated with tasks that never finished
         for k in unfinished_or_outdated {
-            if !current_keys.contains(&k) {
+            if (!current_keys.contains(&k)) && (!burned_keys.contains(&k)) {
                 current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: k }));
             }
         }
