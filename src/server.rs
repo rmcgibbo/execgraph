@@ -113,7 +113,8 @@ impl<'a> State<'a> {
         // about 117ms per tick, which seems totally fine. that means that rather than timing out after
         // precisely 30 seconds it might be timing out after 30.117 seconds.
         let tick_time = self.timeouts.tick_duration();
-        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + tick_time, tick_time);
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + tick_time, tick_time);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -142,12 +143,10 @@ impl<'a> State<'a> {
 
             for cstate in expired {
                 self.tracker
-                    .send_finished(
-                        FinishedEvent::new_disconnected(
-                            cstate.node_id,
-                            cstate.disconnect_error_message,
-                        ),
-                    )
+                    .send_finished(FinishedEvent::new_disconnected(
+                        cstate.node_id,
+                        cstate.disconnect_error_message,
+                    ))
                     .await;
             }
 
@@ -496,17 +495,15 @@ async fn end_handler(
 
     state
         .tracker
-        .send_finished(
-            FinishedEvent {
-                id: cstate.node_id,
-                status: ExitStatus::Code(request.status),
-                disposition: request.disposition,
-                stdout: request.stdout,
-                stderr: request.stderr,
-                flag: Some(flag.clone()),
-                nonretryable: request.nonretryable,
-            },
-        )
+        .send_finished(FinishedEvent {
+            id: cstate.node_id,
+            status: ExitStatus::Code(request.status),
+            disposition: request.disposition,
+            stdout: request.stdout,
+            stderr: request.stderr,
+            flag: Some(flag.clone()),
+            nonretryable: request.nonretryable,
+        })
         .await;
 
     match request.start_request {

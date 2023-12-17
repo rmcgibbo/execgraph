@@ -2,7 +2,7 @@ use crate::{
     admin_server::run_admin_service_forever,
     fancy_cancellation_token::{CancellationState, CancellationToken},
     graphtheory::transitive_closure_dag,
-    localrunner::{run_local_process_loop, LocalQueueType, ExitDisposition},
+    localrunner::{run_local_process_loop, ExitDisposition, LocalQueueType},
     logfile2::{LogEntry, LogFile, LogFileRO, LogFileRW},
     server::{router, State as ServerState},
     sync::{new_ready_tracker, RetryMode},
@@ -76,12 +76,19 @@ impl Capsule {
         Capsule { capsule }
     }
 
-    fn call(&self, success: bool, runcount: u32, disposition: Option<ExitDisposition>) -> Result<i32> {
+    fn call(
+        &self,
+        success: bool,
+        runcount: u32,
+        disposition: Option<ExitDisposition>,
+    ) -> Result<i32> {
         use pyo3::AsPyPointer;
         const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule-v2\0";
         let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
-        let success_u32: u32 = if success { 1 } else { 0};
-        let signaled_or_lost: u32 = disposition.map(|x| x.is_signaled_or_lost()).unwrap_or(false) as u32;
+        let success_u32: u32 = if success { 1 } else { 0 };
+        let signaled_or_lost: u32 = disposition
+            .map(|x| x.is_signaled_or_lost())
+            .unwrap_or(false) as u32;
 
         unsafe {
             let pyobj = self.capsule.as_ptr();
@@ -249,9 +256,7 @@ impl ExecGraph {
         ratelimit_per_second: u32,
         retry_mode: RetryMode,
     ) -> Result<(u32, Vec<String>)> {
-        fn extend_graph_lifetime(
-            g: Arc<DiGraph<&Cmd, ()>>,
-        ) -> Arc<DiGraph<&'static Cmd, ()>> {
+        fn extend_graph_lifetime(g: Arc<DiGraph<&Cmd, ()>>) -> Arc<DiGraph<&'static Cmd, ()>> {
             unsafe { std::mem::transmute::<_, Arc<DiGraph<&'static Cmd, ()>>>(g) }
         }
 
@@ -280,7 +285,7 @@ impl ExecGraph {
             count_offset,
             failures_allowed,
             ratelimit_per_second,
-            retry_mode
+            retry_mode,
         );
 
         // Run local processes

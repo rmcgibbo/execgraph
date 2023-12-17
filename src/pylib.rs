@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
-    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW}, sync::RetryMode,
+    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW},
+    sync::RetryMode,
 };
 
 /// Parallel execution of shell commands with DAG dependencies.
@@ -42,7 +43,7 @@ pub struct PyExecGraph {
     failures_allowed: u32,
     key: String,
     rerun_failures: bool,
-    retry_mode: RetryMode
+    retry_mode: RetryMode,
 }
 
 #[pymethods]
@@ -117,7 +118,10 @@ impl PyExecGraph {
             "all_failures" => RetryMode::AllFailures,
             "only_signaled_or_lost" => RetryMode::OnlySignaledOrLost,
             _ => {
-                return Err(PyRuntimeError::new_err(format!("Unrecognized option {}. Use either 'all_failures' or 'only_signaled_or_lost'", retry_mode)));
+                return Err(PyRuntimeError::new_err(format!(
+                    "Unrecognized option {}. Use either 'all_failures' or 'only_signaled_or_lost'",
+                    retry_mode
+                )));
             }
         };
 
@@ -165,13 +169,19 @@ impl PyExecGraph {
     /// If, according to the logfile, this task has previously been run and succeeded,
     /// get the storageroot.
     fn storageroot(&self, key: &str) -> Option<PathBuf> {
-        if let Some(logfile2::RuncountStatus::Finished { storage_root, success, .. }) = self.g.logfile.runcount(key) {
+        if let Some(logfile2::RuncountStatus::Finished {
+            storage_root,
+            success,
+            ..
+        }) = self.g.logfile.runcount(key)
+        {
             if success {
                 return Some(
                     self.g
                         .logfile
                         .storage_root(storage_root)
-                        .expect("Unable to find storage root"))
+                        .expect("Unable to find storage root"),
+                );
             }
         }
 
@@ -184,9 +194,9 @@ impl PyExecGraph {
             {
                 if success {
                     return Some(
-                            l.storage_root(storage_root)
-                            .expect("Unable to find storage root")
-                        )
+                        l.storage_root(storage_root)
+                            .expect("Unable to find storage root"),
+                    );
                 }
             }
         }
@@ -298,9 +308,17 @@ impl PyExecGraph {
         // just skip it.
         // Answer: I think so that we can record a Backref in the log file.
         let runcount_base = match self.g.logfile.runcount(&key as &str) {
-            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => {runcount},
-            Some(logfile2::RuncountStatus::Started { runcount, .. }) => {runcount + 1},
-            Some(logfile2::RuncountStatus::Finished {runcount, success, .. }) => {if success { runcount } else {runcount + 1} },
+            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => runcount,
+            Some(logfile2::RuncountStatus::Started { runcount, .. }) => runcount + 1,
+            Some(logfile2::RuncountStatus::Finished {
+                runcount, success, ..
+            }) => {
+                if success {
+                    runcount
+                } else {
+                    runcount + 1
+                }
+            }
             None => 0,
         };
         let cmd = Cmd {

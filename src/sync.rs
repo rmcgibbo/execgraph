@@ -3,9 +3,10 @@ use crate::{
     constants::{FAIL_COMMAND_PREFIX, FIZZLED_TIME_CUTOFF},
     execgraph::Cmd,
     fancy_cancellation_token::{CancellationState, CancellationToken},
+    localrunner::ExitDisposition,
     logfile2::{self, LogFileRW},
     time::gcra::RateLimiter,
-    time::ratecounter::RateCounter, localrunner::ExitDisposition,
+    time::ratecounter::RateCounter,
 };
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
@@ -165,7 +166,7 @@ pub fn new_ready_tracker<'a>(
             shutdown_state: ShutdownState::Normal,
             soft_shutdown_trigger: soft_shutdown_trigger.clone(),
             n_attempts: HashMap::new(),
-            retry_mode
+            retry_mode,
         },
         Arc::new(ReadyTrackerClient {
             r: ready_r.try_into().unwrap(),
@@ -189,8 +190,10 @@ impl<'a> ReadyTrackerServer<'a> {
                 Ok(Event::Started(e)) => {
                     debug!("pulled a started event off the drain queue");
                     let cmd = self.g[e.id];
+                    let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
                     self.logfile.write(LogEntry::new_started(
                         &cmd.key,
+                        runcount,
                         &e.host,
                         e.pid,
                         e.slurm_jobid.to_owned(),
@@ -200,13 +203,15 @@ impl<'a> ReadyTrackerServer<'a> {
                 Ok(Event::Finished(e)) => {
                     debug!("pulled a started event off the drain queue");
                     let cmd = self.g[e.id];
+                    let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
                     self._finished_bookkeeping_1(&e)?;
-                    self.logfile
-                        .write(LogEntry::new_finished(&cmd.key, e.status.as_i32()))?;
+                    self.logfile.write(LogEntry::new_finished(
+                        &cmd.key,
+                        runcount,
+                        e.status.as_i32(),
+                    ))?;
                     if e.nonretryable && !e.status.is_success() {
-                        self.logfile.write(LogEntry::new_burnedkey(
-                            &cmd.key,
-                        ))?;
+                        self.logfile.write(LogEntry::new_burnedkey(&cmd.key))?;
                     }
                     inflight.remove(&e.id);
                 }
@@ -216,7 +221,8 @@ impl<'a> ReadyTrackerServer<'a> {
                 Ok(Event::LogValue(e)) => {
                     let cmd = self.g[e.id];
                     let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
-                    self.logfile.write(LogEntry::new_logmessage(&cmd.key, runcount, e.values))?;
+                    self.logfile
+                        .write(LogEntry::new_logmessage(&cmd.key, runcount, e.values))?;
                 }
             }
         }
@@ -227,11 +233,13 @@ impl<'a> ReadyTrackerServer<'a> {
             let cmd = self.g[*k];
             let e = FinishedEvent::new_disconnected(k.to_owned(), "".to_owned());
             self._finished_bookkeeping_1(&e)?;
-            self.logfile
-                .write(LogEntry::new_finished(&cmd.key, e.status.as_i32()))?;
-            self.logfile.write(LogEntry::new_burnedkey(
+            let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
+            self.logfile.write(LogEntry::new_finished(
                 &cmd.key,
+                runcount,
+                e.status.as_i32(),
             ))?;
+            self.logfile.write(LogEntry::new_burnedkey(&cmd.key))?;
         }
         unsafe {
             // Block SIGTERM for a moment, then send SIGTERM to the whole process group to try to stop child-of-child processes
@@ -283,8 +291,10 @@ impl<'a> ReadyTrackerServer<'a> {
                     match event.unwrap() {
                         Event::Started(e) => {
                             let cmd = self.g[e.id];
+                            let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
                             self.logfile.write(LogEntry::new_started(
                                 &cmd.key,
+                                runcount,
                                 &e.host,
                                 e.pid,
                                 e.slurm_jobid,
@@ -367,7 +377,11 @@ impl<'a> ReadyTrackerServer<'a> {
         let total: u32 = self.statuses.len().try_into().unwrap();
         let cmd = self.g[e.id];
 
-        cmd.call_postamble(is_success, cmd.runcount_base + *self.n_attempts.get(&e.id).unwrap_or(&0), e.disposition);
+        cmd.call_postamble(
+            is_success,
+            cmd.runcount_base + *self.n_attempts.get(&e.id).unwrap_or(&0),
+            e.disposition,
+        );
 
         // elapsed is none if the task never started, which happens if we're being
         // called during the drain() shutdown phase on tasks that never began.
@@ -452,7 +466,7 @@ impl<'a> ReadyTrackerServer<'a> {
             RetryMode::AllFailures => {
                 debug!("Will retry because we retry all failures");
                 true
-            },
+            }
             RetryMode::OnlySignaledOrLost => {
                 let r = e.disposition.is_signaled_or_lost();
                 if r {
@@ -467,14 +481,14 @@ impl<'a> ReadyTrackerServer<'a> {
 
     async fn _finished_bookkeeping_2(&mut self, e: &FinishedEvent) -> Result<()> {
         let cmd = self.g[e.id];
+        let runcount = cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0);
         self.logfile.write(LogEntry::new_finished(
             &cmd.key,
+            runcount,
             e.status.as_i32(),
         ))?;
         if e.nonretryable && !e.status.is_success() {
-            self.logfile.write(LogEntry::new_burnedkey(
-                &cmd.key,
-            ))?;
+            self.logfile.write(LogEntry::new_burnedkey(&cmd.key))?;
         }
 
         if self.shutdown_state == ShutdownState::SoftShutdown {
@@ -603,7 +617,10 @@ impl ReadyTrackerClient {
         self.soft_shutdown_trigger.set();
     }
 
-    pub async fn recv(&self, runnertypeid: u32) -> Result<(NodeIndex, u32), ReadyTrackerClientError> {
+    pub async fn recv(
+        &self,
+        runnertypeid: u32,
+    ) -> Result<(NodeIndex, u32), ReadyTrackerClientError> {
         // wait for the rate limiter
         self.ratelimiter.until_ready().await;
 
@@ -668,10 +685,7 @@ impl ReadyTrackerClient {
 
         let r = self
             .s
-            .send(Event::LogValue(LogMessageEvent {
-                id: v,
-                values,
-            }))
+            .send(Event::LogValue(LogMessageEvent { id: v, values }))
             .await;
         if r.is_err() {
             debug!("send_started: cannot send to channel: {:#?}", r);

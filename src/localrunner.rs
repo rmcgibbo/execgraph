@@ -2,9 +2,9 @@ use crate::{
     fancy_cancellation_token::{CancellationState, CancellationToken},
     sync::ExitStatus,
 };
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use petgraph::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::{
     os::unix::prelude::{AsRawFd, ExitStatusExt},
     process::Stdio,
@@ -104,13 +104,11 @@ pub async fn run_local_process_loop(
                     .send_started(subgraph_node_id, cmd, &hostname, 0, "".to_string())
                     .await;
                 tracker
-                    .send_finished(
-                        FinishedEvent::new_error(
-                            subgraph_node_id,
-                            -1,
-                            format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
-                        ),
-                    )
+                    .send_finished(FinishedEvent::new_error(
+                        subgraph_node_id,
+                        -1,
+                        format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
+                    ))
                     .await;
                 continue;
             }
@@ -216,8 +214,7 @@ pub async fn wait_with_output(
     let f2 = read_to_end(&mut stderr_pipe);
     let f3 = read_fd3(&mut fd, on_fd3);
 
-    let (status, stdout, stderr, _) =
-        futures::future::try_join4(child.wait(), f1, f2, f3).await?;
+    let (status, stdout, stderr, _) = futures::future::try_join4(child.wait(), f1, f2, f3).await?;
     drop(stdout_pipe);
     drop(stderr_pipe);
     drop(fd);
@@ -316,7 +313,9 @@ async fn forward_messages(
     loop {
         match fd3_channel_read.recv().await {
             Ok(value) => {
-                if std::str::from_utf8(&value).is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n") {
+                if std::str::from_utf8(&value)
+                    .is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n")
+                {
                     execgraph_internal_nonretryable_error = true;
                 } else {
                     tracker.send_setvalue(node_index, value).await

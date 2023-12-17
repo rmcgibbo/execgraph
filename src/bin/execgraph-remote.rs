@@ -30,7 +30,6 @@ const FINAL_SLURM_ERROR_MESSAGE_STRINGS: &str = "CANCELLED|FAILED|ERROR";
 const SEND_SIGTERM_BEFORE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 const ONE_YEAR: std::time::Duration = std::time::Duration::from_secs(31536000);
 
-
 lazy_static::lazy_static! {
     static ref START_TIME: std::time::Instant = std::time::Instant::now();
     static ref SLURM_JOBID: String = (|| {
@@ -96,7 +95,9 @@ async fn main() -> Result<(), RemoteError> {
         .init();
     set_current_process_as_child_subreaper();
 
-    let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN").context("Reading EXECGRAPH_AUTHORIZATION_TOKEN").unwrap();
+    let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN")
+        .context("Reading EXECGRAPH_AUTHORIZATION_TOKEN")
+        .unwrap();
     std::env::remove_var("EXECGRAPH_AUTHORIZATION_TOKEN");
     tracing::info!("execgraph-remote SLURM_JOB_ID={}", *SLURM_JOBID);
     tracing::info!("execgraph-remote pid={}", std::process::id());
@@ -154,7 +155,7 @@ async fn main() -> Result<(), RemoteError> {
             client.clone(),
             &mut rx,
             start_response,
-            SigtermChildBeforeSchedulerDeadline::new(&opt)
+            SigtermChildBeforeSchedulerDeadline::new(&opt),
         )
         .await
         {
@@ -414,7 +415,8 @@ async fn run_command(
     };
 
     let (fd3_channel_write, fd3_channel_read) = async_channel::unbounded();
-    let mut child_futures = std::pin::pin!(wait_with_output(child, read_fd3, fd3_channel_write.clone()));
+    let mut child_futures =
+        std::pin::pin!(wait_with_output(child, read_fd3, fd3_channel_write.clone()));
     let forward_messages_thread = tokio::spawn(forward_messages(
         fd3_channel_read,
         client.clone(),
@@ -492,7 +494,11 @@ async fn run_command(
         status: output.code().as_i32(),
         disposition: output.disposition(),
         stdout: output.stdout_str(),
-        stderr: format!("{}{}", stderr_prefix.unwrap_or("".to_string()), output.stderr_str()),
+        stderr: format!(
+            "{}{}",
+            stderr_prefix.unwrap_or("".to_string()),
+            output.stderr_str()
+        ),
         nonretryable: execgraph_internal_nonretryable_error,
         start_request: still_accepting_tasks(opt).then(make_start_request),
     };
@@ -816,7 +822,7 @@ fn cleanup_child_processes_carefully() {
 }
 
 fn current_child_processes() -> Vec<i32> {
-    use sysinfo::{get_current_pid, PidExt, ProcessExt, System, SystemExt, RefreshKind};
+    use sysinfo::{get_current_pid, PidExt, ProcessExt, RefreshKind, System, SystemExt};
 
     let mypid = match get_current_pid() {
         Ok(mypid) => mypid,
@@ -826,7 +832,9 @@ fn current_child_processes() -> Vec<i32> {
     };
 
     let mut children = vec![];
-    let s = System::new_with_specifics(RefreshKind::new().with_processes(sysinfo::ProcessRefreshKind::new()));
+    let s = System::new_with_specifics(
+        RefreshKind::new().with_processes(sysinfo::ProcessRefreshKind::new()),
+    );
     for (pid, process) in s.processes() {
         if let Some(parent) = process.parent() {
             if parent == mypid {
@@ -877,10 +885,9 @@ async fn forward_messages(
     }
 }
 
-
 struct SigtermChildBeforeSchedulerDeadline {
     deadline: tokio::time::Instant,
-    description: String
+    description: String,
 }
 
 impl SigtermChildBeforeSchedulerDeadline {
@@ -892,11 +899,15 @@ impl SigtermChildBeforeSchedulerDeadline {
             std::time::Duration::from_secs(0)
         };
         Self {
-            deadline: ((*START_TIME) + duration.saturating_sub(time_allocated_for_upload_and_stuff)).into(),
-            description: format!("{} ({} minus {} for cleanup)",
+            deadline: ((*START_TIME)
+                + duration.saturating_sub(time_allocated_for_upload_and_stuff))
+            .into(),
+            description: format!(
+                "{} ({} minus {} for cleanup)",
                 humantime::format_duration(duration - time_allocated_for_upload_and_stuff),
                 humantime::format_duration(duration),
-                humantime::format_duration(SEND_SIGTERM_BEFORE_DEADLINE))
+                humantime::format_duration(SEND_SIGTERM_BEFORE_DEADLINE)
+            ),
         }
     }
 
@@ -905,8 +916,12 @@ impl SigtermChildBeforeSchedulerDeadline {
         let hostname_cow = hostname.to_string_lossy();
         let hostname0 = hostname_cow.split(".").next().unwrap_or(&hostname_cow);
 
-        let current_time = time::OffsetDateTime::now_local().unwrap().format(&time::format_description::well_known::Rfc3339).unwrap();
-        format!("{} TASK IN SLURM JOB {} on {} CANCELLED DUE TO TIME LIMIT AFTER {}\n",
+        let current_time = time::OffsetDateTime::now_local()
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        format!(
+            "{} TASK IN SLURM JOB {} on {} CANCELLED DUE TO TIME LIMIT AFTER {}\n",
             current_time,
             (*SLURM_JOBID),
             hostname0,

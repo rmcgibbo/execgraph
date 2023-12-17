@@ -23,7 +23,7 @@ pub enum LogEntry {
     Finished(FinishedEntry),
     Backref(BackrefEntry),
     LogMessage(LogMessageEntry),
-    BurnedKey(BurnedKeyEntry)
+    BurnedKey(BurnedKeyEntry),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -63,6 +63,9 @@ pub struct StartedEntry {
 
     #[serde(default)]
     pub slurm_jobid: String, // If the value is not present when deserializing, use the Default::default().
+
+    #[serde(default)]
+    pub runcount: u32, // If the value is not present when deserializing, use the Default::default().
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -71,8 +74,11 @@ pub struct FinishedEntry {
     pub key: String,
     pub status: i32,
 
-    #[serde(default, rename="values")]
-    pub _deprecated_values: ValueMaps
+    #[serde(default, rename = "values")]
+    pub _deprecated_values: ValueMaps,
+
+    #[serde(default)]
+    pub runcount: u32, // If the value is not present when deserializing, use the Default::default().
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -123,21 +129,29 @@ impl LogEntry {
         })
     }
 
-    pub fn new_started(key: &str, host: &str, pid: u32, slurm_jobid: String) -> LogEntry {
+    pub fn new_started(
+        key: &str,
+        runcount: u32,
+        host: &str,
+        pid: u32,
+        slurm_jobid: String,
+    ) -> LogEntry {
         LogEntry::Started(StartedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             host: host.to_owned(),
             slurm_jobid: slurm_jobid,
+            runcount,
             pid,
         })
     }
 
-    pub fn new_finished(key: &str, status: i32) -> LogEntry {
+    pub fn new_finished(key: &str, runcount: u32, status: i32) -> LogEntry {
         LogEntry::Finished(FinishedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             status,
+            runcount,
             _deprecated_values: vec![],
         })
     }
@@ -203,11 +217,9 @@ pub struct LogFileSnapshotReader {
 pub enum RuncountStatus {
     Ready {
         runcount: u32,
-        storage_root: u32,
     },
     Started {
         runcount: u32,
-        storage_root: u32,
     },
     Finished {
         runcount: u32,
@@ -235,7 +247,7 @@ impl LogFile<LogFileRW> {
             .create(true)
             .write(true)
             .open(&path)?;
-        let (runcounts,burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
@@ -248,68 +260,6 @@ impl LogFile<LogFileRW> {
     }
 
     pub fn write(&mut self, e: LogEntry) -> Result<()> {
-        match e {
-            LogEntry::Header(ref h) => {
-                // TODO: check for consistency with prior header?
-                self.header = Some(h.clone())
-            }
-            LogEntry::Ready(ref r) => {
-                self.runcounts.insert(
-                    r.key.clone(),
-                    RuncountStatus::Ready {
-                        runcount: r.runcount,
-                        storage_root: r.storage_root,
-                    },
-                );
-            }
-            LogEntry::Started(ref s) => {
-                let r = self
-                    .runcounts
-                    .remove(&s.key)
-                    .expect("I see a Started entry, but no Ready entry");
-                if let RuncountStatus::Ready {
-                    runcount: c,
-                    storage_root: srt,
-                } = r
-                {
-                    self.runcounts.insert(
-                        s.key.clone(),
-                        RuncountStatus::Started {
-                            runcount: c,
-                            storage_root: srt,
-                        },
-                    );
-                } else {
-                    panic!("Malformed started entry? {:#?}", r);
-                }
-            }
-            LogEntry::Finished(ref f) => {
-                let r = self
-                    .runcounts
-                    .remove(&f.key)
-                    .expect("I see a Finished entry, but no prior entry");
-                if let RuncountStatus::Started {
-                    runcount: c,
-                    storage_root: srt,
-                } = r
-                {
-                    self.runcounts.insert(
-                        f.key.clone(),
-                        RuncountStatus::Finished {
-                            runcount: c,
-                            storage_root: srt,
-                            success: f.status == 0,
-                        },
-                    );
-                } else {
-                    tracing::warn!("Malformed finished entry {:#?} r={:#?}", f, r);
-                }
-            }
-            LogEntry::Backref(_) => {}
-            LogEntry::LogMessage(_) => {}
-            LogEntry::BurnedKey(_) => {}
-        }
-
         serde_json::to_writer(&mut self.f, &e)?;
         self.f.write_all(&[b'\n'])?;
         Ok(())
@@ -361,10 +311,15 @@ impl LogFile<LogFileRO> {
 impl<T> LogFile<T> {
     fn load_runcounts(
         f: &mut std::fs::File,
-    ) -> Result<(HashMap<String, RuncountStatus>, Vec<String>, Option<HeaderEntry>)> {
+    ) -> Result<(
+        HashMap<String, RuncountStatus>,
+        Vec<String>,
+        Option<HeaderEntry>,
+    )> {
         let mut runcounts = HashMap::new();
         let mut header = None;
         let mut workflow_key = None;
+        let mut ready_storage_roots = HashMap::new();
         let mut started_but_not_finished = HashSet::new();
         let mut burned_keys = Vec::new();
 
@@ -395,67 +350,38 @@ impl<T> LogFile<T> {
                     header = Some(h);
                 }
                 LogEntry::Ready(r) => {
+                    ready_storage_roots.insert(r.key.clone(), r.storage_root);
                     runcounts.insert(
                         r.key,
                         RuncountStatus::Ready {
                             runcount: r.runcount,
-                            storage_root: r.storage_root,
                         },
                     );
                 }
                 LogEntry::Started(s) => {
-                    let r = runcounts
-                        .remove(&s.key)
-                        .expect("I see a Started entry, but no Ready entry");
-                    if let RuncountStatus::Ready {
-                        runcount: c,
-                        storage_root: srt,
-                    } = r
-                    {
-                        started_but_not_finished.insert(s.key.clone());
-                        runcounts.insert(
-                            s.key,
-                            RuncountStatus::Started {
-                                runcount: c,
-                                storage_root: srt,
-                            },
-                        );
-                    } else {
-                        panic!("Malformed?");
-                    }
+                    started_but_not_finished.insert(s.key.clone());
+                    runcounts.insert(
+                        s.key,
+                        RuncountStatus::Started {
+                            runcount: s.runcount,
+                        },
+                    );
                 }
                 LogEntry::Finished(f) => {
-                    match runcounts
-                        .remove(&f.key)
-                        .expect("I see a Finished entry, but no prior entry") {
-                            RuncountStatus::Ready { runcount, storage_root } => {
-                                tracing::warn!("Finished entry without a prior started entry");
-                                runcounts.insert(
-                                    f.key,
-                                    RuncountStatus::Finished {
-                                        runcount,
-                                        storage_root,
-                                        success: f.status == 0,
-                                    },
-                                );
-                            },
-                            RuncountStatus::Started { runcount, storage_root } => {
-                                started_but_not_finished.remove(&f.key);
-                                runcounts.insert(
-                                    f.key,
-                                    RuncountStatus::Finished {
-                                        runcount,
-                                        storage_root,
-                                        success: f.status == 0,
-                                    },
-                                );
-                            }
-                            RuncountStatus::Finished { .. } => { panic!("Logic error"); }
-                        };
+                    started_but_not_finished.remove(&f.key);
+                    let storage_root = ready_storage_roots.remove(&f.key).unwrap_or(0);
+                    runcounts.insert(
+                        f.key,
+                        RuncountStatus::Finished {
+                            runcount: f.runcount,
+                            storage_root,
+                            success: f.status == 0,
+                        },
+                    );
                 }
                 LogEntry::BurnedKey(f) => {
                     burned_keys.push(f.key);
-                },
+                }
                 _ => {}
             }
         }
@@ -606,7 +532,7 @@ impl LogFileSnapshotReader {
                 }
                 LogEntry::BurnedKey(_) => {
                     result_current.push(item);
-                },
+                }
                 _ => {
                     result_outdated.push(item);
                 }
@@ -649,19 +575,26 @@ impl LogFileSnapshotReader {
             })
             .cloned()
             .collect::<HashSet<String>>();
-        let burned_keys = current.iter().filter_map(|x| match x {
-            LogEntry::BurnedKey(k) => Some(&k.key),
-            _ => None,
-        }).cloned()
-        .collect::<HashSet<String>>();
+        let burned_keys = current
+            .iter()
+            .filter_map(|x| match x {
+                LogEntry::BurnedKey(k) => Some(&k.key),
+                _ => None,
+            })
+            .cloned()
+            .collect::<HashSet<String>>();
 
         // Gather all unfinished or outdated keys
         // First the unfinished ones
         let mut unfinished_or_outdated = std::collections::HashSet::new();
         for entry in current.iter().chain(outdated.iter()) {
             match entry {
-                LogEntry::Started(k) => {unfinished_or_outdated.insert(k.key.clone());},
-                LogEntry::Finished(k) => {unfinished_or_outdated.remove(&k.key);},
+                LogEntry::Started(k) => {
+                    unfinished_or_outdated.insert(k.key.clone());
+                }
+                LogEntry::Finished(k) => {
+                    unfinished_or_outdated.remove(&k.key);
+                }
                 _ => {}
             }
         }
@@ -692,7 +625,9 @@ impl LogFileSnapshotReader {
                 LogEntry::Finished(v) => !current_keys.contains(&v.key),
                 LogEntry::Backref(v) => !current_keys.contains(&v.key),
                 LogEntry::LogMessage(v) => !current_keys.contains(&v.key),
-                LogEntry::BurnedKey(_) => { panic!("logic error; shouldn't happen"); },
+                LogEntry::BurnedKey(_) => {
+                    panic!("logic error; shouldn't happen");
+                }
             })
             .collect::<Vec<LogEntry>>();
 
