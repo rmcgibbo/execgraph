@@ -527,8 +527,6 @@ impl LogFileSnapshotReader {
         let mut header = None;
         let mut highest_current_runcount = HashMap::new();
         let mut pending_backrefs = HashMap::new();
-        let mut keys_to_burn = HashSet::new();
-        let mut keys_already_burned = HashSet::new();
 
         #[derive(Clone)]
         enum PendingBackefStatus {
@@ -568,7 +566,6 @@ impl LogFileSnapshotReader {
                         highest_current_runcount.insert(f.key.clone(), f.runcount);
                         result_current.push(item);
                     } else {
-                        keys_to_burn.insert(f.key.clone());
                         result_outdated.push(item);
                     }
                 }
@@ -577,7 +574,6 @@ impl LogFileSnapshotReader {
                         highest_current_runcount.insert(f.key.clone(), f.runcount);
                         result_current.push(item);
                     } else {
-                        keys_to_burn.insert(f.key.clone());
                         result_outdated.push(item);
                     }
                 }
@@ -601,10 +597,7 @@ impl LogFileSnapshotReader {
                     pending_backrefs.insert(b.key.clone(), PendingBackefStatus::AnyRuncount);
                     result_outdated.push(item);
                 }
-                LogEntry::BurnedKey(ref f) => {
-                    keys_already_burned.insert(f.key.clone());
-                    result_current.push(item);
-                }
+                LogEntry::BurnedKey(_) => result_current.push(item),
             }
         }
 
@@ -633,10 +626,7 @@ impl LogFileSnapshotReader {
             match item {
                 LogEntry::Header(_) => result_outdated.push(item),
                 LogEntry::Backref(_) => result_outdated.push(item),
-                LogEntry::BurnedKey(ref f) => {
-                    keys_already_burned.insert(f.key.clone());
-                    result_current.push(item)
-                }
+                LogEntry::BurnedKey(_) => result_current.push(item),
                 LogEntry::Ready(ref f) => {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
                         result_current.push(item)
@@ -648,7 +638,6 @@ impl LogFileSnapshotReader {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
                         result_current.push(item)
                     } else {
-                        keys_to_burn.insert(f.key.clone());
                         result_outdated.push(item);
                     }
                 }
@@ -656,7 +645,6 @@ impl LogFileSnapshotReader {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
                         result_current.push(item)
                     } else {
-                        keys_to_burn.insert(f.key.clone());
                         result_outdated.push(item);
                     }
                 }
@@ -670,11 +658,43 @@ impl LogFileSnapshotReader {
             }
         }
 
-        for key in keys_to_burn.difference(&keys_already_burned) {
+        //
+        // Now, find some keys that we need to burn.
+        //
+        // We need to burn a key when we have:
+        //   A key going into the outdated list that is not in the current list.
+        //
+        let mut outdated_started = HashSet::new();
+        let mut current_started = HashSet::new();
+        for item in result_outdated.iter() {
+            match item {
+                LogEntry::Started(s) => {
+                    outdated_started.insert(s.key.clone());
+                }
+                LogEntry::Finished(s) => {
+                    outdated_started.insert(s.key.clone());
+                }
+                _ => {}
+            }
+        }
+        for item in result_current.iter() {
+            match item {
+                LogEntry::Started(s) => {
+                    current_started.insert(s.key.clone());
+                }
+                LogEntry::Finished(s) => {
+                    current_started.insert(s.key.clone());
+                }
+                _ => {}
+            }
+        }
+        for key in outdated_started.difference(&current_started) {
             result_current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: key.clone() }));
         }
 
+        //
         // Finally, put on the header last so we can make sure it comes at the beginning of results_current.
+        //
         if let Some(header) = header {
             result_current.push(header);
         }

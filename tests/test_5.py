@@ -132,16 +132,16 @@ def test_7(tmp_path):
         f.write(p)
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
     current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
-    expected_header_key = [('Header', None),
-    ('BurnedKey', 'a'),
-    ('BurnedKey', 'd'),
-    ('Ready', 'b'),
-    ('Ready', 'd1'),
-    ('Started', 'b'),
-    ('Finished', 'b'),
-    ('Started', 'd1'),
-    ('Finished', 'd1'),
-    ('BurnedKey', 'd1')]
+    expected_header_key = [
+        ('Header', None),
+        ('BurnedKey', 'd'),
+        ('Ready', 'b'),
+        ('Ready', 'd1'),
+        ('Started', 'b'),
+        ('Finished', 'b'),
+        ('Started', 'd1'),
+        ('Finished', 'd1'),
+        ('BurnedKey', 'd1')]
     assert current_header_key == expected_header_key
 
 
@@ -216,3 +216,65 @@ def test_10(tmp_path):
         ('Ready', 'sleep-65t6evcnt43erx5dqr3rcwsj'),
         ('Started', 'sleep-65t6evcnt43erx5dqr3rcwsj'),
         ('Finished', 'sleep-65t6evcnt43erx5dqr3rcwsj')]
+
+
+def test_11(tmp_path):
+    p = """{"Header":{"version":5,"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":317430798},"user":"mcgibbon","hostname":"dhmlogin41.dhm.desres.deshaw.com","workflow_key":"sedna-antimony-crested-59eb6751a16f59b36cd9","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.12.13b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.12.18-wrk","pid":40908,"upstreams":[],"storage_roots":[""]}}
+{"Ready":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":338713301},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","runcount":0,"command":"sh","r":0}}
+{"Started":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":402456665},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","host":"dhmlogin41.dhm.desres.deshaw.com","pid":40924,"slurm_jobid":"","runcount":0,"r":0}}
+{"Finished":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":409440971},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","status":-15,"values":[],"runcount":0,"r":0}}
+{"Ready":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":409503271},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","runcount":1,"command":"sh","r":0}}
+{"Started":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":449468211},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","host":"dhmlogin41.dhm.desres.deshaw.com","pid":40931,"slurm_jobid":"","runcount":1,"r":0}}
+{"Finished":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":455522633},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","status":-15,"values":[],"runcount":1,"r":0}}
+{"Ready":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":455548723},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","runcount":2,"command":"sh","r":0}}
+{"Started":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":498168718},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","host":"dhmlogin41.dhm.desres.deshaw.com","pid":40934,"slurm_jobid":"","runcount":2,"r":0}}
+{"Finished":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":504083721},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","status":-15,"values":[],"runcount":2,"r":0}}
+{"Ready":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":504105153},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","runcount":3,"command":"sh","r":0}}
+{"Started":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":552726791},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","host":"dhmlogin41.dhm.desres.deshaw.com","pid":40937,"slurm_jobid":"","runcount":3,"r":0}}
+{"Finished":{"time":{"secs_since_epoch":1702927750,"nanos_since_epoch":558257154},"key":"sh-jclfxmgyok4gd6hqn3d52pdo","status":-15,"values":[],"runcount":3,"r":0}}"""
+    with open(tmp_path / "example.log", "w") as f:
+        f.write(p)
+    current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+
+    current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
+    assert current_header_key == [('Header', None),
+        ('Ready', 'sh-jclfxmgyok4gd6hqn3d52pdo'),
+        ('Started', 'sh-jclfxmgyok4gd6hqn3d52pdo'),
+        ('Finished', 'sh-jclfxmgyok4gd6hqn3d52pdo')]
+
+
+def test_12(tmp_path):
+    p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 644001000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/p56fpsphgx3lal9pqyyj0ciz4all7hwv-python3-3.10.13/bin/python3.10", "/nix/store/dw4x53g12gi9a7kjv5jk74pri3m83ngf-python3.10-pytest-7.4.3/bin/.py.test-wrapped", "tests/test_7.py", "-x"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 7079, "upstreams": [], "storage_roots": [""]}}
+{"BurnedKey": {"key": "b"}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 644371000}, "key": "d", "runcount": 0, "command": "true", "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 647322000}, "key": "d", "host": "mcgibbon-mbp", "pid": 7534, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 648000000}, "key": "b", "runcount": 0, "command": "true", "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651110000}, "key": "b", "host": "mcgibbon-mbp", "pid": 7536, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Finished": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651168000}, "key": "b", "status": 0, "values": [], "runcount": 0, "r": 0}}
+{"Header": {"version": 5, "time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 652645000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/p56fpsphgx3lal9pqyyj0ciz4all7hwv-python3-3.10.13/bin/python3.10", "/nix/store/dw4x53g12gi9a7kjv5jk74pri3m83ngf-python3.10-pytest-7.4.3/bin/.py.test-wrapped", "tests/test_7.py", "-x"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 7079, "upstreams": [], "storage_roots": [""]}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 653047000}, "key": "c", "runcount": 0, "command": "true", "r": 0}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 653063000}, "key": "b1", "runcount": 0, "command": "true", "r": 0}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 653070000}, "key": "a", "runcount": 0, "command": "true", "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 656067000}, "key": "b1", "host": "mcgibbon-mbp", "pid": 7537, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 657353000}, "key": "c", "host": "mcgibbon-mbp", "pid": 7538, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Finished": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 657382000}, "key": "c", "status": 0, "values": [], "runcount": 0, "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 658971000}, "key": "a", "host": "mcgibbon-mbp", "pid": 7539, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Finished": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 659017000}, "key": "a", "status": 0, "values": [], "runcount": 0, "r": 0}}"""
+
+    with open(tmp_path / "example.log", "w") as f:
+        f.write(p)
+    current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+    current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
+    expected_header_key = [('Header', None),
+ ('BurnedKey', 'b'),
+ ('BurnedKey', 'd'),
+ ('BurnedKey', 'b'),
+ ('Ready', 'c'),
+ ('Ready', 'b1'),
+ ('Ready', 'a'),
+ ('Started', 'b1'),
+ ('Started', 'c'),
+ ('Finished', 'c'),
+ ('Started', 'a'),
+ ('Finished', 'a')]
+    assert current_header_key == expected_header_key
