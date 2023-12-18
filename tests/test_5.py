@@ -132,8 +132,9 @@ def test_7(tmp_path):
         f.write(p)
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
     current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
-    expected_header_key = [
-        ('Header', None),
+    expected_header_key = [('Header', None),
+        ('BurnedKey', 'a'),
+        ('BurnedKey', 'd'),
         ('BurnedKey', 'd'),
         ('Ready', 'b'),
         ('Ready', 'd1'),

@@ -661,11 +661,12 @@ impl LogFileSnapshotReader {
         //
         // Now, find some keys that we need to burn.
         //
-        // We need to burn a key when we have:
-        //   A key going into the outdated list that is not in the current list.
+        // We need to burn a key when we have a key going into the outdated list that is not in the current list.
+        // But also we don't need to burn keys that are already burned.
         //
         let mut outdated_started = HashSet::new();
         let mut current_started = HashSet::new();
+        let mut already_burned = HashSet::new();
         for item in result_outdated.iter() {
             match item {
                 LogEntry::Started(s) => {
@@ -685,11 +686,16 @@ impl LogFileSnapshotReader {
                 LogEntry::Finished(s) => {
                     current_started.insert(s.key.clone());
                 }
+                LogEntry::BurnedKey(s) => {
+                    already_burned.insert(s.key.clone());
+                }
                 _ => {}
             }
         }
         for key in outdated_started.difference(&current_started) {
-            result_current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: key.clone() }));
+            if !already_burned.contains(key) {
+                result_current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: key.clone() }));
+            }
         }
 
         //
