@@ -194,6 +194,7 @@ impl<'a> ReadyTrackerServer<'a> {
                     self.logfile.write(LogEntry::new_started(
                         &cmd.key,
                         runcount,
+                        cmd.storage_root,
                         &e.host,
                         e.pid,
                         e.slurm_jobid.to_owned(),
@@ -208,6 +209,7 @@ impl<'a> ReadyTrackerServer<'a> {
                     self.logfile.write(LogEntry::new_finished(
                         &cmd.key,
                         runcount,
+                        cmd.storage_root,
                         e.status.as_i32(),
                     ))?;
                     if e.nonretryable && !e.status.is_success() {
@@ -237,6 +239,7 @@ impl<'a> ReadyTrackerServer<'a> {
             self.logfile.write(LogEntry::new_finished(
                 &cmd.key,
                 runcount,
+                cmd.storage_root,
                 e.status.as_i32(),
             ))?;
             self.logfile.write(LogEntry::new_burnedkey(&cmd.key))?;
@@ -295,6 +298,7 @@ impl<'a> ReadyTrackerServer<'a> {
                             self.logfile.write(LogEntry::new_started(
                                 &cmd.key,
                                 runcount,
+                                cmd.storage_root,
                                 &e.host,
                                 e.pid,
                                 e.slurm_jobid,
@@ -485,6 +489,7 @@ impl<'a> ReadyTrackerServer<'a> {
         self.logfile.write(LogEntry::new_finished(
             &cmd.key,
             runcount,
+            cmd.storage_root,
             e.status.as_i32(),
         ))?;
         if e.nonretryable && !e.status.is_success() {

@@ -101,8 +101,6 @@ def test_fuzz(tmp_path, seed, delete_finished_records, delete_started_records, m
         for key in unfinished:
             directory_creation_time.append((key + "." + str(started[key]), started_time[key]))
 
-
-
         current, _outdated = execgraph.load_logfile(logfile, "current,outdated")
         with open(logfile, "w") as f:
             for c in current:

@@ -66,6 +66,9 @@ pub struct StartedEntry {
 
     #[serde(default)]
     pub runcount: u32, // If the value is not present when deserializing, use the Default::default().
+
+    #[serde(default, rename = "r")]
+    pub storage_root: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -79,6 +82,9 @@ pub struct FinishedEntry {
 
     #[serde(default)]
     pub runcount: u32, // If the value is not present when deserializing, use the Default::default().
+
+    #[serde(default, rename = "r")]
+    pub storage_root: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -132,6 +138,7 @@ impl LogEntry {
     pub fn new_started(
         key: &str,
         runcount: u32,
+        storage_root: u32,
         host: &str,
         pid: u32,
         slurm_jobid: String,
@@ -139,19 +146,21 @@ impl LogEntry {
         LogEntry::Started(StartedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
+            storage_root,
             host: host.to_owned(),
-            slurm_jobid: slurm_jobid,
+            slurm_jobid,
             runcount,
             pid,
         })
     }
 
-    pub fn new_finished(key: &str, runcount: u32, status: i32) -> LogEntry {
+    pub fn new_finished(key: &str, runcount: u32, storage_root: u32, status: i32) -> LogEntry {
         LogEntry::Finished(FinishedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
             status,
             runcount,
+            storage_root,
             _deprecated_values: vec![],
         })
     }
@@ -195,6 +204,14 @@ impl LogEntry {
 
     pub fn is_backref(&self) -> bool {
         matches!(self, LogEntry::Backref(_x))
+    }
+
+    pub fn is_logmessage(&self) -> bool {
+        matches!(self, LogEntry::LogMessage(_x))
+    }
+
+    pub fn is_burnedkey(&self) -> bool {
+        matches!(self, LogEntry::BurnedKey(_x))
     }
 }
 
@@ -260,6 +277,38 @@ impl LogFile<LogFileRW> {
     }
 
     pub fn write(&mut self, e: LogEntry) -> Result<()> {
+        match e {
+            LogEntry::Ready(ref r) => {
+                self.runcounts.insert(
+                    r.key.clone(),
+                    RuncountStatus::Ready {
+                        runcount: r.runcount,
+                    },
+                );
+            }
+            LogEntry::Started(ref r) => {
+                self.runcounts.insert(
+                    r.key.clone(),
+                    RuncountStatus::Started {
+                        runcount: r.runcount,
+                    },
+                );
+            }
+            LogEntry::Finished(ref r) => {
+                self.runcounts.insert(
+                    r.key.clone(),
+                    RuncountStatus::Finished {
+                        runcount: r.runcount,
+                        storage_root: r.storage_root,
+                        success: r.status == 0,
+                    },
+                );
+            }
+            LogEntry::Header(ref h) => {
+                self.header = Some(h.clone());
+            }
+            _ => {}
+        }
         serde_json::to_writer(&mut self.f, &e)?;
         self.f.write_all(&[b'\n'])?;
         Ok(())
@@ -472,166 +521,167 @@ impl LogFileSnapshotReader {
 
     pub fn read_current_and_outdated(&mut self) -> Result<(Vec<LogEntry>, Vec<LogEntry>)> {
         let all_entries = self.read()?;
-        let count = all_entries.len();
-
         let mut result_current = Vec::new();
-        let mut rev_iter = all_entries.into_iter().rev();
-        let mut pending_backrefs = std::collections::HashSet::new();
-        let mut header = None;
+        let mut result_outdated = Vec::new();
 
-        // 1. Iterate backward adding LogEntries to result_current until we hit the first header
+        let mut header = None;
+        let mut highest_current_runcount = HashMap::new();
+        let mut pending_backrefs = HashMap::new();
+        let mut keys_to_burn = HashSet::new();
+        let mut keys_already_burned = HashSet::new();
+
+        #[derive(Clone)]
+        enum PendingBackefStatus {
+            AnyRuncount,
+            Runcount(u32),
+        }
+
+        //
+        // First, iterate backward until the first header. All the entries we hit are from the latest run of the workflow,
+        // so they're generally current.
+        // But because of automatic retries, we might have later runs of tasks (with a higher runcount) and earlier runs
+        // of the same task (with a lower runcount), so we only consider the ones with the higher runcount current.
+        // Note, we're assuming here that the ones with the higher runcount come later in the log than the ones
+        // with the earlier runcount, which is a precondition.
+        //
+        // Essentially we put the entries associated with the highest runcount of each task into results_current
+        // and most other things are outdated.
+        //
+        // However, BurnedKeys are always current.
+        // And we need to "resolve" Backref, which are entries from prior runs of the workflow that are still needed.
+        //
+
+        let mut rev_iter = all_entries.into_iter().rev();
         for item in rev_iter.by_ref() {
-            match &item {
+            match item {
                 LogEntry::Header(_) => {
                     header = Some(item);
                     break;
                 }
-                LogEntry::Backref(b) => {
-                    pending_backrefs.insert(b.key.clone());
+                LogEntry::Finished(ref f) => {
+                    if f.runcount as i64
+                        >= highest_current_runcount
+                            .get(&f.key)
+                            .map(|&x| x as i64)
+                            .unwrap_or(-1)
+                    {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
+                        result_current.push(item);
+                    } else {
+                        keys_to_burn.insert(f.key.clone());
+                        result_outdated.push(item);
+                    }
                 }
-                _ => {
-                    result_current.push(item);
+                LogEntry::Started(ref f) => {
+                    if f.runcount == *highest_current_runcount.get(&f.key).unwrap_or(&f.runcount) {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
+                        result_current.push(item);
+                    } else {
+                        keys_to_burn.insert(f.key.clone());
+                        result_outdated.push(item);
+                    }
                 }
-            };
-        }
-        let nbackrefs = pending_backrefs.len();
-
-        // 2. Keep iterating backward and adding LogEntries if they're in the pending_backrefs
-        // until we clear all of the pending backrefs
-        let mut result_outdated: Vec<LogEntry> = vec![];
-        for item in rev_iter.by_ref() {
-            match &item {
-                LogEntry::Ready(v) => {
-                    if pending_backrefs.contains(&v.key) {
-                        assert!(pending_backrefs.remove(&v.key));
+                LogEntry::Ready(ref f) => {
+                    if f.runcount == *highest_current_runcount.get(&f.key).unwrap_or(&f.runcount) {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
                         result_current.push(item);
                     } else {
                         result_outdated.push(item);
                     }
                 }
-                LogEntry::Started(v) => {
-                    if pending_backrefs.contains(&v.key) {
+                LogEntry::LogMessage(ref f) => {
+                    if f.runcount == *highest_current_runcount.get(&f.key).unwrap_or(&f.runcount) {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
                         result_current.push(item);
                     } else {
                         result_outdated.push(item);
                     }
                 }
-                LogEntry::LogMessage(v) => {
-                    if pending_backrefs.contains(&v.key) {
-                        result_current.push(item);
-                    } else {
-                        result_outdated.push(item);
-                    }
-                }
-                LogEntry::Finished(v) => {
-                    if pending_backrefs.contains(&v.key) {
-                        result_current.push(item);
-                    } else {
-                        result_outdated.push(item);
-                    }
-                }
-                LogEntry::BurnedKey(_) => {
-                    result_current.push(item);
-                }
-                _ => {
+                LogEntry::Backref(ref b) => {
+                    pending_backrefs.insert(b.key.clone(), PendingBackefStatus::AnyRuncount);
                     result_outdated.push(item);
                 }
-            }
-            if pending_backrefs.is_empty() {
-                break;
+                LogEntry::BurnedKey(ref f) => {
+                    keys_already_burned.insert(f.key.clone());
+                    result_current.push(item);
+                }
             }
         }
 
-        // 3. Keep iterating backward and put everything else into the outdated list
-        // except burned keys, which always go in the current list
+        let mut get_is_current_pending_backref = |key: String, runcount: u32| -> bool {
+            let existing_pending_backref = pending_backrefs.get(&key);
+            // * if there's an item in pending_backrefs under this key and it's an AnyRuncount, say it's current
+            //   but as a side effect, upgrade the runcount in pending_backrefs to the its runcount
+            // * if there's no entry in pending backrefs, it's not current.
+            // * if there's an entry in pending _backrefs under this key and its for the current runcount, its curret.
+            match existing_pending_backref {
+                Some(s) => match s {
+                    PendingBackefStatus::AnyRuncount => {
+                        pending_backrefs.insert(key, PendingBackefStatus::Runcount(runcount));
+                        true
+                    }
+                    PendingBackefStatus::Runcount(r) => runcount == *r,
+                },
+                None => false,
+            }
+        };
+
+        // Next, iterate backward from the prior runs of the workflow from before, resolving the pending backrefs
+        // and otherwise putting the remaining entries from prior runs of the workflow into their rightful place.
+        // (which is basically that everything is outdated except for BurnedKeys, which are always kept).
         for item in rev_iter {
-            if let LogEntry::BurnedKey(ref _x) = item {
-                result_current.push(item);
-            } else {
-                result_outdated.push(item);
+            match item {
+                LogEntry::Header(_) => result_outdated.push(item),
+                LogEntry::Backref(_) => result_outdated.push(item),
+                LogEntry::BurnedKey(ref f) => {
+                    keys_already_burned.insert(f.key.clone());
+                    result_current.push(item)
+                }
+                LogEntry::Ready(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        result_current.push(item)
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::Started(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        result_current.push(item)
+                    } else {
+                        keys_to_burn.insert(f.key.clone());
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::Finished(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        result_current.push(item)
+                    } else {
+                        keys_to_burn.insert(f.key.clone());
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::LogMessage(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        result_current.push(item)
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
             }
         }
 
-        // 4. Put the header on the front
+        for key in keys_to_burn.difference(&keys_already_burned) {
+            result_current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: key.clone() }));
+        }
+
+        // Finally, put on the header last so we can make sure it comes at the beginning of results_current.
         if let Some(header) = header {
             result_current.push(header);
         }
 
-        let mut current: Vec<LogEntry> = result_current.into_iter().rev().collect();
-        let outdated: Vec<LogEntry> = result_outdated.into_iter().rev().collect();
-        assert!(current.len() + outdated.len() + nbackrefs == count);
-
-        // Gather all current keys
-        let current_keys = current
-            .iter()
-            .filter_map(|x| match x {
-                LogEntry::Header(_) => None,
-                LogEntry::Ready(v) => Some(&v.key),
-                LogEntry::Started(v) => Some(&v.key),
-                LogEntry::Finished(v) => Some(&v.key),
-                LogEntry::Backref(v) => Some(&v.key),
-                LogEntry::LogMessage(v) => Some(&v.key),
-                LogEntry::BurnedKey(_) => None,
-            })
-            .cloned()
-            .collect::<HashSet<String>>();
-        let burned_keys = current
-            .iter()
-            .filter_map(|x| match x {
-                LogEntry::BurnedKey(k) => Some(&k.key),
-                _ => None,
-            })
-            .cloned()
-            .collect::<HashSet<String>>();
-
-        // Gather all unfinished or outdated keys
-        // First the unfinished ones
-        let mut unfinished_or_outdated = std::collections::HashSet::new();
-        for entry in current.iter().chain(outdated.iter()) {
-            match entry {
-                LogEntry::Started(k) => {
-                    unfinished_or_outdated.insert(k.key.clone());
-                }
-                LogEntry::Finished(k) => {
-                    unfinished_or_outdated.remove(&k.key);
-                }
-                _ => {}
-            }
-        }
-        // Next the outdated ones
-        for entry in outdated.iter() {
-            if let LogEntry::Finished(k) = entry {
-                unfinished_or_outdated.insert(k.key.clone());
-            }
-        }
-
-        // Burn keys associated with tasks that never finished
-        for k in unfinished_or_outdated {
-            if (!current_keys.contains(&k)) && (!burned_keys.contains(&k)) {
-                current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: k }));
-            }
-        }
-
-        // And then filter out all outdated entries that have the same keys.
-        // the main use for this method is to delete work directories related to
-        // outdated keys, so we don't want to delete these.
-        let outdated_filtered = outdated
-            .into_iter()
-            .filter(|x| match x {
-                LogEntry::Header(_v) => true,
-                // keep entries that are not in current keys.
-                LogEntry::Ready(v) => !current_keys.contains(&v.key),
-                LogEntry::Started(v) => !current_keys.contains(&v.key),
-                LogEntry::Finished(v) => !current_keys.contains(&v.key),
-                LogEntry::Backref(v) => !current_keys.contains(&v.key),
-                LogEntry::LogMessage(v) => !current_keys.contains(&v.key),
-                LogEntry::BurnedKey(_) => {
-                    panic!("logic error; shouldn't happen");
-                }
-            })
-            .collect::<Vec<LogEntry>>();
-
-        Ok((current, outdated_filtered))
+        result_current.reverse();
+        result_outdated.reverse();
+        Ok((result_current, result_outdated))
     }
 
     pub fn read(&mut self) -> Result<Vec<LogEntry>> {

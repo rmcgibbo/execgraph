@@ -37,7 +37,8 @@ def test_1(tmp_path):
     with open(tmp_path / "example.log", "w") as f:
         f.write(p)
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
-    assert sum("Ready" in x for x in outdated) == 0
+    assert sum("Ready" in x for x in outdated) == 3
+    assert sum("Ready" in x for x in current) == 1
 
 
 def test_2(tmp_path):
@@ -64,6 +65,8 @@ def test_3(tmp_path):
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
     assert len(current) == 3 and len(outdated) == 0
 
+
+def test_4(tmp_path):
     p = """{"Header":{"version":4,"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":549094000},"user":"mcgibbon","hostname":"mcgibbon-mbp","workflow_key":"28db8a181850ccb60d501f46563b","cmdline":["/nix/store/33f67f3mxd2jsnr6mx9pmi597gq26zhh-python3-3.10.11/bin/python3","-I","../result/bin/wrk","run.py"],"workdir":"/Users/mcgibbon/github/wrk/foo","pid":39297,"upstreams":[],"storage_roots":[""]}}
 {"Ready":{"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":556543000},"key":"python-jvbfqh6pdrvvzxqp3l6e55ld","runcount":0,"command":"python -c 'import time; [time.sleep(1) for _ in range(1)]'","r":0}}
 {"Started":{"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":558686000},"key":"python-jvbfqh6pdrvvzxqp3l6e55ld","host":"mcgibbon-mbp","pid":39298}}
@@ -72,10 +75,12 @@ def test_3(tmp_path):
     with open(tmp_path / "example.log", "w") as f:
         f.write(p)
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+    pprint(current)
     assert len(current) == 2 and len(outdated) == 3
     assert [list(c.keys())[0] for c in current] == ["Header", "BurnedKey"]
     assert [list(c.keys())[0] for c in outdated] == ["Header", "Ready", "Started"]
 
+def test_5(tmp_path):
     p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 161834000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/fcdizvgrhss6yw5p0hm37423i2h4g53f-python3-3.10.12/bin/python3.10", "/nix/store/nb29v9pgz9fm9ann9c878vmb32dn4q30-python3.10-pytest-7.4.0/bin/.py.test-wrapped", "tests/test_5.py", "-s"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 16485, "upstreams": [], "storage_roots": [""]}}
 {"Ready": {"time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 164385000}, "key": "a", "runcount": 0, "command": "false", "r": 0}}
 {"Ready": {"time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 164616000}, "key": "d", "runcount": 0, "command": "false", "r": 0}}
@@ -89,6 +94,7 @@ def test_3(tmp_path):
     assert [list(c.keys())[0] for c in current] == ["Header", "Ready", "Ready", "Started", "Finished", "Started", "Finished"]
     assert [list(c.keys())[0] for c in outdated] == []
 
+def test_6(tmp_path):
     p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 161834000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/fcdizvgrhss6yw5p0hm37423i2h4g53f-python3-3.10.12/bin/python3.10", "/nix/store/nb29v9pgz9fm9ann9c878vmb32dn4q30-python3.10-pytest-7.4.0/bin/.py.test-wrapped", "tests/test_5.py", "-s"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 16485, "upstreams": [], "storage_roots": [""]}}
 {"Ready": {"time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 164385000}, "key": "a", "runcount": 0, "command": "false", "r": 0}}
 {"Ready": {"time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 164616000}, "key": "d", "runcount": 0, "command": "false", "r": 0}}
@@ -104,6 +110,8 @@ def test_3(tmp_path):
     assert [list(c.keys())[0] for c in current] == ["Header", "Ready", "Ready", "Started", "Finished", "Started", "Finished", "BurnedKey"]
     assert [list(c.keys())[0] for c in outdated] == []
 
+
+def test_7(tmp_path):
     p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 161834000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/fcdizvgrhss6yw5p0hm37423i2h4g53f-python3-3.10.12/bin/python3.10", "/nix/store/nb29v9pgz9fm9ann9c878vmb32dn4q30-python3.10-pytest-7.4.0/bin/.py.test-wrapped", "tests/test_5.py", "-s"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 16485, "upstreams": [], "storage_roots": [""]}}
 {"Ready": {"time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 164385000}, "key": "a", "runcount": 0, "command": "false", "r": 0}}
 {"Ready": {"time": {"secs_since_epoch": 1699201335, "nanos_since_epoch": 164616000}, "key": "d", "runcount": 0, "command": "false", "r": 0}}
@@ -123,12 +131,21 @@ def test_3(tmp_path):
     with open(tmp_path / "example.log", "w") as f:
         f.write(p)
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
-    # print([list(c.keys())[0] for c in current])
-    # print([list(c.values())[0].get("key") for c in current])
-    assert [list(c.keys())[0] for c in current] == ['Header', 'BurnedKey', 'Ready', 'Ready', 'Started', 'Finished', 'Started', 'Finished', 'BurnedKey', 'BurnedKey']
-    assert [list(c.values())[0].get("key") for c in current] == [None, 'd', 'b', 'd1', 'b', 'b', 'd1', 'd1', 'd1', 'a']
+    current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
+    expected_header_key = [('Header', None),
+    ('BurnedKey', 'a'),
+    ('BurnedKey', 'd'),
+    ('Ready', 'b'),
+    ('Ready', 'd1'),
+    ('Started', 'b'),
+    ('Finished', 'b'),
+    ('Started', 'd1'),
+    ('Finished', 'd1'),
+    ('BurnedKey', 'd1')]
+    assert current_header_key == expected_header_key
 
 
+def test_8(tmp_path):
     p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1699209994, "nanos_since_epoch": 130920000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/fcdizvgrhss6yw5p0hm37423i2h4g53f-python3-3.10.12/bin/python3.10", "/nix/store/nb29v9pgz9fm9ann9c878vmb32dn4q30-python3.10-pytest-7.4.0/bin/.py.test-wrapped", "tests/test_5.py::test_4", "-s"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 20882, "upstreams": [], "storage_roots": [""]}}
 {"Ready": {"time": {"secs_since_epoch": 1699209994, "nanos_since_epoch": 131717000}, "key": "d", "runcount": 0, "command": "false", "r": 0}}
 {"Ready": {"time": {"secs_since_epoch": 1699209994, "nanos_since_epoch": 131759000}, "key": "c", "runcount": 0, "command": "true", "r": 0}}
@@ -159,6 +176,8 @@ def test_3(tmp_path):
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
     assert "Header" in current[0]
 
+
+def test_9(tmp_path):
     p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1699210404, "nanos_since_epoch": 862917000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/fcdizvgrhss6yw5p0hm37423i2h4g53f-python3-3.10.12/bin/python3.10", "/nix/store/nb29v9pgz9fm9ann9c878vmb32dn4q30-python3.10-pytest-7.4.0/bin/.py.test-wrapped", "tests/test_5.py::test_4", "-s"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 21157, "upstreams": [], "storage_roots": [""]}}
 {"Ready": {"time": {"secs_since_epoch": 1699210404, "nanos_since_epoch": 848545000}, "key": "c", "runcount": 0, "command": "true", "r": 0}}
 {"Started": {"time": {"secs_since_epoch": 1699210404, "nanos_since_epoch": 855781000}, "key": "c", "host": "mcgibbon-mbp", "pid": 21159, "slurm_jobib": ""}}
@@ -178,6 +197,7 @@ def test_3(tmp_path):
     assert "a" in [list(c.values())[0].get("key") for c in current]
 
 
+def test_10(tmp_path):
     p = """{"Header":{"version":5,"time":{"secs_since_epoch":1702231420,"nanos_since_epoch":241979222},"user":"mcgibbon","hostname":"dhmlogin41.dhm.desres.deshaw.com","workflow_key":"solitaire-crested-jay-b8fd9e33dd5e167af691","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","-t","5","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.12.08-prempt","pid":96567,"upstreams":[],"storage_roots":[""]}}
 {"Ready":{"time":{"secs_since_epoch":1702231420,"nanos_since_epoch":465451978},"key":"sleep-65t6evcnt43erx5dqr3rcwsj","runcount":0,"command":"sleep 1800 && echo 331","r":0}}
 {"Started":{"time":{"secs_since_epoch":1702231432,"nanos_since_epoch":918267578},"key":"sleep-65t6evcnt43erx5dqr3rcwsj","host":"dhmgena127.dhm.desres.deshaw.com","pid":79749,"slurm_jobid":"21643840_1"}}
@@ -188,5 +208,11 @@ def test_3(tmp_path):
     with open(tmp_path / "example.log", "w") as f:
         f.write(p)
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
-    assert current == [{'Header': {'version': 5, 'time': {'secs_since_epoch': 1702231420, 'nanos_since_epoch': 241979222}, 'user': 'mcgibbon', 'hostname': 'dhmlogin41.dhm.desres.deshaw.com', 'workflow_key': 'solitaire-crested-jay-b8fd9e33dd5e167af691', 'cmdline': ['/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3', '-I', '/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk', '-r', '100', '-t', '5', './run.py'], 'workdir': '/d/dhm/mcgibbon-0/2023.12.08-prempt', 'pid': 96567, 'upstreams': [], 'storage_roots': ['']}}, {'BurnedKey': {'key': 'sleep-65t6evcnt43erx5dqr3rcwsj'}}]
-    assert outdated == [{'Header': {'version': 5, 'time': {'secs_since_epoch': 1702231420, 'nanos_since_epoch': 241979222}, 'user': 'mcgibbon', 'hostname': 'dhmlogin41.dhm.desres.deshaw.com', 'workflow_key': 'solitaire-crested-jay-b8fd9e33dd5e167af691', 'cmdline': ['/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3', '-I', '/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk', '-r', '100', '-t', '5', './run.py'], 'workdir': '/d/dhm/mcgibbon-0/2023.12.08-prempt', 'pid': 96567, 'upstreams': [], 'storage_roots': ['']}}, {'Ready': {'time': {'secs_since_epoch': 1702231420, 'nanos_since_epoch': 465451978}, 'key': 'sleep-65t6evcnt43erx5dqr3rcwsj', 'runcount': 0, 'command': 'sleep 1800 && echo 331', 'r': 0}}, {'Started': {'time': {'secs_since_epoch': 1702231432, 'nanos_since_epoch': 918267578}, 'key': 'sleep-65t6evcnt43erx5dqr3rcwsj', 'host': 'dhmgena127.dhm.desres.deshaw.com', 'pid': 79749, 'slurm_jobid': '21643840_1'}}, {'Finished': {'time': {'secs_since_epoch': 1702231433, 'nanos_since_epoch': 723803746}, 'key': 'sleep-65t6evcnt43erx5dqr3rcwsj', 'status': -1, 'values': []}}]
+    current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
+    outdated_header_key = list(zip([list(c.keys())[0] for c in outdated], [list(c.values())[0].get("key") for c in outdated]))
+    assert current_header_key == [('Header', None), ('BurnedKey', 'sleep-65t6evcnt43erx5dqr3rcwsj')]
+    assert outdated_header_key == [
+        ('Header', None),
+        ('Ready', 'sleep-65t6evcnt43erx5dqr3rcwsj'),
+        ('Started', 'sleep-65t6evcnt43erx5dqr3rcwsj'),
+        ('Finished', 'sleep-65t6evcnt43erx5dqr3rcwsj')]

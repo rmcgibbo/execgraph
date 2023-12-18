@@ -529,6 +529,7 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert len(log) == 12
 
     clog = _execgraph.load_logfile(tmp_path / "foo", "current")
+    from pprint import pprint; pprint(clog)
     assert "user" in clog[0]["Header"]
     assert clog[1]["Ready"]["key"] == "foo"
     assert clog[2]["Started"]["key"] == "foo"
