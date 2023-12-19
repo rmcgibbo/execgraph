@@ -15,7 +15,7 @@ use execgraph::constants::HOLD_RATETIMITED_TIME;
 use nix::unistd::Pid;
 use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
-use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, sync::Arc, time::Duration};
+use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, sync::{Arc, atomic::AtomicBool}, time::Duration};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_command_fds::{CommandFdExt, FdMapping};
@@ -29,6 +29,7 @@ const FINAL_SLURM_ERROR_MESSAGE_STRINGS: &str = "CANCELLED|FAILED|ERROR";
 // send SIGTERM to child this long before the `duration` expires.
 const SEND_SIGTERM_BEFORE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 const ONE_YEAR: std::time::Duration = std::time::Duration::from_secs(31536000);
+static SIGUSR1_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 lazy_static::lazy_static! {
     static ref START_TIME: std::time::Instant = std::time::Instant::now();
@@ -94,6 +95,18 @@ async fn main() -> Result<(), RemoteError> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     set_current_process_as_child_subreaper();
+
+    tokio::spawn(async move {
+        if let Ok(mut stream) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
+            loop {
+                stream.recv().await;
+                SIGUSR1_RECEIVED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        } else {
+            eprintln!("Unable to install SIGUSR1 signal handler");
+            std::process::exit(1);
+        }
+    });
 
     let authorization_token = std::env::var("EXECGRAPH_AUTHORIZATION_TOKEN")
         .context("Reading EXECGRAPH_AUTHORIZATION_TOKEN")
@@ -529,6 +542,11 @@ async fn run_command(
 }
 
 fn still_accepting_tasks(opt: &CommandLineArguments) -> bool {
+    // If we received a SIGUSR1, then we're not going to accept any more tasks
+    if SIGUSR1_RECEIVED.load(std::sync::atomic::Ordering::SeqCst) {
+        return false
+    }
+
     match opt.max_time_accepting_tasks {
         None => true,
         Some(t) => (std::time::Instant::now() - *START_TIME) < t,
