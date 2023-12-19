@@ -520,7 +520,7 @@ impl LogFileSnapshotReader {
     }
 
     pub fn read_current_and_outdated(&mut self) -> Result<(Vec<LogEntry>, Vec<LogEntry>)> {
-        let all_entries = self.read()?;
+        let mut all_entries = self.read()?;
         let mut result_current = Vec::new();
         let mut result_outdated = Vec::new();
 
@@ -533,6 +533,14 @@ impl LogFileSnapshotReader {
             AnyRuncount,
             Runcount(u32),
         }
+
+        if let Some(LogEntry::Header(header)) = all_entries.get(0) {
+            if header.version == 4 {
+                interpolate_runcounts_missing_from_v4_logfile_format(&mut all_entries)?;
+            }
+        };
+
+
 
         //
         // First, iterate backward until the first header. All the entries we hit are from the latest run of the workflow,
@@ -765,4 +773,40 @@ impl From<advisory_lock::FileLockError> for LogfileError {
             advisory_lock::FileLockError::AlreadyLocked => LogfileError::AlreadyLocked,
         }
     }
+}
+
+
+fn interpolate_runcounts_missing_from_v4_logfile_format(all_entries: &mut Vec<LogEntry>) -> Result<()> {
+    let mut runcounts = HashMap::<String, u32>::new();
+    for entry in all_entries {
+        match entry {
+            LogEntry::Header(h) => assert!(h.version == 4),
+            LogEntry::Ready(r) => {
+                if let Some((key, old_runcount)) = runcounts.remove_entry(&r.key) {
+                    let new_runcount = std::cmp::max(old_runcount, r.runcount);
+                    runcounts.insert(key, new_runcount);
+                    r.runcount = new_runcount;
+                } else {
+                    runcounts.insert(r.key.clone(), r.runcount);
+                }
+            }
+            LogEntry::Started(r) => {
+                if let Some((key, old_runcount)) = runcounts.remove_entry(&r.key) {
+                    let new_runcount = std::cmp::max(old_runcount, r.runcount);
+                    runcounts.insert(key, new_runcount);
+                    r.runcount = new_runcount;
+                }
+            }
+            LogEntry::Finished(r) => {
+                if let Some((key, old_runcount)) = runcounts.remove_entry(&r.key) {
+                    let new_runcount = std::cmp::max(old_runcount, r.runcount);
+                    runcounts.insert(key, new_runcount);
+                    r.runcount = new_runcount;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
