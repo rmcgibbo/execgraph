@@ -777,31 +777,33 @@ impl From<advisory_lock::FileLockError> for LogfileError {
 
 
 fn interpolate_runcounts_missing_from_v4_logfile_format(all_entries: &mut Vec<LogEntry>) -> Result<()> {
-    let mut runcounts = HashMap::<String, u32>::new();
+    let mut runcount_and_storageroots = HashMap::<String, (u32, u32)>::new();
     for entry in all_entries {
         match entry {
             LogEntry::Header(h) => assert!(h.version == 4),
             LogEntry::Ready(r) => {
-                if let Some((key, old_runcount)) = runcounts.remove_entry(&r.key) {
+                if let Some((key, (old_runcount, storage_root))) = runcount_and_storageroots.remove_entry(&r.key) {
                     let new_runcount = std::cmp::max(old_runcount, r.runcount);
-                    runcounts.insert(key, new_runcount);
+                    runcount_and_storageroots.insert(key, (new_runcount, storage_root));
                     r.runcount = new_runcount;
                 } else {
-                    runcounts.insert(r.key.clone(), r.runcount);
+                    runcount_and_storageroots.insert(r.key.clone(), (r.runcount, r.storage_root));
                 }
             }
             LogEntry::Started(r) => {
-                if let Some((key, old_runcount)) = runcounts.remove_entry(&r.key) {
+                if let Some((key, (old_runcount,storage_root))) = runcount_and_storageroots.remove_entry(&r.key) {
                     let new_runcount = std::cmp::max(old_runcount, r.runcount);
-                    runcounts.insert(key, new_runcount);
+                    runcount_and_storageroots.insert(key, (new_runcount, storage_root));
                     r.runcount = new_runcount;
+                    r.storage_root = storage_root;
                 }
             }
             LogEntry::Finished(r) => {
-                if let Some((key, old_runcount)) = runcounts.remove_entry(&r.key) {
+                if let Some((key, (old_runcount,storage_root))) = runcount_and_storageroots.remove_entry(&r.key) {
                     let new_runcount = std::cmp::max(old_runcount, r.runcount);
-                    runcounts.insert(key, new_runcount);
+                    runcount_and_storageroots.insert(key, (new_runcount, storage_root));
                     r.runcount = new_runcount;
+                    r.storage_root = storage_root;
                 }
             }
             _ => {}
