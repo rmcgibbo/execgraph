@@ -24,9 +24,6 @@ use crate::{
     sync::{FinishedEvent, ReadyTrackerClient},
 };
 
-// This averages about 5ms, so 25 gives us some buffer without too much
-pub const TIME_TO_GET_SUBPID: std::time::Duration = std::time::Duration::from_millis(25);
-
 #[derive(Debug)]
 pub enum LocalQueueType {
     NormalLocalQueue,
@@ -50,7 +47,7 @@ pub async fn run_local_process_loop(
         cmd.call_preamble();
 
         // we're making a pipe to pass to the child process as fd3.
-        let (mut fd3_read_pipe, fd3_write_pipe) = tokio_pipe::pipe().expect("Cannot create pipe");
+        let (fd3_read_pipe, fd3_write_pipe) = tokio_pipe::pipe().expect("Cannot create pipe");
         let (fd4_read_pipe, fd4_write_pipe) = if cmd.fd_input.is_some() {
             let (read, write) = tokio_pipe::pipe().expect("Cannot create pipe");
             (Some(read), Some(write))
@@ -123,15 +120,9 @@ pub async fn run_local_process_loop(
         }
 
         // Get PID from fd3, or if it doesn't send one, just the child PID
-        let pid = if let Ok(Ok(pid)) =
-            tokio::time::timeout(TIME_TO_GET_SUBPID, fd3_read_pipe.read_u32()).await
-        {
-            pid
-        } else {
-            child
-                .id()
-                .expect("child hasn't been waited for yet, so its pid should exist")
-        };
+        let pid = child
+            .id()
+            .expect("child hasn't been waited for yet, so its pid should exist");
 
         tracker
             .send_started(subgraph_node_id, cmd, &hostname, pid, "".to_string())

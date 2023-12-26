@@ -5,7 +5,7 @@ use execgraph::{
     http_extensions::reqwest::{RequestBuilderExt, ResponseExt},
     httpinterface::*,
     localrunner::{
-        wait_with_output, ChildOutput, ChildProcessError, ExitDisposition, TIME_TO_GET_SUBPID,
+        wait_with_output, ChildOutput, ChildProcessError, ExitDisposition
     },
 };
 use gethostname::gethostname;
@@ -17,7 +17,7 @@ use notify::Watcher;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::{convert::TryInto, io::Read, os::unix::prelude::AsRawFd, sync::{Arc, atomic::AtomicBool}, time::Duration};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_command_fds::{CommandFdExt, FdMapping};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -308,7 +308,7 @@ async fn run_command(
         }
     });
 
-    let (mut read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
+    let (read_fd3, write_fd3) = tokio_pipe::pipe().expect("Unable to create pipe");
     let (fd4_read_pipe, fd4_write_pipe) = if start.fd_input.is_some() {
         let (read, write) = tokio_pipe::pipe().expect("Cannot create pipe");
         (Some(read), Some(write))
@@ -402,14 +402,9 @@ async fn run_command(
         writer.flush().await.unwrap();
     }
 
-    let pid =
-        if let Ok(Ok(pid)) = tokio::time::timeout(TIME_TO_GET_SUBPID, read_fd3.read_u32()).await {
-            pid
-        } else {
-            child
-                .id()
-                .expect("child hasn't been waited for yet, so its pid should exist")
-        };
+    let pid = child
+       .id()
+       .expect("child hasn't been waited for yet, so its pid should exist");
 
     // Tell the server that we've started the command
     tokio::select! {
