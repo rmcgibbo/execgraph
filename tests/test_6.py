@@ -39,7 +39,7 @@ def test_2(tmp_path):
 def test_3(tmp_path):
     # Check __execgraph_internal_nonretryable_error=1 on fd3 triggers a burnedkey entry in the logfile
     eg = execgraph.ExecGraph(8, logfile=tmp_path / "example.log")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo '__execgraph_internal_nonretryable_error=1'>&3; exit 1"], key="foo")
+    eg.add_task(["sh", "-c", "echo __execgraph_internal_nonretryable_error=1>&3; exit 1"], key="foo")
     eg.execute()
     del eg
     with open(tmp_path / "example.log") as r:
@@ -50,7 +50,7 @@ def test_3(tmp_path):
 def test_4(tmp_path):
     # Check that log messages end up in the log file even if no Finished event is sent, or at least that they show up well before.
     eg = execgraph.ExecGraph(8, logfile=tmp_path / "example.log")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar'>&3; sleep 1; exit 1"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'foo=bar'>&3; sleep 1; exit 1"], key="foo")
     eg.execute()
     del eg
 
@@ -69,7 +69,7 @@ def test_4(tmp_path):
 def test_5(tmp_path):
     # Check that only 1 burnedkey entry is written to the log when task has max_retries > 0 and __execgraph_internal_nonretryable_error=1
     eg = execgraph.ExecGraph(8, logfile=tmp_path / "example.log")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo __execgraph_internal_nonretryable_error=1>&3; exit 1"], key="foo", max_retries=5)
+    eg.add_task(["sh", "-c", r"echo __execgraph_internal_nonretryable_error=1>&3; exit 1"], key="foo", max_retries=5)
     eg.execute()
     del eg
 

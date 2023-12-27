@@ -810,7 +810,7 @@ def test_retries_2(tmp_path):
 
 def test_fd3_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar baz='qux''>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'foo=bar baz='qux''>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert contents[-2]["LogMessage"]["values"] == [{"foo": "bar", "baz": "qux"}]
@@ -818,29 +818,27 @@ def test_fd3_1(tmp_path):
 
 def test_fd3_2(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert [list(c.keys())[0] for c in contents] == ["Header", "Ready", "Started", "Finished"]
-    assert contents[2]["Started"]["pid"] == 255
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
 def test_fd3_3(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(
-        ["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
+        ["sh", "-c", r"dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
         key="foo"
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert [list(c.keys())[0] for c in contents] == ["Header", "Ready", "Started", "Finished"]
-    assert contents[2]["Started"]["pid"] == 255
 
 
 def test_fd3_4(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar baz='qux' foo=bar2'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'foo=bar baz='qux' foo=bar2'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert contents[-2]["LogMessage"]["values"] == [{"foo": "bar2", "baz": "qux"}]
@@ -848,7 +846,7 @@ def test_fd3_4(tmp_path):
 
 def test_fd3_5(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c c=\"'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'a=c c=\"'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert contents[-2]["LogMessage"]["values"] == [{"a": "c", "c": '"'},]
@@ -856,7 +854,7 @@ def test_fd3_5(tmp_path):
 
 def test_fd3_6(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c c='>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'a=c c='>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert contents[-2]["LogMessage"]["values"] == [{"a": "c", "c": ""}]
@@ -864,7 +862,7 @@ def test_fd3_6(tmp_path):
 
 def test_fd3_7(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c'>&3; echo foo=bar foo=foo>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'a=c'>&3; echo foo=bar foo=foo>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert (contents[-2]["LogMessage"]["values"] == [{"a": "c"}, {"foo": "foo"}] or
@@ -1189,14 +1187,6 @@ def test_slurm_cancel(tmp_path):
     )
     assert order == []
     assert nfailed == 0
-
-
-def test_surrogate_pid(tmp_path):
-    eg = _execgraph.ExecGraph(1, tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3"], key="0")
-    eg.execute()
-    lines = [json.loads(line) for line in open(tmp_path / "foo").readlines()]
-    assert lines[2]["Started"]["pid"] == 255
 
 
 def is_topological_order(graph, node_order):
