@@ -1,12 +1,13 @@
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use bufreaderwriter::seq::BufReaderWriterSeq as BufReaderWriter;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeSeq, Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     env,
     io::{BufRead, Seek, Write},
     marker::PhantomData,
     path::PathBuf,
+    sync::Arc,
     time::SystemTime,
 };
 use thiserror::Error;
@@ -37,8 +38,12 @@ pub struct HeaderEntry {
     pub workdir: String,
     pub pid: u32,
 
-    #[serde(default)]
-    pub storage_roots: Vec<PathBuf>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vec_arc_pathbuf",
+        serialize_with = "serialize_vec_arc_pathbuf"
+    )]
+    pub storage_roots: Vec<Arc<PathBuf>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,10 +109,7 @@ pub struct BurnedKeyEntry {
 }
 
 impl LogEntry {
-    pub fn new_header(
-        workflow_key: &str,
-        storage_roots: Vec<PathBuf>,
-    ) -> Result<LogEntry> {
+    pub fn new_header(workflow_key: &str, storage_roots: Vec<PathBuf>) -> Result<LogEntry> {
         Ok(LogEntry::Header(HeaderEntry {
             version: LOGFILE_VERSION,
             time: SystemTime::now(),
@@ -116,7 +118,10 @@ impl LogEntry {
             workflow_key: workflow_key.to_owned(),
             cmdline: env::args().collect(),
             workdir: env::current_dir()?.to_string_lossy().to_string(),
-            storage_roots,
+            storage_roots: storage_roots
+                .into_iter()
+                .map(|item| Arc::new(item))
+                .collect(),
             pid: std::process::id(),
         }))
     }
@@ -213,6 +218,7 @@ impl LogEntry {
 
 pub struct LogFileRO;
 pub struct LogFileRW;
+
 pub struct LogFile<T> {
     f: BufReaderWriter<std::fs::File>,
     path: std::path::PathBuf,
@@ -236,9 +242,19 @@ pub enum RuncountStatus {
     },
     Finished {
         runcount: u32,
-        storage_root: u32,
+        storage_root: Arc<PathBuf>,
         success: bool,
     },
+}
+
+fn expand_storage_roots_relative_to_maindir(root: &std::path::Path, storage_roots: &Vec<Arc<PathBuf>>) -> Vec<Arc<PathBuf>> {
+    storage_roots.iter().map(|p| {
+        if p.is_absolute() {
+            p.clone()
+        } else {
+            Arc::new(root.parent().unwrap().join((**p).clone()))
+        }
+    }).collect()
 }
 
 impl LogFile<LogFileRW> {
@@ -260,7 +276,8 @@ impl LogFile<LogFileRW> {
             .create(true)
             .write(true)
             .open(&path)?;
-        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(path.as_ref(), &mut f)?;
+
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
@@ -291,17 +308,24 @@ impl LogFile<LogFileRW> {
                 );
             }
             LogEntry::Finished(ref r) => {
+                let storage_root = self
+                    .header
+                    .as_ref()
+                    .map(|h| h.storage_roots[r.storage_root as usize].clone())
+                    .expect("Writing a Finished entry, but no Header exists");
                 self.runcounts.insert(
                     r.key.clone(),
                     RuncountStatus::Finished {
                         runcount: r.runcount,
-                        storage_root: r.storage_root,
+                        storage_root,
                         success: r.status == 0,
                     },
                 );
             }
             LogEntry::Header(ref h) => {
-                self.header = Some(h.clone());
+                let mut h = h.clone();
+                h.storage_roots = expand_storage_roots_relative_to_maindir(&self.path, &h.storage_roots);
+                self.header = Some(h);
             }
             _ => {}
         }
@@ -315,7 +339,7 @@ impl LogFile<LogFileRO> {
     #[tracing::instrument]
     fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
         let mut f = std::fs::OpenOptions::new().read(true).open(&path)?;
-        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(path.as_ref(), &mut f)?;
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
@@ -330,17 +354,17 @@ impl LogFile<LogFileRO> {
 
 impl<T> LogFile<T> {
     fn load_runcounts(
+        path: &std::path::Path,
         f: &mut std::fs::File,
     ) -> Result<(
         HashMap<String, RuncountStatus>,
         Vec<String>,
         Option<HeaderEntry>,
     )> {
-        let mut runcounts = HashMap::new();
+        let mut runcounts = HashMap::<String, RuncountStatus>::new();
         let mut header = None;
         let mut workflow_key = None;
-        let mut ready_storage_roots = HashMap::new();
-        let mut started_but_not_finished = HashSet::new();
+        let mut started_but_not_finished = HashSet::<String>::new();
         let mut burned_keys = Vec::new();
 
         let mut reader = std::io::BufReader::new(f);
@@ -358,7 +382,7 @@ impl<T> LogFile<T> {
                 e
             })?;
             match value {
-                LogEntry::Header(h) => {
+                LogEntry::Header(mut h) => {
                     match workflow_key {
                         None => workflow_key = Some(h.workflow_key.clone()),
                         Some(ref existing) => {
@@ -367,10 +391,14 @@ impl<T> LogFile<T> {
                             }
                         }
                     };
+                    if h.version != LOGFILE_VERSION {
+                        return Err(LogfileError::MismatchedVersion { current: LOGFILE_VERSION, found: h.version });
+                    }
+
+                    h.storage_roots = expand_storage_roots_relative_to_maindir(path.as_ref(), &h.storage_roots);
                     header = Some(h);
                 }
                 LogEntry::Ready(r) => {
-                    ready_storage_roots.insert(r.key.clone(), r.storage_root);
                     runcounts.insert(
                         r.key,
                         RuncountStatus::Ready {
@@ -389,7 +417,9 @@ impl<T> LogFile<T> {
                 }
                 LogEntry::Finished(f) => {
                     started_but_not_finished.remove(&f.key);
-                    let storage_root = ready_storage_roots.remove(&f.key).unwrap_or(0);
+                    let storage_root = header
+                        .as_ref().map(|h| h.storage_roots[f.storage_root as usize].clone())
+                        .expect("Writing a Finished entry, but no Header exists");
                     runcounts.insert(
                         f.key,
                         RuncountStatus::Finished {
@@ -412,31 +442,6 @@ impl<T> LogFile<T> {
 
     pub fn workflow_key(&self) -> Option<String> {
         self.header.as_ref().map(|h| h.workflow_key.clone())
-    }
-
-    pub fn storage_roots(&self) -> Vec<PathBuf> {
-        let n = self
-            .header
-            .as_ref()
-            .map(|h| h.storage_roots.len())
-            .unwrap_or(0) as u32;
-        (0..n)
-            .map(|id| self.storage_root(id))
-            .collect::<Option<Vec<_>>>()
-            .unwrap()
-    }
-
-    pub fn storage_root(&self, id: u32) -> Option<PathBuf> {
-        self.header
-            .as_ref()
-            .and_then(|h| h.storage_roots.get(id as usize))
-            .map(|p| {
-                if p.is_absolute() {
-                    p.clone()
-                } else {
-                    self.path.parent().unwrap().join(p)
-                }
-            })
     }
 
     pub fn header_version(&self) -> Option<u32> {
@@ -510,8 +515,6 @@ impl LogFileSnapshotReader {
                 interpolate_runcounts_missing_from_v4_logfile_format(&mut all_entries)?;
             }
         };
-
-
 
         //
         // First, iterate backward until the first header. All the entries we hit are from the latest run of the workflow,
@@ -733,6 +736,12 @@ pub enum LogfileError {
     #[error("Mismatched keys")]
     WorkflowKeyMismatch,
 
+    #[error("The current software uses the v{current} logfile format. Unfortunately it cannot load logfile created by prior software using the v{found} format.")]
+    MismatchedVersion {
+        current: u32,
+        found: u32,
+    },
+
     #[error("the log is locked")]
     AlreadyLocked,
 }
@@ -746,14 +755,17 @@ impl From<advisory_lock::FileLockError> for LogfileError {
     }
 }
 
-
-fn interpolate_runcounts_missing_from_v4_logfile_format(all_entries: &mut Vec<LogEntry>) -> Result<()> {
+fn interpolate_runcounts_missing_from_v4_logfile_format(
+    all_entries: &mut Vec<LogEntry>,
+) -> Result<()> {
     let mut runcount_and_storageroots = HashMap::<String, (u32, u32)>::new();
     for entry in all_entries {
         match entry {
             LogEntry::Header(h) => assert!(h.version == 4),
             LogEntry::Ready(r) => {
-                if let Some((key, (old_runcount, storage_root))) = runcount_and_storageroots.remove_entry(&r.key) {
+                if let Some((key, (old_runcount, storage_root))) =
+                    runcount_and_storageroots.remove_entry(&r.key)
+                {
                     let new_runcount = std::cmp::max(old_runcount, r.runcount);
                     runcount_and_storageroots.insert(key, (new_runcount, storage_root));
                     r.runcount = new_runcount;
@@ -762,7 +774,9 @@ fn interpolate_runcounts_missing_from_v4_logfile_format(all_entries: &mut Vec<Lo
                 }
             }
             LogEntry::Started(r) => {
-                if let Some((key, (old_runcount,storage_root))) = runcount_and_storageroots.remove_entry(&r.key) {
+                if let Some((key, (old_runcount, storage_root))) =
+                    runcount_and_storageroots.remove_entry(&r.key)
+                {
                     let new_runcount = std::cmp::max(old_runcount, r.runcount);
                     runcount_and_storageroots.insert(key, (new_runcount, storage_root));
                     r.runcount = new_runcount;
@@ -770,7 +784,9 @@ fn interpolate_runcounts_missing_from_v4_logfile_format(all_entries: &mut Vec<Lo
                 }
             }
             LogEntry::Finished(r) => {
-                if let Some((key, (old_runcount,storage_root))) = runcount_and_storageroots.remove_entry(&r.key) {
+                if let Some((key, (old_runcount, storage_root))) =
+                    runcount_and_storageroots.remove_entry(&r.key)
+                {
                     let new_runcount = std::cmp::max(old_runcount, r.runcount);
                     runcount_and_storageroots.insert(key, (new_runcount, storage_root));
                     r.runcount = new_runcount;
@@ -782,4 +798,31 @@ fn interpolate_runcounts_missing_from_v4_logfile_format(all_entries: &mut Vec<Lo
     }
 
     Ok(())
+}
+
+
+fn deserialize_vec_arc_pathbuf<'de, D>(
+    deserializer: D,
+) -> core::result::Result<Vec<Arc<PathBuf>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Vec<PathBuf> = Deserialize::deserialize(deserializer)?;
+    Ok(v.into_iter()
+        .map(|item| Arc::new(item))
+        .collect::<Vec<Arc<PathBuf>>>())
+}
+
+fn serialize_vec_arc_pathbuf<S>(
+    v: &Vec<Arc<PathBuf>>,
+    serializer: S,
+) -> core::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(v.len()))?;
+    for e in v {
+        seq.serialize_element(&**e)?;
+    }
+    seq.end()
 }

@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import os
+from pathlib import Path
 import signal
 import sys
 import time
@@ -1187,6 +1188,44 @@ def test_slurm_cancel(tmp_path):
     )
     assert order == []
     assert nfailed == 0
+
+
+def test_storageroot_1(tmp_path: Path):
+    (tmp_path / "d1").mkdir()
+    with open(tmp_path / "d1" / "first.log", "w") as f:
+        f.write("""{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":[""]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"python-y4begakspvwurs3yw5qzl27t","runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"python-y4begakspvwurs3yw5qzl27t","host":"dhmgena138.dhm.desres.deshaw.com","pid":24267,"slurm_jobid":"19811878_0", "r": 0}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"python-y4begakspvwurs3yw5qzl27t","status":0, "r": 0}}""")
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "d1" / "first.log")
+    assert os.path.normpath(eg.storageroot("python-y4begakspvwurs3yw5qzl27t")) == os.path.normpath(tmp_path / "d1")
+
+
+def test_storageroot_2(tmp_path: Path):
+    (tmp_path / "d1").mkdir()
+    with open(tmp_path / "d1" / "first.log", "w") as f:
+        f.write("""{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":["", "/foo"]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r0", "runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r0", "host":"dhm", "pid": 0, "r": 0}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r0","status":0, "r": 0}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r1","runcount":0,"command":"python","r":1}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r1", "host":"dhm", "pid": 0,  "r": 1}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r1","status":0, "r": 1}}
+{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":["", "/bar"]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r2","runcount":0,"command":"python","r":1}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r2", "host":"dhm", "pid": 0,  "r": 1}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r2","status":0, "r": 1}}
+{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":["/baz"]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r3","runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r3", "host":"dhm", "pid": 0,  "r": 0}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r3","status":0, "r": 0}}""")
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "d1" / "first.log")
+    assert os.path.normpath(eg.storageroot("r0")) == os.path.normpath(tmp_path / "d1")
+    assert os.path.normpath(eg.storageroot("r1")) == "/foo"
+    assert os.path.normpath(eg.storageroot("r2")) == "/bar"
+    assert os.path.normpath(eg.storageroot("r3")) == "/baz"
 
 
 def is_topological_order(graph, node_order):

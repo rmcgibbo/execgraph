@@ -75,15 +75,13 @@ impl PyExecGraph {
         }
 
         let mut log =
-            LogFile::<LogFileRW>::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
-
-        if log
-            .header_version()
-            .map(|v| v != logfile2::LOGFILE_VERSION)
-            .unwrap_or(false)
-        {
-            return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
-        };
+            LogFile::<LogFileRW>::new(&logfile).map_err(|e| {
+                match e {
+                    logfile2::LogfileError::MismatchedVersion { .. } => {
+                        PyRuntimeError::new_err(e.to_string())
+                    },
+                    _ => PyIOError::new_err(e.to_string())
+        }})?;
 
         let key = match log.workflow_key() {
             Some(key) => key,
@@ -148,12 +146,7 @@ impl PyExecGraph {
         }) = self.g.logfile.runcount(key)
         {
             if success {
-                return Some(
-                    self.g
-                        .logfile
-                        .storage_root(storage_root)
-                        .expect("Unable to find storage root"),
-                );
+                return Some(storage_root.to_path_buf());
             }
         }
 
