@@ -3,7 +3,7 @@ use crate::{
     fancy_cancellation_token::{CancellationState, CancellationToken},
     graphtheory::transitive_closure_dag,
     localrunner::{run_local_process_loop, LocalQueueType},
-    logfile2::{LogEntry, LogFile, LogFileRO, LogFileRW},
+    logfile2::{LogEntry, LogFile, LogFileRW},
     server::{router, State as ServerState},
     sync::new_ready_tracker,
 };
@@ -182,7 +182,6 @@ pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     key_to_nodeid: HashMap<String, NodeIndex<u32>>,
     pub(crate) logfile: LogFile<LogFileRW>,
-    pub(crate) readonly_logfiles: Vec<LogFile<LogFileRO>>,
     completed: HashSet<String>,
 }
 
@@ -190,13 +189,11 @@ impl ExecGraph {
     #[tracing::instrument(skip_all)]
     pub fn new(
         logfile: LogFile<LogFileRW>,
-        readonly_logfiles: Vec<LogFile<LogFileRO>>,
     ) -> ExecGraph {
         ExecGraph {
             deps: Graph::new(),
             key_to_nodeid: HashMap::new(),
             logfile,
-            readonly_logfiles,
             completed: HashSet::new(),
         }
     }
@@ -265,7 +262,6 @@ impl ExecGraph {
             &mut self.deps,
             &mut self.completed,
             &mut self.logfile,
-            &self.readonly_logfiles,
             target,
             rerun_failures,
         )?);
@@ -446,12 +442,11 @@ async fn spawn_and_wait_for_provisioner(
     Ok(())
 }
 
-#[tracing::instrument(skip(deps, completed, logfile, readonly_logfiles))]
+#[tracing::instrument(skip(deps, completed, logfile))]
 fn get_subgraph<'a, 'b: 'a>(
     deps: &'b mut DiGraph<Cmd, ()>,
     completed: &mut HashSet<String>,
     logfile: &mut LogFile<LogFileRW>,
-    readonly_logfiles: &[LogFile<LogFileRO>],
     target: Option<u32>,
     rerun_failures: bool,
 ) -> Result<DiGraph<&'a Cmd, ()>> {
@@ -512,10 +507,7 @@ fn get_subgraph<'a, 'b: 'a>(
                 );
                 return None; // returning none excludes it from filtered_subgraph
             }
-            let has_success = logfile.has_success(&w.key)
-                || readonly_logfiles.iter().any(|l| l.has_success(&w.key));
-
-            if has_success {
+            if logfile.has_success(&w.key) {
                 trace!(
                     "Skipping {} because it already ran successfully accord to the log file",
                     w.key
@@ -541,7 +533,6 @@ fn get_subgraph<'a, 'b: 'a>(
             .filter(|&n| {
                 let w = tc[n];
                 logfile.has_failure(&w.key)
-                    || readonly_logfiles.iter().any(|l| l.has_failure(&w.key))
             })
             .collect::<HashSet<NodeIndex>>();
 

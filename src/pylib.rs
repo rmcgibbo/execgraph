@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
-    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW},
+    logfile2::{self, LogEntry, LogFile, LogFileRW}
 };
 
 /// Parallel execution of shell commands with DAG dependencies.
@@ -51,7 +51,6 @@ impl PyExecGraph {
     #[pyo3(signature=(
         num_parallel,
         logfile,
-        readonly_logfiles = vec![],
         storage_roots = vec![PathBuf::from("")],
         failures_allowed = 1,
         newkeyfn = None,
@@ -63,7 +62,6 @@ impl PyExecGraph {
         py: Python,
         mut num_parallel: i32,
         logfile: PathBuf,
-        readonly_logfiles: Vec<PathBuf>,
         storage_roots: Vec<PathBuf>,
         failures_allowed: u32,
         newkeyfn: Option<PyObject>,
@@ -75,7 +73,6 @@ impl PyExecGraph {
 
         let mut log =
             LogFile::<LogFileRW>::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
-        let readonly_logs = load_ro_logfiles_recursive(readonly_logfiles.clone())?;
 
         if log
             .header_version()
@@ -84,14 +81,6 @@ impl PyExecGraph {
         {
             return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
         };
-        for l in readonly_logs.iter() {
-            if l.header_version()
-                .map(|v| v != logfile2::LOGFILE_VERSION)
-                .unwrap_or(false)
-            {
-                return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
-            };
-        }
 
         let key = match log.workflow_key() {
             Some(key) => key,
@@ -104,7 +93,6 @@ impl PyExecGraph {
         debug!("Writing new log header key={}", key);
         log.write(LogEntry::new_header(
             &key,
-            readonly_logfiles,
             storage_roots
                 .iter()
                 .map(|s| PathBuf::from(s.as_os_str().to_string_lossy().replace("$KEY", &key)))
@@ -112,7 +100,7 @@ impl PyExecGraph {
         )?)?;
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(log, readonly_logs),
+            g: ExecGraph::new(log),
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -125,14 +113,7 @@ impl PyExecGraph {
     }
 
     fn all_storage_roots(&self) -> Vec<PathBuf> {
-        let mut result = self.g.logfile.storage_roots();
-        result.extend(
-            self.g
-                .readonly_logfiles
-                .iter()
-                .flat_map(|l| l.storage_roots()),
-        );
-        result
+        self.g.logfile.storage_roots()
     }
 
     /// Get the number of tasks in the graph
@@ -142,7 +123,7 @@ impl PyExecGraph {
 
     /// Get the runcount that should be used for a task with this key.
     fn logfile_runcount(&self, key: &str) -> (u32, Option<PathBuf>) {
-        let from_current_logfile = match self.g.logfile.runcount(key) {
+        match self.g.logfile.runcount(key) {
             // The task is new and has never been executed before.
             // obviously this calls for a runcount of zero, and we don't
             // know the task directory yet -- caller will be able to choose.
@@ -178,41 +159,7 @@ impl PyExecGraph {
             ),
             // New directory for the next run, as above.
             Some(logfile2::RuncountStatus::Finished { runcount, .. }) => (runcount + 1, None),
-        };
-        // if the current logfile gave a cache hit, go with that.
-        if from_current_logfile.1.is_some() {
-            return from_current_logfile;
         }
-
-        // if any of the prior log files gave a cache hit, go with that
-        for l in self.g.readonly_logfiles.iter() {
-            if let Some(logfile2::RuncountStatus::Finished {
-                runcount,
-                storage_root,
-                success,
-            }) = l.runcount(key)
-            {
-                if success {
-                    return (
-                        runcount,
-                        Some(
-                            l.storage_root(storage_root)
-                                .with_context(|| {
-                                    format!(
-                                        "getting {}th entry from upstream logfile",
-                                        storage_root
-                                    )
-                                })
-                                .expect("Unable to find storage root")
-                                .join(format!("{}.{}", key, runcount)),
-                        ),
-                    );
-                }
-            }
-        }
-
-        // otherwise vall back to the cache miss from the current log file.
-        from_current_logfile
     }
 
     /// Get the workflow-level key, created by the ``newkeyfn``

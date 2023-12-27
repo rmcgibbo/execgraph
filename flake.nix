@@ -50,6 +50,7 @@
           scipy
           curl
           psutil
+          pstree
           toxiproxy
         ] ++ pkgs.lib.optionals (pkgs.stdenv.isLinux) [
           black # broken on macos                    
