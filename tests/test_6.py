@@ -152,19 +152,6 @@ def test_9(tmp_path):
         )
 
 
-def test_10(tmp_path):
-    # Check that we throw a RuntimError when trying to form from a <v5 logfile.
-    with open(tmp_path / "example.log", "w") as f:
-        f.write("""{"Header":{"version":4,"time":{"secs_since_epoch":1698019309,"nanos_since_epoch":21066000},"user":"mcgibbon","hostname":"mcgibbon-mbp","workflow_key":"c6e6c9d7fb4f8bd71e73d5bff711","cmdline":["/nix/store/33f67f3mxd2jsnr6mx9pmi597gq26zhh-python3-3.10.11/bin/python3","-I","../result/bin/wrk","./run.py"],"workdir":"/Users/mcgibbon/github/wrk/foo","pid":60473,"upstreams":[],"storage_roots":[""]}}""")
-
-    with pytest.raises(RuntimeError, match="This version of wrk uses the v5 logfile format. Cannot continue from a prior workflow using an older or newer format."):
-        eg = execgraph.ExecGraph(
-            8,
-            logfile=str(tmp_path / "foo"),
-            readonly_logfiles=[str(tmp_path / "example.log")],
-        )
-
-
 def test_11(tmp_path):
     # Check that we can still load a v4 logfile.
     with open(tmp_path / "example.log", "w") as f:

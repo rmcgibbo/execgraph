@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
-    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW},
+    logfile2::{self, LogEntry, LogFile, LogFileRW},
     sync::RetryMode,
 };
 
@@ -52,7 +52,6 @@ impl PyExecGraph {
     #[pyo3(signature=(
         num_parallel,
         logfile,
-        readonly_logfiles = vec![],
         storage_roots = vec![PathBuf::from("")],
         failures_allowed = 1,
         newkeyfn = None,
@@ -65,7 +64,6 @@ impl PyExecGraph {
         py: Python,
         mut num_parallel: i32,
         logfile: PathBuf,
-        readonly_logfiles: Vec<PathBuf>,
         storage_roots: Vec<PathBuf>,
         failures_allowed: u32,
         newkeyfn: Option<PyObject>,
@@ -78,7 +76,6 @@ impl PyExecGraph {
 
         let mut log =
             LogFile::<LogFileRW>::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
-        let readonly_logs = load_ro_logfiles_recursive(readonly_logfiles.clone())?;
 
         if log
             .header_version()
@@ -87,14 +84,6 @@ impl PyExecGraph {
         {
             return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
         };
-        for l in readonly_logs.iter() {
-            if l.header_version()
-                .map(|v| v != logfile2::LOGFILE_VERSION)
-                .unwrap_or(false)
-            {
-                return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
-            };
-        }
 
         let key = match log.workflow_key() {
             Some(key) => key,
@@ -107,7 +96,6 @@ impl PyExecGraph {
         debug!("Writing new log header key={}", key);
         log.write(LogEntry::new_header(
             &key,
-            readonly_logfiles,
             storage_roots
                 .iter()
                 .map(|s| PathBuf::from(s.as_os_str().to_string_lossy().replace("$KEY", &key)))
@@ -126,7 +114,7 @@ impl PyExecGraph {
         };
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(log, readonly_logs),
+            g: ExecGraph::new(log),
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -139,26 +127,10 @@ impl PyExecGraph {
         })
     }
 
-    fn all_storage_roots(&self) -> Vec<PathBuf> {
-        let mut result = self.g.logfile.storage_roots();
-        result.extend(
-            self.g
-                .readonly_logfiles
-                .iter()
-                .flat_map(|l| l.storage_roots()),
-        );
-        result
-    }
-
     /// Get the set of burned keys. These are keys that have started entries but no finished
     /// entries, or are explicitly marked in the log files as being burned.
-    /// This is a union over the current logfile and all upstream readonly logfiles.
     fn burned_keys(&self) -> Vec<String> {
-        let mut out = self.g.logfile.burned_keys();
-        for l in self.g.readonly_logfiles.iter() {
-            out.extend(l.burned_keys());
-        }
-        out
+        self.g.logfile.burned_keys()
     }
 
     /// Get the number of tasks in the graph
@@ -182,22 +154,6 @@ impl PyExecGraph {
                         .storage_root(storage_root)
                         .expect("Unable to find storage root"),
                 );
-            }
-        }
-
-        for l in self.g.readonly_logfiles.iter() {
-            if let Some(logfile2::RuncountStatus::Finished {
-                storage_root,
-                success,
-                ..
-            }) = l.runcount(key)
-            {
-                if success {
-                    return Some(
-                        l.storage_root(storage_root)
-                            .expect("Unable to find storage root"),
-                    );
-                }
             }
         }
 

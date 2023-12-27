@@ -38,8 +38,6 @@ pub struct HeaderEntry {
     pub pid: u32,
 
     #[serde(default)]
-    pub upstreams: Vec<PathBuf>,
-    #[serde(default)]
     pub storage_roots: Vec<PathBuf>,
 }
 
@@ -108,7 +106,6 @@ pub struct BurnedKeyEntry {
 impl LogEntry {
     pub fn new_header(
         workflow_key: &str,
-        upstreams: Vec<PathBuf>,
         storage_roots: Vec<PathBuf>,
     ) -> Result<LogEntry> {
         Ok(LogEntry::Header(HeaderEntry {
@@ -119,7 +116,6 @@ impl LogEntry {
             workflow_key: workflow_key.to_owned(),
             cmdline: env::args().collect(),
             workdir: env::current_dir()?.to_string_lossy().to_string(),
-            upstreams,
             storage_roots,
             pid: std::process::id(),
         }))
@@ -256,7 +252,7 @@ impl LogFile<LogFileRW> {
             .open(&lockf_path)?;
         lockf.try_lock(FileLockMode::Exclusive)?;
         let mut lockf = std::io::BufWriter::new(lockf);
-        serde_json::to_writer(&mut lockf, &LogEntry::new_header("", vec![], vec![])?)?;
+        serde_json::to_writer(&mut lockf, &LogEntry::new_header("", vec![])?)?;
         lockf.flush()?;
 
         let mut f = std::fs::OpenOptions::new()
@@ -312,31 +308,6 @@ impl LogFile<LogFileRW> {
         serde_json::to_writer(&mut self.f, &e)?;
         self.f.write_all(&[b'\n'])?;
         Ok(())
-    }
-}
-
-pub fn load_ro_logfiles_recursive(mut paths: Vec<PathBuf>) -> Result<Vec<LogFile<LogFileRO>>> {
-    let mut loaded = HashSet::new();
-    let mut result = vec![];
-    loop {
-        match paths.pop() {
-            Some(path) => {
-                if loaded.contains(&path) {
-                    panic!("Infinite loop");
-                }
-                let p = LogFile::<LogFileRO>::new(&path)?;
-                loaded.insert(path);
-
-                if let Some(ref h) = p.header {
-                    for pp in h.upstreams.iter() {
-                        paths.push(pp.clone());
-                    }
-                }
-
-                result.push(p);
-            }
-            None => return Ok(result),
-        }
     }
 }
 
