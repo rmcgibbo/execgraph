@@ -500,9 +500,9 @@ impl LogFileSnapshotReader {
         let mut result_current = Vec::new();
         let mut result_outdated = Vec::new();
 
-        let mut header = None;
         let mut highest_current_runcount = HashMap::new();
         let mut pending_backrefs = HashMap::new();
+        let mut burnedkeyentries = Vec::new();
 
         #[derive(Clone)]
         enum PendingBackefStatus {
@@ -535,7 +535,7 @@ impl LogFileSnapshotReader {
         for item in rev_iter.by_ref() {
             match item {
                 LogEntry::Header(_) => {
-                    header = Some(item);
+                    result_current.push(item);
                     break;
                 }
                 LogEntry::Finished(ref f) => {
@@ -579,7 +579,7 @@ impl LogFileSnapshotReader {
                     pending_backrefs.insert(b.key.clone(), PendingBackefStatus::AnyRuncount);
                     result_outdated.push(item);
                 }
-                LogEntry::BurnedKey(_) => result_current.push(item),
+                LogEntry::BurnedKey(_) => burnedkeyentries.push(item),
             }
         }
 
@@ -604,13 +604,23 @@ impl LogFileSnapshotReader {
         // Next, iterate backward from the prior runs of the workflow from before, resolving the pending backrefs
         // and otherwise putting the remaining entries from prior runs of the workflow into their rightful place.
         // (which is basically that everything is outdated except for BurnedKeys, which are always kept).
+        let mut needs_prior_header = false;
         for item in rev_iter {
             match item {
-                LogEntry::Header(_) => result_outdated.push(item),
+                LogEntry::Header(_) => {
+                    if needs_prior_header {
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
+                },
                 LogEntry::Backref(_) => result_outdated.push(item),
-                LogEntry::BurnedKey(_) => result_current.push(item),
+                LogEntry::BurnedKey(_) => {
+                    burnedkeyentries.push(item);
+                }
                 LogEntry::Ready(ref f) => {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
                         result_current.push(item)
                     } else {
                         result_outdated.push(item);
@@ -618,6 +628,7 @@ impl LogFileSnapshotReader {
                 }
                 LogEntry::Started(ref f) => {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
                         result_current.push(item)
                     } else {
                         result_outdated.push(item);
@@ -625,6 +636,7 @@ impl LogFileSnapshotReader {
                 }
                 LogEntry::Finished(ref f) => {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
                         result_current.push(item)
                     } else {
                         result_outdated.push(item);
@@ -632,6 +644,7 @@ impl LogFileSnapshotReader {
                 }
                 LogEntry::LogMessage(ref f) => {
                     if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
                         result_current.push(item)
                     } else {
                         result_outdated.push(item);
@@ -668,27 +681,32 @@ impl LogFileSnapshotReader {
                 LogEntry::Finished(s) => {
                     current_started.insert(s.key.clone());
                 }
-                LogEntry::BurnedKey(s) => {
-                    already_burned.insert(s.key.clone());
+                LogEntry::BurnedKey(_) => {
+                    panic!("These are not supposed to be in this list at this point in the algorithm.");
                 }
                 _ => {}
             }
         }
+
+        for item in burnedkeyentries.iter() {
+            if let LogEntry::BurnedKey(item) = item {
+                already_burned.insert(item.key.clone());
+            } else {
+                panic!("These are all supposed to be of this type, so what is this?");
+            }
+        }
+
+        result_current.reverse();
+        result_outdated.reverse();
+
+        result_current.extend(burnedkeyentries);
+
         for key in outdated_started.difference(&current_started) {
             if !already_burned.contains(key) {
                 result_current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: key.clone() }));
             }
         }
 
-        //
-        // Finally, put on the header last so we can make sure it comes at the beginning of results_current.
-        //
-        if let Some(header) = header {
-            result_current.push(header);
-        }
-
-        result_current.reverse();
-        result_outdated.reverse();
         Ok((result_current, result_outdated))
     }
 

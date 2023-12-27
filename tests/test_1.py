@@ -535,13 +535,14 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert clog[1]["Ready"]["key"] == "foo"
     assert clog[2]["Started"]["key"] == "foo"
     assert clog[3]["Finished"]["key"] == "foo"
-    assert clog[4]["Ready"]["key"] == "bar"
-    assert clog[5]["Started"]["key"] == "bar"
-    assert clog[6]["Finished"]["key"] == "bar"
-    assert clog[7]["Ready"]["key"] == "baz"
-    assert clog[8]["Started"]["key"] == "baz"
-    assert clog[9]["Finished"]["key"] == "baz"
-    assert len(clog) == 10
+    assert "user" in clog[4]["Header"]
+    assert clog[5]["Ready"]["key"] == "bar"
+    assert clog[6]["Started"]["key"] == "bar"
+    assert clog[7]["Finished"]["key"] == "bar"
+    assert clog[8]["Ready"]["key"] == "baz"
+    assert clog[9]["Started"]["key"] == "baz"
+    assert clog[10]["Finished"]["key"] == "baz"
+    assert len(clog) == 11
 
 
 def test_stdout(tmp_path):

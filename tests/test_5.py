@@ -70,7 +70,7 @@ def test_4(tmp_path):
     p = """{"Header":{"version":4,"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":549094000},"user":"mcgibbon","hostname":"mcgibbon-mbp","workflow_key":"28db8a181850ccb60d501f46563b","cmdline":["/nix/store/33f67f3mxd2jsnr6mx9pmi597gq26zhh-python3-3.10.11/bin/python3","-I","../result/bin/wrk","run.py"],"workdir":"/Users/mcgibbon/github/wrk/foo","pid":39297,"upstreams":[],"storage_roots":[""]}}
 {"Ready":{"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":556543000},"key":"python-jvbfqh6pdrvvzxqp3l6e55ld","runcount":0,"command":"python -c 'import time; [time.sleep(1) for _ in range(1)]'","r":0}}
 {"Started":{"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":558686000},"key":"python-jvbfqh6pdrvvzxqp3l6e55ld","host":"mcgibbon-mbp","pid":39298}}
-{"Header":{"version":4,"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":549094000},"user":"mcgibbon","hostname":"mcgibbon-mbp","workflow_key":"28db8a181850ccb60d501f46563b","cmdline":["/nix/store/33f67f3mxd2jsnr6mx9pmi597gq26zhh-python3-3.10.11/bin/python3","-I","../result/bin/wrk","run.py"],"workdir":"/Users/mcgibbon/github/wrk/foo","pid":39297,"upstreams":[],"storage_roots":[""]}}
+{"Header":{"version":4,"time":{"secs_since_epoch":1699032099,"nanos_since_epoch":549094000},"user":"mcgibbon","hostname":"mcgibbon-mbp","workflow_key":"28db8a181850ccb60d501f46563b","cmdline":["/nix/store/33f67f3mxd2jsnr6mx9pmi597gq26zhh-python3-3.10.11/bin/python3","-I","../result/bin/wrk","run.py"],"workdir":"/Users/mcgibbon/github/wrk/foo","pid":39298,"upstreams":[],"storage_roots":[""]}}
 """
     with open(tmp_path / "example.log", "w") as f:
         f.write(p)
@@ -133,15 +133,15 @@ def test_7(tmp_path):
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
     current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
     expected_header_key = [('Header', None),
-        ('BurnedKey', 'a'),
-        ('BurnedKey', 'd'),
         ('Ready', 'b'),
         ('Ready', 'd1'),
         ('Started', 'b'),
         ('Finished', 'b'),
         ('Started', 'd1'),
         ('Finished', 'd1'),
-        ('BurnedKey', 'd1')]
+        ('BurnedKey', 'd1'),
+        ('BurnedKey', 'd'),
+        ('BurnedKey', 'a')]
     assert current_header_key == expected_header_key
 
 
@@ -266,8 +266,6 @@ def test_12(tmp_path):
     current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
     current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
     expected_header_key = [('Header', None),
- ('BurnedKey', 'd'),
- ('BurnedKey', 'b'),
  ('Ready', 'c'),
  ('Ready', 'b1'),
  ('Ready', 'a'),
@@ -275,5 +273,45 @@ def test_12(tmp_path):
  ('Started', 'c'),
  ('Finished', 'c'),
  ('Started', 'a'),
- ('Finished', 'a')]
+ ('Finished', 'a'),
+ ('BurnedKey', 'b'),
+ ('BurnedKey', 'd'),]
+    assert current_header_key == expected_header_key
+
+
+def test_13(tmp_path):
+    p = """{"Header": {"version": 5, "time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 644001000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/p56fpsphgx3lal9pqyyj0ciz4all7hwv-python3-3.10.13/bin/python3.10", "/nix/store/dw4x53g12gi9a7kjv5jk74pri3m83ngf-python3.10-pytest-7.4.3/bin/.py.test-wrapped", "tests/test_7.py", "-x"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 7079, "upstreams": [], "storage_roots": [""]}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 648000000}, "key": "a", "runcount": 0, "command": "true", "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651110000}, "key": "a", "host": "mcgibbon-mbp", "pid": 7536, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Finished": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651168000}, "key": "a", "status": 0, "values": [], "runcount": 0, "r": 0}}
+{"Header": {"version": 5, "time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 644001000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/p56fpsphgx3lal9pqyyj0ciz4all7hwv-python3-3.10.13/bin/python3.10", "/nix/store/dw4x53g12gi9a7kjv5jk74pri3m83ngf-python3.10-pytest-7.4.3/bin/.py.test-wrapped", "tests/test_7.py", "-x"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 7078, "upstreams": [], "storage_roots": [""]}}
+{"Backref":{"key":"a"}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 648000000}, "key": "b", "runcount": 0, "command": "true", "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651110000}, "key": "b", "host": "mcgibbon-mbp", "pid": 7536, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Finished": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651168000}, "key": "b", "status": 0, "values": [], "runcount": 0, "r": 0}}
+{"Header": {"version": 5, "time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 644001000}, "user": "mcgibbon", "hostname": "mcgibbon-mbp", "workflow_key": "default-key-value", "cmdline": ["/nix/store/p56fpsphgx3lal9pqyyj0ciz4all7hwv-python3-3.10.13/bin/python3.10", "/nix/store/dw4x53g12gi9a7kjv5jk74pri3m83ngf-python3.10-pytest-7.4.3/bin/.py.test-wrapped", "tests/test_7.py", "-x"], "workdir": "/Users/mcgibbon/github/execgraph", "pid": 7079, "upstreams": [], "storage_roots": [""]}}
+{"Backref":{"key":"a"}}
+{"Backref":{"key":"b"}}
+{"Ready": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 648000000}, "key": "c", "runcount": 0, "command": "true", "r": 0}}
+{"Started": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651110000}, "key": "c", "host": "mcgibbon-mbp", "pid": 7536, "slurm_jobid": "", "runcount": 0, "r": 0}}
+{"Finished": {"time": {"secs_since_epoch": 1702932590, "nanos_since_epoch": 651168000}, "key": "c", "status": 0, "values": [], "runcount": 0, "r": 0}}
+"""
+
+    with open(tmp_path / "example.log", "w") as f:
+        f.write(p)
+    current, _outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+    current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
+    pprint(current_header_key)
+    expected_header_key = [('Header', None),
+ ('Ready', 'a'),
+ ('Started', 'a'),
+ ('Finished', 'a'),
+ ('Header', None),
+ ('Ready', 'b'),
+ ('Started', 'b'),
+ ('Finished', 'b'),
+ ('Header', None),
+ ('Ready', 'c'),
+ ('Started', 'c'),
+ ('Finished', 'c')]
     assert current_header_key == expected_header_key
