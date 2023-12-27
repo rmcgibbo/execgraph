@@ -577,7 +577,7 @@ impl LogFileSnapshotReader {
                 }
                 LogEntry::Backref(ref b) => {
                     pending_backrefs.insert(b.key.clone(), PendingBackefStatus::AnyRuncount);
-                    result_outdated.push(item);
+                    result_current.push(item);
                 }
                 LogEntry::BurnedKey(_) => burnedkeyentries.push(item),
             }

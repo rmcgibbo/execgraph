@@ -299,9 +299,12 @@ def test_13(tmp_path):
 
     with open(tmp_path / "example.log", "w") as f:
         f.write(p)
-    current, _outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+    current, outdated = execgraph.load_logfile(tmp_path / "example.log", "current,outdated")
+    outdated_keys = {i.get("Finished", {}).get("key", None) for i in outdated} - {None}
+    assert outdated_keys == set()
+
     current_header_key = list(zip([list(c.keys())[0] for c in current], [list(c.values())[0].get("key") for c in current]))
-    pprint(current_header_key)
+    # pprint(current_header_key)
     expected_header_key = [('Header', None),
  ('Ready', 'a'),
  ('Started', 'a'),
@@ -311,7 +314,18 @@ def test_13(tmp_path):
  ('Started', 'b'),
  ('Finished', 'b'),
  ('Header', None),
+ ('Backref', 'a'),
+ ('Backref', 'b'),
  ('Ready', 'c'),
  ('Started', 'c'),
  ('Finished', 'c')]
     assert current_header_key == expected_header_key
+
+    # Make sure that if we re-read the current keys, they're all stil current.
+    with open(tmp_path / "current.log", "w") as f:
+        for item in current:
+            json.dump(item, f)
+            f.write("\n")
+    current, outdated = execgraph.load_logfile(tmp_path / "current.log", "current,outdated")
+    new_outdated_keys = {i.get("Finished", {}).get("key", None) for i in outdated}  - {None}
+    assert new_outdated_keys == set()

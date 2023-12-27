@@ -529,20 +529,33 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert log[11]["Finished"]["key"] == "baz"
     assert len(log) == 12
 
-    clog = _execgraph.load_logfile(tmp_path / "foo", "current")
-    from pprint import pprint; pprint(clog)
+    clog, outdated1 = _execgraph.load_logfile(tmp_path / "foo", "current,outdated")
+    # from pprint import pprint; pprint(clog)
     assert "user" in clog[0]["Header"]
     assert clog[1]["Ready"]["key"] == "foo"
     assert clog[2]["Started"]["key"] == "foo"
     assert clog[3]["Finished"]["key"] == "foo"
     assert "user" in clog[4]["Header"]
-    assert clog[5]["Ready"]["key"] == "bar"
-    assert clog[6]["Started"]["key"] == "bar"
-    assert clog[7]["Finished"]["key"] == "bar"
-    assert clog[8]["Ready"]["key"] == "baz"
-    assert clog[9]["Started"]["key"] == "baz"
-    assert clog[10]["Finished"]["key"] == "baz"
-    assert len(clog) == 11
+    assert clog[5]["Backref"]["key"] == "foo"
+    assert clog[6]["Ready"]["key"] == "bar"
+    assert clog[7]["Started"]["key"] == "bar"
+    assert clog[8]["Finished"]["key"] == "bar"
+    assert clog[9]["Ready"]["key"] == "baz"
+    assert clog[10]["Started"]["key"] == "baz"
+    assert clog[11]["Finished"]["key"] == "baz"
+    assert len(clog) == 12
+    assert len(outdated1) == 0
+
+    # Make sure that if we re-read the current keys, they're all stil current.
+    with open(tmp_path / "current.log", "w") as f:
+        for item in clog:
+            json.dump(item, f)
+            f.write("\n")
+    clog2, outdated2 = _execgraph.load_logfile(tmp_path / "current.log", "current,outdated")
+    assert len(outdated2) == 0
+
+
+
 
 
 def test_stdout(tmp_path):
