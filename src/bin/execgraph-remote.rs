@@ -103,7 +103,7 @@ async fn main() -> Result<(), RemoteError> {
                 SIGUSR1_RECEIVED.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         } else {
-            eprintln!("Unable to install SIGUSR1 signal handler");
+            tracing::error!("Unable to install SIGUSR1 signal handler");
             std::process::exit(1);
         }
     });

@@ -1,3 +1,4 @@
+pub(crate) use crate::rawlog;
 use crate::{
     async_flag::{AsyncCounter, AsyncFlag},
     constants::{FAIL_COMMAND_PREFIX, FIZZLED_TIME_CUTOFF},
@@ -6,7 +7,7 @@ use crate::{
     localrunner::ExitDisposition,
     logfile2::{self, LogFileRW},
     time::gcra::RateLimiter,
-    time::ratecounter::RateCounter,
+    time::ratecounter::RateCounter, logging,
 };
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
@@ -18,7 +19,6 @@ use petgraph::prelude::*;
 use std::{
     collections::HashMap,
     convert::{TryFrom, TryInto},
-    io::Write,
     sync::{
         atomic::{AtomicBool, Ordering::SeqCst},
         Arc,
@@ -73,7 +73,6 @@ pub struct ReadyTrackerServer<'a> {
     pub n_failed: u32,
     n_fizzled: u32,
 
-    stdout: grep_cli::StandardStream,
     g: Arc<Graph<&'a Cmd, (), Directed>>,
     logfile: &'a mut LogFile<LogFileRW>,
     ready: Option<[async_priority_channel::Sender<TaskItem, u32>; NUM_RUNNER_TYPES]>,
@@ -149,7 +148,6 @@ pub fn new_ready_tracker<'a>(
         ReadyTrackerServer {
             finished_order: vec![],
             g,
-            stdout: grep_cli::stdout(termcolor::ColorChoice::AlwaysAnsi),
             ready: Some(ready_s.try_into().unwrap()),
             completed: finished_r,
             n_failed: 0,
@@ -284,7 +282,7 @@ impl<'a> ReadyTrackerServer<'a> {
                     // too many syscalls for workflows that are generating thousands of events per second
                     // and wanting to see the log for ones that are generating one event per hour.
                     self.logfile.flush()?;
-                    self.stdout.flush()?
+                    logging::flush_logging()?;
                 },
                 event = self.completed.recv() => {
                     if event.is_err() {
@@ -403,9 +401,8 @@ impl<'a> ReadyTrackerServer<'a> {
 
         if is_success {
             self.n_success += 1;
-            writeln!(
-                self.stdout,
-                "[{}/{}] {}",
+            rawlog!(
+                "[{}/{}] {}\n",
                 self.n_success + self.n_failed + self.count_offset,
                 total + self.count_offset,
                 cmd.display()
@@ -423,23 +420,23 @@ impl<'a> ReadyTrackerServer<'a> {
             }
 
             if self.shutdown_state != ShutdownState::SoftShutdown {
-                eprintln!(
-                    "\x1b[1;31m{}:\x1b[0m {}{}.{}: {}",
+                rawlog!(
+                    "\x1b[1;31m{}:\x1b[0m {}{}.{}: {}\n",
                     e.status.fail_description(fizzled, will_retry),
                     FAIL_COMMAND_PREFIX,
                     cmd.key,
                     cmd.runcount_base + self.n_attempts.get(&e.id).unwrap_or(&0),
                     cmd.display()
-                );
+                )?;
             }
         }
 
         if self.shutdown_state != ShutdownState::SoftShutdown {
             if !e.stdout.is_empty() {
-                write!(self.stdout, "{}", e.stdout)?;
+                rawlog!("{}", e.stdout)?;
             }
             if !e.stderr.is_empty() {
-                eprintln!("{}", e.stderr);
+                rawlog!("{}", e.stderr)?;
             }
         }
 

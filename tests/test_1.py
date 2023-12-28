@@ -503,15 +503,18 @@ def test_copy_reused_keys_logfile(tmp_path):
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.execute()
     del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n"
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.add_task(["sh", "-c", "echo 2"], key="bar")
     eg.execute()
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n[1/1] sh -c echo 2\n2\n"
 
     eg.add_task(["sh", "-c", "echo 3"], key="baz")
     eg.execute()
     del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n[1/1] sh -c echo 2\n2\n[3/3] sh -c echo 3\n3\n"
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
 
@@ -555,7 +558,12 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert len(outdated2) == 0
 
 
-
+def test_log_1(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 1"], key="foo")
+    eg.execute()
+    del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n"
 
 
 def test_stdout(tmp_path):

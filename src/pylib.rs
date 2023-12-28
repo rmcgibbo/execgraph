@@ -13,6 +13,7 @@ use tracing::{debug, warn};
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
     logfile2::{self, LogEntry, LogFile, LogFileRW},
+    logging,
     sync::RetryMode,
 };
 
@@ -74,14 +75,16 @@ impl PyExecGraph {
             num_parallel = std::thread::available_parallelism()?.get().try_into()?;
         }
 
-        let mut log =
-            LogFile::<LogFileRW>::new(&logfile).map_err(|e| {
-                match e {
-                    logfile2::LogfileError::MismatchedVersion { .. } => {
-                        PyRuntimeError::new_err(e.to_string())
-                    },
-                    _ => PyIOError::new_err(e.to_string())
-        }})?;
+        let mut log = LogFile::<LogFileRW>::new(&logfile).map_err(|e| match e {
+            logfile2::LogfileError::MismatchedVersion { .. } => {
+                PyRuntimeError::new_err(e.to_string())
+            }
+            _ => PyIOError::new_err(e.to_string()),
+        })?;
+
+        let stdout_mirror_to_file = logfile.parent().unwrap().join("log.txt");
+        logging::init_logging(Some(&stdout_mirror_to_file))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let key = match log.workflow_key() {
             Some(key) => key,
@@ -112,7 +115,7 @@ impl PyExecGraph {
         };
 
         Ok(PyExecGraph {
-            g: ExecGraph::new(log),
+            g: ExecGraph::new(log).map_err(|e| PyIOError::new_err(e.to_string()))?,
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -348,7 +351,7 @@ impl PyExecGraph {
             info: remote_provisioner_info,
         });
 
-        py.allow_threads(move || {
+        let result = py.allow_threads(move || {
             let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
                 self.g
@@ -364,7 +367,10 @@ impl PyExecGraph {
                     .await
             })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
+        });
+
+        logging::flush_logging().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        result
     }
 }
 
@@ -423,33 +429,8 @@ pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
     unsafe {
         time::util::local_offset::set_soundness(time::util::local_offset::Soundness::Unsound);
     } // YOLO
-    tracing_subscriber::fmt()
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
 
-    // // Log to file
-    // let file_appender = RollingFileAppender::new(
-    //     Rotation::NEVER,
-    //     crate::constants::FAIL_COMMAND_PREFIX,
-    //     "execgraph.log",
-    // );
-    // let (non_blocking_appender, guard) = tracing_appender::non_blocking(file_appender);
-    // std::mem::forget(guard); // LEAK ME
-    // let file_layer = tracing_subscriber::fmt::layer()
-    //     .with_writer(non_blocking_appender)
-    //     .with_filter(
-    //         tracing_subscriber::EnvFilter::try_from_env(tracing_subscriber::EnvFilter::DEFAULT_ENV)
-    //             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-    //     );
-    // // Log to console
-    // let fmt_layer =
-    //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::ERROR);
-    // tracing_subscriber::registry()
-    //     .with(fmt_layer)
-    //     .with(file_layer)
-    //     .init();
-
+    logging::init_logging(None).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     m.add_class::<PyExecGraph>()?;
     m.add_function(wrap_pyfunction!(test_make_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(load_logfile, m)?)?;

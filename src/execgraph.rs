@@ -191,15 +191,13 @@ pub struct ExecGraph {
 
 impl ExecGraph {
     #[tracing::instrument(skip_all)]
-    pub fn new(
-        logfile: LogFile<LogFileRW>,
-    ) -> ExecGraph {
-        ExecGraph {
+    pub fn new(logfile: LogFile<LogFileRW>) -> Result<ExecGraph> {
+        Ok(ExecGraph {
             deps: Graph::new(),
             key_to_nodeid: HashMap::new(),
             logfile,
             completed: HashSet::new(),
-        }
+        })
     }
 
     pub fn ntasks(&self) -> usize {

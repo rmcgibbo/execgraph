@@ -369,6 +369,7 @@ impl<T> LogFile<T> {
 
         let mut reader = std::io::BufReader::new(f);
         let mut line = String::new();
+        let mut iline = 0;
         loop {
             line.clear();
             let nbytes = reader.read_line(&mut line)?;
@@ -378,9 +379,10 @@ impl<T> LogFile<T> {
             let len = line.trim_end_matches(&['\r', '\n'][..]).len();
             line.truncate(len);
             let value: LogEntry = serde_json::from_str(&line).map_err(|e| {
-                eprintln!("Error parsing line={}", line);
+                tracing::error!("Unable to parse {}th line. Got {}", iline, line);
                 e
             })?;
+            iline += 1;
             match value {
                 LogEntry::Header(mut h) => {
                     match workflow_key {
