@@ -1260,6 +1260,16 @@ def test_storageroot_2(tmp_path: Path):
     assert os.path.normpath(eg.storageroot("r3")) == "/baz"
 
 
+def test_doublebang_1(tmp_path):
+    eg = _execgraph.ExecGraph(1, tmp_path / "foo")
+    id0 = eg.add_task(["true"], key="a")
+    id1 = eg.add_task(["true"], key="b")
+    assert id0 == 0 and id1 == 1
+    eg.execute()
+    eg.add_task(["true"], key="c", dependencies=[id0, id1])
+    eg.execute()
+
+
 def is_topological_order(graph, node_order):
     """
     From Ben Cooper

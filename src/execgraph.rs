@@ -230,7 +230,7 @@ impl ExecGraph {
         for dep in dependencies.iter().map(|&i| NodeIndex::from(i)) {
             if dep == new_node || self.deps.node_weight(dep).is_none() {
                 self.deps.remove_node(new_node);
-                return Err(anyhow!("Invalid dependency index"));
+                return Err(anyhow!("Invalid dependency index. dep={:?} new_node={:?}", dep, new_node));
             }
             self.deps.add_edge(dep, new_node, ());
         }
@@ -410,9 +410,6 @@ impl ExecGraph {
         }
         debug!("nfailed={}, ncompleted={}", n_failed, completed.len());
         self.logfile.flush()?;
-
-        self.key_to_nodeid.clear();
-        self.deps.clear();
 
         Ok((n_failed, completed))
     }
