@@ -12,7 +12,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, AsyncBufReadExt},
     process::Command,
 };
 use tokio_command_fds::{CommandFdExt, FdMapping};
@@ -169,16 +169,17 @@ pub async fn run_local_process_loop(
 pub async fn wait_with_output(
     mut child: tokio::process::Child,
     fd: PipeRead,
-    on_fd3: async_channel::Sender<Vec<u8>>,
+    on_fd3: async_channel::Sender<String>,
 ) -> Result<ChildOutput, ChildProcessError> {
     async fn read_fd3(
         pipe: &mut Option<impl AsyncRead + std::marker::Unpin>,
-        on_fd3: async_channel::Sender<Vec<u8>>,
+        on_fd3: async_channel::Sender<String>,
     ) -> std::io::Result<()> {
         if let Some(pipe) = pipe {
+            let mut bufpipe = tokio::io::BufReader::new(pipe);
             loop {
-                let mut buf = Vec::new();
-                let nread = pipe.read_buf(&mut buf).await?;
+                let mut buf = String::new();
+                let nread = bufpipe.read_line(&mut buf).await?;
                 if nread == 0 {
                     break;
                 } else if let Err(e) = on_fd3.send(buf).await {
@@ -297,16 +298,14 @@ impl ChildOutput {
 
 async fn forward_messages(
     node_index: NodeIndex,
-    fd3_channel_read: async_channel::Receiver<Vec<u8>>,
+    fd3_channel_read: async_channel::Receiver<String>,
     tracker: Arc<ReadyTrackerClient>,
 ) -> anyhow::Result<bool> {
     let mut execgraph_internal_nonretryable_error = false;
     loop {
         match fd3_channel_read.recv().await {
             Ok(value) => {
-                if std::str::from_utf8(&value)
-                    .is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n")
-                {
+                if value == "__execgraph_internal_nonretryable_error=1\n" {
                     execgraph_internal_nonretryable_error = true;
                 } else {
                     tracker.send_setvalue(node_index, value).await

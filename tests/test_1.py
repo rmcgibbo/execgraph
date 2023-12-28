@@ -892,6 +892,16 @@ def test_fd3_7(tmp_path):
             contents[-2]["LogMessage"]["values"] == [{"foo": "foo"}])
 
 
+def test_fd3_8(tmp_path):
+    # long string. line buffering
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo foo=abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789 >&3"], key="foo")
+    eg.execute()
+    del eg
+    contents = [x for x in _execgraph.load_logfile(tmp_path / "foo", "all") if "LogMessage" in x][0]["LogMessage"]["values"][0]["foo"]
+    assert contents == "abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789"
+
+
 def test_dup(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     assert eg.add_task(["sh", "-c", "echo 1"], key="foo") == 0

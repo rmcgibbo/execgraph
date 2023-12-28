@@ -101,7 +101,7 @@ pub struct BegunRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MsgRequest {
     pub transaction_id: u32,
-    pub value: Vec<u8>,
+    pub value: String,
 }
 
 #[derive(Serialize, Deserialize)]

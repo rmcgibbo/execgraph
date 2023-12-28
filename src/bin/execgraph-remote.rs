@@ -860,7 +860,7 @@ fn current_child_processes() -> Vec<i32> {
 }
 
 async fn forward_messages(
-    fd3_channel_read: async_channel::Receiver<Vec<u8>>,
+    fd3_channel_read: async_channel::Receiver<String>,
     client: Arc<reqwest::Client>,
     msg_route: reqwest::Url,
     transaction_id: u32,
@@ -872,9 +872,7 @@ async fn forward_messages(
         // that means the process must have exited or something, so we just return
         let value = match fd3_channel_read.recv().await {
             Ok(v) => {
-                if std::str::from_utf8(&v)
-                    .is_ok_and(|x| x == "__execgraph_internal_nonretryable_error=1\n")
-                {
+                if v == "__execgraph_internal_nonretryable_error=1\n" {
                     execgraph_internal_nonretryable_error = true;
                     return Ok(execgraph_internal_nonretryable_error);
                 } else {

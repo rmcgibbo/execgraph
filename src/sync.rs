@@ -657,7 +657,7 @@ impl ReadyTrackerClient {
     /// When a task sends something to file descriptor 3 ("fd3") it gets sets here.
     /// This is used to return numeric values outside of the typical return code, and also
     /// for out of band control messages.
-    pub async fn send_setvalue(&self, v: NodeIndex, value: Vec<u8>) {
+    pub async fn send_setvalue(&self, v: NodeIndex, value: String) {
         fn parse_line(line: &str) -> Result<HashMap<String, String>, shell_words::ParseError> {
             shell_words::split(line).map(|fields| {
                 fields
@@ -670,13 +670,10 @@ impl ReadyTrackerClient {
             })
         }
 
-        let values = std::str::from_utf8(&value)
-            .map(|s| {
-                s.lines()
-                    .filter_map(|line| parse_line(line).ok())
-                    .collect::<ValueMaps>()
-            })
-            .unwrap_or_default()
+        let values = value
+            .lines()
+            .filter_map(|line| parse_line(line).ok())
+            .collect::<ValueMaps>()
             .into_iter()
             .filter(|x| x.len() > 0)
             .collect::<ValueMaps>();
