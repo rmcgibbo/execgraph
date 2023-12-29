@@ -78,12 +78,13 @@ impl Capsule {
 
     fn call(
         &self,
-        success: bool,
-        runcount: u32,
-        disposition: Option<ExitDisposition>,
+        success: bool, // did the task succeed or fail?
+        runcount: u32, // what runcount was the task on?
+        disposition: Option<ExitDisposition>, // if the task failed, did it fail with a clean exit or did it complete due to a signal or from being lost
+        ntasks: u64, // how many total tasks are in the task graph?
     ) -> Result<i32> {
         use pyo3::AsPyPointer;
-        const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule-v2\0";
+        const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule-v3\0";
         let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
         let success_u32: u32 = if success { 1 } else { 0 };
         let signaled_or_lost: u32 = disposition
@@ -100,9 +101,9 @@ impl Capsule {
                 assert!(!ptr.is_null()); // guarenteed by https://docs.python.org/3/c-api/capsule.html#c.PyCapsule_IsValid
                 let f = std::mem::transmute::<
                     *mut std::ffi::c_void,
-                    fn(*const std::ffi::c_void, u32, u32, u32) -> i32,
+                    fn(*const std::ffi::c_void, u32, u32, u32, u64) -> i32,
                 >(ptr);
-                Ok(f(ctx, success_u32, runcount, signaled_or_lost))
+                Ok(f(ctx, success_u32, runcount, signaled_or_lost, ntasks))
             } else {
                 Err(anyhow!("Not a capsule!"))
             }
@@ -150,7 +151,7 @@ impl Cmd {
     pub fn call_preamble(&self) {
         match &self.preamble {
             Some(preamble) => {
-                match preamble.call(false, 0, None) {
+                match preamble.call(false, 0, None, 0) {
                     Ok(i) if i != 0 => {
                         panic!("Preamble failed with error code {}", i);
                     }
@@ -164,10 +165,10 @@ impl Cmd {
         };
     }
 
-    pub fn call_postamble(&self, success: bool, runcount: u32, disposition: ExitDisposition) {
+    pub fn call_postamble(&self, success: bool, runcount: u32, disposition: ExitDisposition, ntasks: u64) {
         match &self.postamble {
             Some(postamble) => {
-                match postamble.call(success, runcount, Some(disposition)) {
+                match postamble.call(success, runcount, Some(disposition), ntasks) {
                     Ok(i) if i != 0 => {
                         panic!("Postamble failed with error code {}", i);
                     }

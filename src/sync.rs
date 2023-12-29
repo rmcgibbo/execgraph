@@ -383,6 +383,7 @@ impl<'a> ReadyTrackerServer<'a> {
             is_success,
             cmd.runcount_base + *self.n_attempts.get(&e.id).unwrap_or(&0),
             e.disposition,
+            self.g.node_count() as u64,
         );
 
         // elapsed is none if the task never started, which happens if we're being
