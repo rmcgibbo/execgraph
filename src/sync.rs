@@ -346,16 +346,25 @@ impl<'a> ReadyTrackerServer<'a> {
                 _ = self.soft_shutdown_trigger.wait() => {
                     debug!("Background serve received soft_shutdown_trigger");
                     self.ready = None;
+                    for mut item in self.queuestate.iter_mut() {
+                        item.num_ready = 0;
+                    }
                     self.shutdown_state = ShutdownState::SoftShutdown;
                     self.soft_shutdown_trigger.unset();
                 },
                 _ = token.hard_cancelled() => {
                     debug!("background_serve breaking on token cancellation");
+                    for mut item in self.queuestate.iter_mut() {
+                        item.num_ready = 0;
+                    }
                     self.ready = None;
                     break;
                 }
                 _ = ctrl_c.recv() => {
                     debug!("background_serve breaking on ctrl-c");
+                    for mut item in self.queuestate.iter_mut() {
+                        item.num_ready = 0;
+                    }
                     self.ready = None;
                     break;
                 }
