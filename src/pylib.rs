@@ -416,14 +416,14 @@ impl From<logfile2::LogfileError> for PyErr {
     }
 }
 
-extern "C" fn test_callback(_ctx: *const std::ffi::c_void) -> i32 {
-    println!("Hello from test_callback");
+extern "C" fn test_callback(_ctx: *const std::ffi::c_void, foo: i32, bar: i32, ntasks: u32) -> i32 {
+    println!("Hello from test_callback foo={} bar={} ntasks={}", foo, bar, ntasks);
     0
 }
 
 #[pyfunction]
 fn test_make_capsule(py: Python) -> PyResult<PyObject> {
-    const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
+    const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule-v3\0";
     let name: *const std::os::raw::c_char = CAPSULE_NAME.as_ptr() as *const i8;
     let obj = unsafe {
         let cb = test_callback as *const () as *mut std::ffi::c_void;

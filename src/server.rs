@@ -143,7 +143,6 @@ impl<'a> State<'a> {
             for cstate in expired {
                 self.tracker
                     .send_finished(
-                        &cstate.cmd,
                         FinishedEvent::new_disconnected(
                             cstate.node_id,
                             cstate.disconnect_error_message,
@@ -477,7 +476,6 @@ async fn end_handler(
     state
         .tracker
         .send_finished(
-            &cstate.cmd,
             FinishedEvent {
                 id: cstate.node_id,
                 status: ExitStatus::Code(request.status),
