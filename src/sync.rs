@@ -26,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 macro_rules! u32checked_add {
     ($a:expr,$b:expr) => {{
