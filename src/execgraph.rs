@@ -398,8 +398,8 @@ impl ExecGraph {
 
         let n_failed = servicer.n_failed;
 
-        // // get indices of the tasks we executed, mapped back from the subgraph node ids
-        // // to the node ids in the deps graph
+        // get indices of the tasks we executed, mapped back from the subgraph node ids
+        // to the node ids in the deps graph
         let completed: Vec<String> = servicer
             .finished_order
             .iter()
@@ -492,61 +492,93 @@ fn get_subgraph<'a, 'b: 'a>(
         None => deps.filter_map(|_n, w| Some(w), |_e, _w| Some(())),
     };
 
-    let mut reused_old_keys = HashSet::new();
+    let mut backrefs_to_write = HashSet::new();
+    let mut failed_within_this_execgraph = HashSet::new();
+    let mut failed_in_prior_execgraph = HashSet::new();
 
     // Now let's remove all edges from the dependency graph if the source has already finished
     // or if we've already exeuted the task in a previous call to execute
     let mut filtered_subgraph = subgraph.filter_map(
         |_n, &w| {
-            if completed.contains(&w.key) {
-                // if we already ran this command within this process, don't record it
-                // in reused_old_keys. that's only for stuff that was run in a previous
-                // session
-                trace!(
-                    "Skipping {} because it was already run successfully within this session",
-                    w.key
-                );
-                return None; // returning none excludes it from filtered_subgraph
-            }
             if logfile.has_success(&w.key) {
-                trace!(
-                    "Skipping {} because it already ran successfully accord to the log file",
-                    w.key
-                );
-                reused_old_keys.insert(w.key.clone());
-                return None;
+                if completed.contains(&w.key) {
+                    // If we already ran this command within this process, don't record it
+                    // in `backrefs_to_write` (which becomes Backref entries in the log). We only create
+                    // backref entries for jobs that were reused from a prior ExecGraph() objection
+                    // generally in a separate invocation of the program. Merely calling execute() twice
+                    // on the same ExecGraph doesn't create Backref entries.
+                    trace!(
+                        "Skipping {:?} because it was already run successfully within this session",
+                        w.key
+                    );
+                    return None; // returning none excludes it from filtered_subgraph
+                } else {
+                    trace!(
+                        "Skipping {:?} because it already ran successfully accord to the log file",
+                        w.key
+                    );
+                    backrefs_to_write.insert(w.key.clone());
+                    return None;
+                }
             }
 
-            trace!("Retaining {} because it has not been run before", w.key);
+            if logfile.has_failure(&w.key) {
+                if completed.contains(&w.key) {
+                    failed_within_this_execgraph.insert(w.key.clone());
+                } else {
+                    failed_in_prior_execgraph.insert(w.key.clone());
+                }
+            }
+
+            trace!("Retaining {:?} because it has not been run before", w.key);
             Some(w)
         },
         |_e, &w| Some(w),
     );
 
-    // If we are skipping failures, we need to further filter the graph down
-    // to not include the failures or any downstream tasks, and add the failures
-    // that were important to `reused_old_keys`.
-    if !rerun_failures {
+    // There are two types of "previously failed" in the filtered subgraph at this point
+    // and we need to handle them differently.
+    //
+    // 1) One category are tasks that failed in a previous call to `execute()` on this
+    //    instance of ExecGraph. These are called `failed_within_this_execgraph`.
+    // 2) The other category are tasks that failed in some previous instance of ExecGraph
+    //    but not in this instance. These are called `failed_in_prior_execgraph`.
+
+    //
+    // In all cases, we need to remove tasks that fall into the first category from the graph.
+    // (Two subsequent calles to execute() on the same graph object cannot trigger a failed
+    // task to be retried!)
+    // The argument `rerun_failures` controls whether the second category of tasks are rerun.
+    //
+
+    let failed_tasks_to_be_removed_from_graph = {
+        // always remove tasks that failed within this run (category 1 above)
+        let mut failed_tasks_to_be_removed_from_graph = failed_within_this_execgraph;
+        if rerun_failures == false {
+            // if we're in `rerun_failures=false` mode, then also remove any that failed in prior runs
+            failed_tasks_to_be_removed_from_graph.extend(failed_in_prior_execgraph.clone().into_iter());
+
+            // And we need to write backref entries for these because they are important we loaded
+            // from the logfile for a prior ExecGraph instance that was integral to the current execution.
+            backrefs_to_write.extend(failed_in_prior_execgraph.into_iter());
+        }
+        failed_tasks_to_be_removed_from_graph
+    };
+
+    if failed_tasks_to_be_removed_from_graph.len() > 0 {
         trace!("Recomputing transitive closure of filtered subgraph");
         let tc = transitive_closure_dag(&filtered_subgraph)?;
-        let failures = tc
-            .node_indices()
-            .filter(|&n| {
-                let w = tc[n];
-                logfile.has_failure(&w.key)
-            })
-            .collect::<HashSet<NodeIndex>>();
+        trace!("Found N={} commands that previously failed: {:?}", failed_tasks_to_be_removed_from_graph.len(), failed_tasks_to_be_removed_from_graph);
+        let size_before_filter = filtered_subgraph.node_count();
 
-        trace!("Found N={} commands that previously failed", failures.len());
         filtered_subgraph = filtered_subgraph.filter_map(
             |n, &w| {
-                if failures.contains(&n) {
+                if failed_tasks_to_be_removed_from_graph.contains(&w.key) {
                     trace!("Skipping {} because it previously failed", w.key);
-                    reused_old_keys.insert(w.key.clone());
                     return None;
                 }
                 for e in tc.edges_directed(n, Direction::Incoming) {
-                    if failures.contains(&e.source()) {
+                    if failed_tasks_to_be_removed_from_graph.contains(&filtered_subgraph[e.source()].key) {
                         trace!(
                             "Skipping {} because it's downstream of a task that previously failed.",
                             w.key
@@ -559,11 +591,15 @@ fn get_subgraph<'a, 'b: 'a>(
             },
             |_e, _w| Some(()),
         );
+
+        let size_after_filter = filtered_subgraph.node_count();
+        trace!("Reduced size of graph from {} to {}", size_before_filter, size_after_filter);
+        assert!(size_after_filter < size_before_filter);
     }
 
     // See test_copy_reused_keys_logfile.
-    for key in reused_old_keys {
-        trace!("Writing backref for key={}", key);
+    for key in backrefs_to_write {
+        trace!("Writing Backref for key={}", key);
         logfile.write(LogEntry::new_backref(&key))?;
         completed.insert(key);
     }

@@ -200,8 +200,8 @@ def test_order(num_parallel, tmp_path):
     assert b == ["foo"]
 
 
-def test_not_execute_twice(num_parallel, tmp_path):
-    eg = _execgraph.ExecGraph(num_parallel, tmp_path / "foo")
+def test_not_execute_twice_1(tmp_path):
+    eg = _execgraph.ExecGraph(1, tmp_path / "foo")
 
     eg.add_task(["true"], key="task0")
     eg.add_task(["false"], key="task1", dependencies=[0])
@@ -210,6 +210,32 @@ def test_not_execute_twice(num_parallel, tmp_path):
     assert nfailed1 == 1 and order1 == ["task0", "task1"]
     nfailed2, order2 = eg.execute()
     assert nfailed2 == 0 and order2 == []
+
+
+def test_not_execute_twice_2(tmp_path):
+    eg = _execgraph.ExecGraph(1, tmp_path / "foo")
+
+    # Add two tasks with a linear dependency.
+    # The first task fails, so the second one should never be executed
+    id0 = eg.add_task(["false"], key="a")
+    eg.add_task(["false"], key="b", dependencies=[id0])
+
+    # Confirm that when executing, only 1 task runs (and it fails)
+    nfailed1, _ = eg.execute()
+    assert nfailed1 == 1
+
+    # Call execute a second time. Nothing should run (and so
+    # nothing should fail).
+    nfailed2, _ = eg.execute()
+    assert nfailed2 == 0
+    del eg
+
+    logfile = [json.loads(x) for x in open(tmp_path / "foo").readlines()]
+    assert len(logfile) == 4
+    assert "Header" in logfile[0]
+    assert "Ready" in logfile[1]
+    assert "Started" in logfile[2]
+    assert "Finished" in logfile[3]
 
 
 def test_simple_remote(num_parallel, tmp_path):
