@@ -344,7 +344,7 @@ impl<'a> ReadyTrackerServer<'a> {
                     debug!("backgroundserve inflight={:#?}", self.inflight);
                 },
                 _ = self.soft_shutdown_trigger.wait() => {
-                    info!("Background serve received soft_shutdown_trigger");
+                    debug!("Background serve received soft_shutdown_trigger");
                     self.ready = None;
                     self.shutdown_state = ShutdownState::SoftShutdown;
                     self.soft_shutdown_trigger.unset();
