@@ -14,4 +14,5 @@ mod async_flag;
 mod fancy_cancellation_token;
 mod graphtheory;
 mod server;
+mod simpleringbuffer;
 mod time;

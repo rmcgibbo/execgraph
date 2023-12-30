@@ -69,6 +69,9 @@ pub struct StatusReply {
     // Total number of tasks in the task graph
     pub num_total_tasks: u32,
 
+    // Average runtime, in seconds, of tasks that have recently finished
+    pub average_recent_task_runtime: f32,
+
     /// Current rate limit on task creation (tasks/s)
     pub ratelimit: u32,
     /// Arbitrary information passed in from the Python wrapper that can be accessed at the

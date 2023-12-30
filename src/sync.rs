@@ -8,6 +8,7 @@ use crate::{
     logfile2::{self, LogFileRW},
     time::gcra::RateLimiter,
     time::ratecounter::RateCounter, logging,
+    simpleringbuffer::{RingbufferForDurationAverages, RingbufferForDurationAveragesReadonlyView}
 };
 use anyhow::{Context, Result};
 use bitvec::array::BitArray;
@@ -84,11 +85,11 @@ pub struct ReadyTrackerServer<'a> {
     soft_shutdown_trigger: AsyncFlag,
     n_attempts: HashMap<NodeIndex, u32>,
     retry_mode: RetryMode,
-
     // total number of tasks that are in the graph are still waiting to be eligible to run (i.e. have not
     // moved to the ready queue or started executing or finished executing). This is only used
     // for reporting purposes, not for the internal tracking.
     n_unready_tasks_approximate_for_eta_purposes_only: Arc<AtomicU32>,
+    recently_inflight_elapsed_time: RingbufferForDurationAverages,
 }
 
 pub struct ReadyTrackerClient {
@@ -101,6 +102,7 @@ pub struct ReadyTrackerClient {
     ratelimiter_launch: RateLimiter, // throttles he rate at which tasks are launched
     ratecounter_launch: RateCounter, // tracks the rate at which tasks are launching
     soft_shutdown_trigger: AsyncFlag,
+    recently_inflight_elapsed_time: RingbufferForDurationAveragesReadonlyView
 }
 
 struct TaskStatus {
@@ -148,6 +150,9 @@ pub fn new_ready_tracker<'a>(
     let ready_or_inflight_increased_event = AsyncCounter::new();
     let soft_shutdown_trigger = AsyncFlag::new();
 
+    // For statistics purposes, track the runtime of the 100 most recent tasks.
+    const NUMBER_OF_RECENT_TASK_RUNTIMES_TO_AVERAGE: usize = 100;
+
     let server = ReadyTrackerServer {
         finished_order: vec![],
         g,
@@ -169,6 +174,7 @@ pub fn new_ready_tracker<'a>(
         soft_shutdown_trigger: soft_shutdown_trigger.clone(),
         n_attempts: HashMap::new(),
         retry_mode,
+        recently_inflight_elapsed_time: RingbufferForDurationAverages::new(NUMBER_OF_RECENT_TASK_RUNTIMES_TO_AVERAGE),
     };
     let client = Arc::new(ReadyTrackerClient {
         r: ready_r.try_into().unwrap(),
@@ -180,6 +186,7 @@ pub fn new_ready_tracker<'a>(
         ratelimiter_launch: RateLimiter::new(ratelimit_per_second.into()),
         ratecounter_launch: RateCounter::new(DEFAULT_RATE_COUNTER_TIMESCALE),
         soft_shutdown_trigger,
+        recently_inflight_elapsed_time: server.recently_inflight_elapsed_time.view()
     });
     (server, client)
 }
@@ -414,6 +421,13 @@ impl<'a> ReadyTrackerServer<'a> {
         // called during the drain() shutdown phase on tasks that never began.
         let now = Instant::now();
         let elapsed = self.inflight.get(&e.id).map(|&started| now - started);
+
+        // Keep track of the runtime of the 100 most recent successful tasks
+        if let Some(elapsed) = elapsed {
+            if is_success {
+	            self.recently_inflight_elapsed_time.push(elapsed);
+            }
+        }
 
         {
             self.n_ready_or_inflight = self.n_ready_or_inflight.saturating_sub(1);
@@ -654,6 +668,12 @@ impl ReadyTrackerClient {
     /// Get total number of tasks in the task graph
     pub fn get_num_total_tasks(&self) -> u32 {
         self.n_total_tasks
+    }
+
+    /// Get the average time taken by the 100 most recently completed
+    /// tasks.
+    pub fn get_average_recent_task_runtime(&self) -> std::time::Duration {
+        self.recently_inflight_elapsed_time.mean()
     }
 
     /// Initiate a soft shutdown. A soft shutdown is when we stop dispatching
