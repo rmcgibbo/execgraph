@@ -20,20 +20,13 @@ use std::{
     collections::HashMap,
     convert::{TryFrom, TryInto},
     sync::{
-        atomic::{AtomicBool, Ordering::SeqCst},
+        atomic::{AtomicBool, Ordering::SeqCst, AtomicU32},
         Arc,
     },
     time::{Duration, Instant},
 };
 use thiserror::Error;
 use tracing::{debug, error};
-
-macro_rules! u32checked_add {
-    ($a:expr,$b:expr) => {{
-        $a.checked_add(u32::try_from($b).expect("arithmetic overflow"))
-            .expect("arithmetic overflow")
-    }};
-}
 
 // Each task has a vec of features that it requires,
 // which are abstract to us but are like ["gpu", "remote", "..."]
@@ -78,8 +71,10 @@ pub struct ReadyTrackerServer<'a> {
     ready: Option<[async_priority_channel::Sender<TaskItem, u32>; NUM_RUNNER_TYPES]>,
     completed: async_channel::Receiver<Event>,
     n_success: u32,
-    n_pending: u32,
-    pending_increased_event: AsyncCounter,
+    // number of tasks that are either in the ready queues, waiting for a runner to pluck them,
+    // or inflight.
+    n_ready_or_inflight: u32,
+    ready_or_inflight_increased_event: AsyncCounter,
     count_offset: u32,
     fizzles_allowed: u32,
     queuestate: Arc<DashMap<u64, Snapshot>>,
@@ -89,15 +84,22 @@ pub struct ReadyTrackerServer<'a> {
     soft_shutdown_trigger: AsyncFlag,
     n_attempts: HashMap<NodeIndex, u32>,
     retry_mode: RetryMode,
+
+    // total number of tasks that are in the graph are still waiting to be eligible to run (i.e. have not
+    // moved to the ready queue or started executing or finished executing). This is only used
+    // for reporting purposes, not for the internal tracking.
+    n_unready_tasks_approximate_for_eta_purposes_only: Arc<AtomicU32>,
 }
 
 pub struct ReadyTrackerClient {
     queuestate: Arc<DashMap<u64, Snapshot>>,
-    pending_increased_event: AsyncCounter,
+    ready_or_inflight_increased_event: AsyncCounter,
     s: async_channel::Sender<Event>,
     r: [async_priority_channel::Receiver<TaskItem, u32>; NUM_RUNNER_TYPES],
-    ratelimiter: RateLimiter,
-    ratecounter: RateCounter,
+    n_unready_tasks: ReadOnlyAtomicU32,
+    n_total_tasks: u32,
+    ratelimiter_launch: RateLimiter, // throttles he rate at which tasks are launched
+    ratecounter_launch: RateCounter, // tracks the rate at which tasks are launching
     soft_shutdown_trigger: AsyncFlag,
 }
 
@@ -105,6 +107,7 @@ struct TaskStatus {
     n_unmet_deps: usize,
     poisoned: bool,
 }
+
 
 pub fn new_ready_tracker<'a>(
     g: Arc<DiGraph<&'a Cmd, ()>>,
@@ -141,41 +144,44 @@ pub fn new_ready_tracker<'a>(
         })
         .collect();
 
-    let pending_increased_event = AsyncCounter::new();
+    let n_total_tasks = statuses.len().try_into().expect("arithmetic overflow");
+    let ready_or_inflight_increased_event = AsyncCounter::new();
     let soft_shutdown_trigger = AsyncFlag::new();
 
-    (
-        ReadyTrackerServer {
-            finished_order: vec![],
-            g,
-            ready: Some(ready_s.try_into().unwrap()),
-            completed: finished_r,
-            n_failed: 0,
-            n_fizzled: 0,
-            n_success: 0,
-            n_pending: 0,
-            pending_increased_event: pending_increased_event.clone(),
-            count_offset,
-            fizzles_allowed,
-            queuestate: queuestate.clone(),
-            inflight: HashMap::new(),
-            logfile,
-            statuses,
-            shutdown_state: ShutdownState::Normal,
-            soft_shutdown_trigger: soft_shutdown_trigger.clone(),
-            n_attempts: HashMap::new(),
-            retry_mode,
-        },
-        Arc::new(ReadyTrackerClient {
-            r: ready_r.try_into().unwrap(),
-            s: finished_s,
-            queuestate,
-            pending_increased_event,
-            ratelimiter: RateLimiter::new(ratelimit_per_second.into()),
-            ratecounter: RateCounter::new(DEFAULT_RATE_COUNTER_TIMESCALE),
-            soft_shutdown_trigger,
-        }),
-    )
+    let server = ReadyTrackerServer {
+        finished_order: vec![],
+        g,
+        ready: Some(ready_s.try_into().unwrap()),
+        completed: finished_r,
+        n_failed: 0,
+        n_fizzled: 0,
+        n_success: 0,
+        n_ready_or_inflight: 0,
+        n_unready_tasks_approximate_for_eta_purposes_only: Arc::new(AtomicU32::new(0)),
+        ready_or_inflight_increased_event: ready_or_inflight_increased_event.clone(),
+        count_offset,
+        fizzles_allowed,
+        queuestate: queuestate.clone(),
+        inflight: HashMap::new(),
+        logfile,
+        statuses,
+        shutdown_state: ShutdownState::Normal,
+        soft_shutdown_trigger: soft_shutdown_trigger.clone(),
+        n_attempts: HashMap::new(),
+        retry_mode,
+    };
+    let client = Arc::new(ReadyTrackerClient {
+        r: ready_r.try_into().unwrap(),
+        s: finished_s,
+        queuestate,
+        ready_or_inflight_increased_event,
+        n_total_tasks,
+        n_unready_tasks: ReadOnlyAtomicU32::new(&server.n_unready_tasks_approximate_for_eta_purposes_only),
+        ratelimiter_launch: RateLimiter::new(ratelimit_per_second.into()),
+        ratecounter_launch: RateCounter::new(DEFAULT_RATE_COUNTER_TIMESCALE),
+        soft_shutdown_trigger,
+    });
+    (server, client)
 }
 
 impl<'a> ReadyTrackerServer<'a> {
@@ -255,6 +261,8 @@ impl<'a> ReadyTrackerServer<'a> {
 
     #[tracing::instrument(skip_all)]
     pub async fn background_serve(&mut self, token: CancellationToken) -> Result<()> {
+        self.n_unready_tasks_approximate_for_eta_purposes_only.store(self.statuses.len().try_into().expect("Overflow"), SeqCst);
+
         // trigger all of the tasks that have zero unmet dependencies
         self.add_to_ready_queue(
             self.statuses
@@ -267,9 +275,9 @@ impl<'a> ReadyTrackerServer<'a> {
         let mut ctrl_c = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
         let mut flush_ticker = tokio::time::interval(std::time::Duration::from_millis(100));
 
-        // every time we put a task into the ready queue, we increment n_pending.
-        // every time a task completes, we decrement n_pending.
-        // when n_pending goes to zero, then the whole process is finished.
+        // every time we put a task into the ready queue, we increment n_ready_or_inflight.
+        // every time a task completes, we decrement n_ready_or_inflight.
+        // when n_ready_or_inflight goes to zero, then the whole process is finished.
         // note that we don't actuall track the number currently inside the ready queue
         // or inside other stages of processing, because there are going to be
         // accounting bugs that way.
@@ -314,22 +322,23 @@ impl<'a> ReadyTrackerServer<'a> {
                             self.inflight.remove(&e.id);
 
                             if self.n_fizzled >= self.fizzles_allowed {
-                                debug!("background serve triggering soft shutdown because n_bootfailed={} >= fizzles_allowed={}. note n_pending={}",
-                                self.n_fizzled, self.fizzles_allowed, self.n_pending);
+                                debug!(
+                                    "background serve triggering soft shutdown because n_bootfailed={} >= fizzles_allowed={}. note n_ready_or_inflight={}",
+                                    self.n_fizzled, self.fizzles_allowed, self.n_ready_or_inflight);
                                 // cancel any tasks that have been going for less than FIZZLED_TIME_CUTOFF
                                 token.cancel(CancellationState::CancelledAfterTime(Instant::now() - FIZZLED_TIME_CUTOFF));
                                 self.ready = None;
                                 self.shutdown_state = ShutdownState::SoftShutdown;
                             }
 
-                            if self.n_pending == 0 || (self.shutdown_state == ShutdownState::SoftShutdown && self.inflight.is_empty()) {
-                                // drop the send side of the channel. this will cause the receive side
-                                // to start returning errors, which is exactly what we want and will
-                                // break the run_local_process_loop runners at the point where they're
+                            if self.n_ready_or_inflight == 0 || (self.shutdown_state == ShutdownState::SoftShutdown && self.inflight.is_empty()) {
+                                // Drop the send side of the `self.ready` channel. This will cause the receive side
+                                // to start returning errors when localrunner.rs and server.rs call recv(), which is exactl
+                                // what we want and will break the run_local_process_loop runners at the point where they're
                                 // waiting to get a task from the ready task receiver
                                 self.ready = None;
-                                debug!("background_serve breaking on n_failed={} fizzles_allowed={} n_pending={}",
-                                    self.n_failed, self.fizzles_allowed, self.n_pending);
+                                debug!("background_serve breaking on n_failed={} fizzles_allowed={} n_ready_or_inflight={}",
+                                    self.n_failed, self.fizzles_allowed, self.n_ready_or_inflight);
                                 break;
                             }
                         },
@@ -346,6 +355,9 @@ impl<'a> ReadyTrackerServer<'a> {
                 _ = self.soft_shutdown_trigger.wait() => {
                     debug!("Background serve received soft_shutdown_trigger");
                     self.ready = None;
+                    // Setting num_ready = 0 in the queuestate object (which is a shared hashmap that's accessed from multiple threads)
+                    // ensures that the http status/ endpoint used by provisioners will know that there are no more jobs left
+                    // and will not submit any more slurm runners.
                     for mut item in self.queuestate.iter_mut() {
                         item.num_ready = 0;
                     }
@@ -354,21 +366,24 @@ impl<'a> ReadyTrackerServer<'a> {
                 },
                 _ = token.hard_cancelled() => {
                     debug!("background_serve breaking on token cancellation");
-                    for mut item in self.queuestate.iter_mut() {
-                        item.num_ready = 0;
-                    }
                     self.ready = None;
                     break;
                 }
                 _ = ctrl_c.recv() => {
                     debug!("background_serve breaking on ctrl-c");
-                    for mut item in self.queuestate.iter_mut() {
-                        item.num_ready = 0;
-                    }
                     self.ready = None;
                     break;
                 }
             };
+        }
+
+        if self.ready.is_none() {
+            // Setting num_ready = 0 in the queuestate object (which is a shared hashmap that's accessed from multiple threads)
+            // ensures that the http status/ endpoint used by provisioners will know that there are no more jobs left.
+            // This is probably known anyways, but just to be sure.
+            for mut item in self.queuestate.iter_mut() {
+                item.num_ready = 0;
+            }
         }
 
         Ok(())
@@ -401,7 +416,7 @@ impl<'a> ReadyTrackerServer<'a> {
         let elapsed = self.inflight.get(&e.id).map(|&started| now - started);
 
         {
-            self.n_pending = self.n_pending.saturating_sub(1);
+            self.n_ready_or_inflight = self.n_ready_or_inflight.saturating_sub(1);
             let mut v = self
                 .queuestate
                 .get_mut(&cmd.affinity.data)
@@ -557,7 +572,10 @@ impl<'a> ReadyTrackerServer<'a> {
         if ready.is_empty() {
             return Ok(());
         }
-        self.n_pending = u32checked_add!(self.n_pending, ready.len());
+        self.n_ready_or_inflight = self.n_ready_or_inflight.checked_add(
+            u32::try_from(ready.len()).expect("arithmetic overflow")
+        ).expect("arithmetic overflow");
+        checked_sub(&self.n_unready_tasks_approximate_for_eta_purposes_only, ready.len());
         let mut inserts = vec![vec![]; NUM_RUNNER_TYPES];
 
         for index in ready.into_iter() {
@@ -606,7 +624,7 @@ impl<'a> ReadyTrackerServer<'a> {
             }
         }
 
-        self.pending_increased_event.incr(); // fire an event
+        self.ready_or_inflight_increased_event.incr(); // fire an event
 
         Ok(())
     }
@@ -614,17 +632,32 @@ impl<'a> ReadyTrackerServer<'a> {
 
 impl ReadyTrackerClient {
     pub fn set_ratelimit(&self, per_second: u32) {
-        self.ratelimiter.reset(per_second.into())
+        self.ratelimiter_launch.reset(per_second.into())
     }
 
-    pub fn get_ratelimit(&self) -> u32 {
-        self.ratelimiter.rate_per_second() as u32
+    /// Get the rate limit on the number of tasks that can be launched per second
+    pub fn get_launch_ratelimit(&self) -> u32 {
+        self.ratelimiter_launch.rate_per_second() as u32
     }
 
-    pub fn get_rate(&self) -> f64 {
-        self.ratecounter.get_rate()
+    /// Get the rate that tasks are starting (units: tasks/s)
+    pub fn get_launch_rate(&self) -> f64 {
+        self.ratecounter_launch.get_rate()
     }
 
+    /// Get the number of tasks that are still waiting to be ready
+    /// (i.e. not ready and not inflight)
+    pub fn get_num_unready_tasks(&self) -> u32 {
+        self.n_unready_tasks.load()
+    }
+
+    /// Get total number of tasks in the task graph
+    pub fn get_num_total_tasks(&self) -> u32 {
+        self.n_total_tasks
+    }
+
+    /// Initiate a soft shutdown. A soft shutdown is when we stop dispatching
+    /// new work, but allow running tasks to finish.
     pub fn trigger_soft_shutdown(&self) {
         self.soft_shutdown_trigger.set();
     }
@@ -634,7 +667,7 @@ impl ReadyTrackerClient {
         runnertypeid: u32,
     ) -> Result<(NodeIndex, u32), ReadyTrackerClientError> {
         // wait for the rate limiter
-        self.ratelimiter.until_ready().await;
+        self.ratelimiter_launch.until_ready().await;
 
         let receiver = self
             .r
@@ -658,7 +691,7 @@ impl ReadyTrackerClient {
                 x.num_ready -= 1;
                 x.num_inflight += 1;
 
-                self.ratecounter.update(std::time::Instant::now());
+                self.ratecounter_launch.update(std::time::Instant::now());
                 return Ok((task.id, task.runcount));
             }
         }
@@ -734,13 +767,13 @@ impl ReadyTrackerClient {
     }
 
     /// Retreive a snapshot of the state of the queue
-    /// etag: only return once the pending_increased_event
+    /// etag: only return once the ready_or_inflight_increased_event
     ///       has fired at least this number of times. the idea with this is that
     ///       it lets a provisioner do long polling and get a response right after
     ///       the number of pending tasks might have increased, which is probably
     ///       a good time for it to get more compute resources.
     /// timemin: sort of in the same vein as etag, but from the other side. don't return
-    ///       for at least this amount of time. Let's sat that pending_increased_event
+    ///       for at least this amount of time. Let's sat that ready_or_inflight_increased_event
     ///       is firing very frequently, the provisioner might have some kind of rate
     ///       limit so it's not going to take any action that frequently anyways, so it
     ///       might want to communicate that rate limit here so that it can get the queue
@@ -754,15 +787,15 @@ impl ReadyTrackerClient {
         let clock_start = tokio::time::Instant::now();
 
         let mut etag_new =
-            match tokio::time::timeout(timeout, self.pending_increased_event.wait(etag)).await {
+            match tokio::time::timeout(timeout, self.ready_or_inflight_increased_event.wait(etag)).await {
                 Ok(etag_new) => etag_new,
-                Err(_elapsed) => self.pending_increased_event.load(),
+                Err(_elapsed) => self.ready_or_inflight_increased_event.load(),
             };
 
         let elapsed = tokio::time::Instant::now() - clock_start;
         if elapsed < timemin {
             tokio::time::sleep_until(clock_start + timemin).await;
-            etag_new = self.pending_increased_event.load();
+            etag_new = self.ready_or_inflight_increased_event.load();
         }
 
         (
@@ -916,4 +949,32 @@ pub enum ReadyTrackerClientError {
 enum ShutdownState {
     Normal,
     SoftShutdown,
+}
+
+
+/// Decrement the value of an AtomicU32 by other, saturating at zero.
+/// Note that this does not do a full compare-and-swap loop -- it just errors out if
+/// someone else modifies it.
+fn checked_sub(x: &AtomicU32, other: usize) {
+    let old_value = x.load(SeqCst);
+    let other_32 = u32::try_from(other).expect("arithmetic overflow");
+    let new_value = old_value.checked_sub(other_32).expect("arithmetic overflow");
+    x.compare_exchange(old_value, new_value, SeqCst, SeqCst).expect("Some kind of race");
+}
+
+
+// the idea is that this is a reference-counted pointer to a u32 that is owned by some other thread
+// and the only thing we should do is just load() it, not actually modify it.  The way we're using
+// this is that the readytracker server keeps `n_ready_or_inflight` and maintains it, incrementing and decrementing as
+// tasks become ready.
+struct ReadOnlyAtomicU32 {
+    value: Arc<AtomicU32>
+}
+impl ReadOnlyAtomicU32 {
+    fn new(x: &Arc<AtomicU32>) -> Self {
+        Self { value: x.clone() }
+    }
+    fn load(&self) -> u32 {
+        self.value.load(SeqCst)
+    }
 }
