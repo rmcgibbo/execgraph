@@ -103,7 +103,7 @@ pub async fn run_local_process_loop(
                 tracker
                     .send_finished(FinishedEvent::new_error(
                         subgraph_node_id,
-                        -1,
+                        13,
                         format!("Unable to start {:#?}: {:#?}", &cmd.cmdline[0], e),
                     ))
                     .await;

@@ -247,7 +247,7 @@ pub enum RuncountStatus {
     },
 }
 
-fn expand_storage_roots_relative_to_maindir(root: &std::path::Path, storage_roots: &Vec<Arc<PathBuf>>) -> Vec<Arc<PathBuf>> {
+pub fn expand_storage_roots_relative_to_maindir(root: &std::path::Path, storage_roots: &Vec<Arc<PathBuf>>) -> Vec<Arc<PathBuf>> {
     storage_roots.iter().map(|p| {
         if p.is_absolute() {
             p.clone()
@@ -418,7 +418,16 @@ impl<T> LogFile<T> {
                     );
                 }
                 LogEntry::Finished(f) => {
-                    started_but_not_finished.remove(&f.key);
+                    if f.status >= 0 {
+                        // If a task started but finished with a negative return code, that means it failed due to a signal
+                        // or being "lost". It would really be better if we recorded that into the log file with more precision,
+                        // but alas. In particular if it was "lost" then it's possible that it continued executing and uploaded
+                        // its results to ot the success path. But since we believe it failed, this will mean that on our rerun
+                        // we will try to make a second or successive upload to the same success path, which will then fail.
+                        // So we'll let all negative-status failures remain in the `started_but_not_finished` list, so they'll
+                        // get recorded as BurnedKeys.
+                        started_but_not_finished.remove(&f.key);
+                    }
                     let storage_root = header
                         .as_ref().map(|h| h.storage_roots[f.storage_root as usize].clone())
                         .expect("Writing a Finished entry, but no Header exists");

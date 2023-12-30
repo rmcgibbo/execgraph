@@ -373,7 +373,7 @@ async fn run_command(
                 value = client.post(end_route)
                 .postcard(&EndRequest{
                     transaction_id,
-                    status: -1,
+                    status: 13,
                     stdout: "".to_owned(),
                     nonretryable: false,
                     disposition: ExitDisposition::Exited,
