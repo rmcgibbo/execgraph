@@ -227,8 +227,11 @@ pub async fn status_handler(
         queues: resp,
         etag,
         server_metrics: collect_server_metrics(),
-        rate: state.tracker.get_rate(),
-        ratelimit: state.tracker.get_ratelimit(),
+        rate: state.tracker.get_launch_rate(),
+        num_total_tasks: state.tracker.get_num_total_tasks(),
+        num_unready_tasks: state.tracker.get_num_unready_tasks(),
+        ratelimit: state.tracker.get_launch_ratelimit(),
+        average_recent_task_runtime: state.tracker.get_average_recent_task_runtime().as_secs_f32(),
         provisioner_info: state.provisioner.read().unwrap().info.clone(),
     }))
 }

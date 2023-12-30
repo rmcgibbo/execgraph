@@ -393,6 +393,7 @@ def test_status_1(tmp_path):
     with open(tmp_path / "resp.json") as f:
         x = json.load(f)
         del x["server_metrics"]
+        del x["average_recent_task_runtime"]
         assert x == {
             "queues": [[3, {"num_ready": 2, "num_inflight": 0}]],
             "etag": 1,
@@ -450,6 +451,7 @@ def test_queue(tmp_path):
         value = json.load(f)
         value["queues"] = sorted(value["queues"], key=lambda x: str(x[0]))
         del value["server_metrics"]
+        del value["average_recent_task_runtime"]
         assert value == {
             "etag": 1,
             "rate": 0.0,

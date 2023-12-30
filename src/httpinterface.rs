@@ -59,8 +59,19 @@ pub struct StatusReply {
     pub etag: u64,
     /// Information about the latency of each endpoint
     pub server_metrics: ServerMetrics,
+
     /// Current estimated rate of task creation (tasks/s)
     pub rate: f64,
+
+    // Number of tasks neither in the ready queues nor inflight.
+    pub num_unready_tasks: u32,
+
+    // Total number of tasks in the task graph
+    pub num_total_tasks: u32,
+
+    // Average runtime, in seconds, of tasks that have recently finished
+    pub average_recent_task_runtime: f32,
+
     /// Current rate limit on task creation (tasks/s)
     pub ratelimit: u32,
     /// Arbitrary information passed in from the Python wrapper that can be accessed at the
