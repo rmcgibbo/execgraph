@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import os
+from pathlib import Path
 import signal
 import sys
 import time
@@ -199,8 +200,8 @@ def test_order(num_parallel, tmp_path):
     assert b == ["foo"]
 
 
-def test_not_execute_twice(num_parallel, tmp_path):
-    eg = _execgraph.ExecGraph(num_parallel, tmp_path / "foo")
+def test_not_execute_twice_1(tmp_path):
+    eg = _execgraph.ExecGraph(1, tmp_path / "foo")
 
     eg.add_task(["true"], key="task0")
     eg.add_task(["false"], key="task1", dependencies=[0])
@@ -209,6 +210,32 @@ def test_not_execute_twice(num_parallel, tmp_path):
     assert nfailed1 == 1 and order1 == ["task0", "task1"]
     nfailed2, order2 = eg.execute()
     assert nfailed2 == 0 and order2 == []
+
+
+def test_not_execute_twice_2(tmp_path):
+    eg = _execgraph.ExecGraph(1, tmp_path / "foo")
+
+    # Add two tasks with a linear dependency.
+    # The first task fails, so the second one should never be executed
+    id0 = eg.add_task(["false"], key="a")
+    eg.add_task(["false"], key="b", dependencies=[id0])
+
+    # Confirm that when executing, only 1 task runs (and it fails)
+    nfailed1, _ = eg.execute()
+    assert nfailed1 == 1
+
+    # Call execute a second time. Nothing should run (and so
+    # nothing should fail).
+    nfailed2, _ = eg.execute()
+    assert nfailed2 == 0
+    del eg
+
+    logfile = [json.loads(x) for x in open(tmp_path / "foo").readlines()]
+    assert len(logfile) == 4
+    assert "Header" in logfile[0]
+    assert "Ready" in logfile[1]
+    assert "Started" in logfile[2]
+    assert "Finished" in logfile[3]
 
 
 def test_simple_remote(num_parallel, tmp_path):
@@ -502,15 +529,18 @@ def test_copy_reused_keys_logfile(tmp_path):
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.execute()
     del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n"
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.add_task(["sh", "-c", "echo 2"], key="bar")
     eg.execute()
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n[1/1] sh -c echo 2\n2\n"
 
     eg.add_task(["sh", "-c", "echo 3"], key="baz")
     eg.execute()
     del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n[1/1] sh -c echo 2\n2\n[3/3] sh -c echo 3\n3\n"
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
 
@@ -528,18 +558,38 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert log[11]["Finished"]["key"] == "baz"
     assert len(log) == 12
 
-    clog = _execgraph.load_logfile(tmp_path / "foo", "current")
+    clog, outdated1 = _execgraph.load_logfile(tmp_path / "foo", "current,outdated")
+    # from pprint import pprint; pprint(clog)
     assert "user" in clog[0]["Header"]
     assert clog[1]["Ready"]["key"] == "foo"
     assert clog[2]["Started"]["key"] == "foo"
     assert clog[3]["Finished"]["key"] == "foo"
-    assert clog[4]["Ready"]["key"] == "bar"
-    assert clog[5]["Started"]["key"] == "bar"
-    assert clog[6]["Finished"]["key"] == "bar"
-    assert clog[7]["Ready"]["key"] == "baz"
-    assert clog[8]["Started"]["key"] == "baz"
-    assert clog[9]["Finished"]["key"] == "baz"
-    assert len(clog) == 10
+    assert "user" in clog[4]["Header"]
+    assert clog[5]["Backref"]["key"] == "foo"
+    assert clog[6]["Ready"]["key"] == "bar"
+    assert clog[7]["Started"]["key"] == "bar"
+    assert clog[8]["Finished"]["key"] == "bar"
+    assert clog[9]["Ready"]["key"] == "baz"
+    assert clog[10]["Started"]["key"] == "baz"
+    assert clog[11]["Finished"]["key"] == "baz"
+    assert len(clog) == 12
+    assert len(outdated1) == 0
+
+    # Make sure that if we re-read the current keys, they're all stil current.
+    with open(tmp_path / "current.log", "w") as f:
+        for item in clog:
+            json.dump(item, f)
+            f.write("\n")
+    clog2, outdated2 = _execgraph.load_logfile(tmp_path / "current.log", "current,outdated")
+    assert len(outdated2) == 0
+
+
+def test_log_1(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 1"], key="foo")
+    eg.execute()
+    del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n"
 
 
 def test_stdout(tmp_path):
@@ -605,14 +655,14 @@ def test_failcounts_1(tmp_path):
     del eg
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    assert eg.logfile_runcount("key")[0] == 1
-    assert eg.logfile_runcount("nothing")[0] == 0
+    assert eg.storageroot("key") is None
+    assert eg.storageroot("nothing") is None
     eg.add_task(["false"], key="key")
     eg.execute()
     del eg
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    assert eg.logfile_runcount("key")[0] == 2
+    assert eg.storageroot("key") is None
 
 
 def test_sigint_1(tmp_path):
@@ -643,7 +693,7 @@ eg.execute()
     assert "user" in log[0]["Header"]
     assert log[1]["Ready"]["key"] == "key"
     assert log[2]["Started"]["key"] == "key"
-    assert log[3]["Finished"]["status"] == 127
+    assert log[3]["Finished"]["status"] == -1
 
 
 def test_sigint_2(tmp_path):
@@ -713,10 +763,10 @@ def test_rerun_failures_1(tmp_path, rerun_failures, expected):
     n_failed, executed = eg.execute()
     assert n_failed == expected
 
-    assert eg.logfile_runcount("a")[0] == 2 if rerun_failures else 1
-    assert eg.logfile_runcount("b")[0] == 0
-    assert eg.logfile_runcount("c")[0] == 0
-    assert eg.logfile_runcount("d")[0] == 0
+    assert eg.storageroot("a") is None
+    assert eg.storageroot("b") is None
+    assert eg.storageroot("c") is None
+    assert eg.storageroot("d") is None
     del eg
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
@@ -792,65 +842,90 @@ def test_write_1(tmp_path):
 
     assert contents == contents2
 
+def test_retries_1(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["false"], key="task", max_retries=1)
+    eg.execute()
+    assert open(tmp_path / "foo").read().count("Finished") == 2
+
+
+def test_retries_2(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo", retry_mode="only_signaled_or_lost")
+    eg.add_task(["false"], key="task", max_retries=1)
+    eg.execute()
+    print(open(tmp_path / "foo").read())
+    assert open(tmp_path / "foo").read().count("Finished") == 1
+
 
 def test_fd3_1(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar baz='qux''>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'foo=bar baz='qux''>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"foo": "bar", "baz": "qux"}]
+    assert contents[-2]["LogMessage"]["values"] == [{"foo": "bar", "baz": "qux"}]
 
 
 def test_fd3_2(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'nsdfsjdksdbfskbskfd'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{}]
+    assert [list(c.keys())[0] for c in contents] == ["Header", "Ready", "Started", "Finished"]
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
 def test_fd3_3(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(
-        ["sh" "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
+        ["sh", "-c", r"dd if=/dev/zero of=/proc/self/fd/3 bs=1024 count=1024"],
         key="foo"
     )
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == []
+    assert [list(c.keys())[0] for c in contents] == ["Header", "Ready", "Started", "Finished"]
 
 
 def test_fd3_4(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'foo=bar baz='qux' foo=bar2'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'foo=bar baz='qux' foo=bar2'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"foo": "bar2", "baz": "qux"}]
+    assert contents[-2]["LogMessage"]["values"] == [{"foo": "bar2", "baz": "qux"}]
 
 
 def test_fd3_5(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", "echo 'a=c c=\"'>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'a=c c=\"'>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == []
+    assert contents[-2]["LogMessage"]["values"] == [{"a": "c", "c": '"'},]
 
 
 def test_fd3_6(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c c='>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'a=c c='>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"a": "c", "c": ""}]
+    assert contents[-2]["LogMessage"]["values"] == [{"a": "c", "c": ""}]
 
 
 def test_fd3_7(tmp_path):
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3; echo 'a=c'>&3; echo foo=bar foo=foo>&3"], key="foo")
+    eg.add_task(["sh", "-c", r"echo 'a=c'>&3; echo foo=bar foo=foo>&3"], key="foo")
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
-    assert contents[-1]["Finished"]["values"] == [{"a": "c"}, {"foo": "foo"}]
+    assert (contents[-2]["LogMessage"]["values"] == [{"a": "c"}, {"foo": "foo"}] or
+            contents[-2]["LogMessage"]["values"] == [{"foo": "foo"}])
+
+
+def test_fd3_8(tmp_path):
+    # long string. line buffering
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo foo=abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789 >&3"], key="foo")
+    eg.execute()
+    del eg
+    contents = [x for x in _execgraph.load_logfile(tmp_path / "foo", "all") if "LogMessage" in x][0]["LogMessage"]["values"][0]["foo"]
+    assert contents == "abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789"
 
 
 def test_dup(tmp_path):
@@ -892,79 +967,6 @@ subprocess.run("sleep 60", shell=True)
     assert eg.execute()[0] == 2
     elapsed = time.perf_counter() - start
     assert elapsed < 1
-
-
-def test_fork_1(tmp_path):
-    eg1 = _execgraph.ExecGraph(
-        2, logfile=tmp_path / "foo", storage_roots=["foo", "bar"]
-    )
-    eg1.add_task(["true"], key="1")
-    eg1.execute()
-    del eg1
-
-    eg2 = _execgraph.ExecGraph(
-        2,
-        logfile=tmp_path / "bar",
-        readonly_logfiles=[tmp_path / "foo"],
-        storage_roots=["a", "b"],
-    )
-    eg2.add_task(["true"], key="2")
-    eg2.execute()
-    assert eg2.logfile_runcount("1") == (0, str(tmp_path / "foo/1.0"))
-    assert eg2.logfile_runcount("2") == (0, str(tmp_path / "a/2.0"))
-    assert eg2.logfile_runcount("3") == (0, None)
-    del eg2
-
-    eg3 = _execgraph.ExecGraph(
-        2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "bar"]
-    )
-    assert eg3.logfile_runcount("1") == (0, str(tmp_path / "foo/1.0"))
-
-    assert sorted(map(os.path.abspath, eg3.all_storage_roots())) == sorted(
-        map(
-            os.path.abspath,
-            [
-                tmp_path / "foo",
-                tmp_path / "bar",
-                tmp_path,
-                tmp_path / "a",
-                tmp_path / "b",
-            ],
-        )
-    )
-
-
-def test_fork_2(tmp_path):
-    eg1 = _execgraph.ExecGraph(
-        2,
-        logfile=tmp_path / "foo",
-    )
-    eg1.add_task(["true"], key="0")
-    eg1.add_task(["false"], key="1", dependencies=[0])
-    eg1.add_task(["true"], key="2", dependencies=[1])
-    assert eg1.execute() == (1, ["0", "1"])
-    del eg1
-
-    eg1 = _execgraph.ExecGraph(
-        2, logfile=tmp_path / "bar", readonly_logfiles=[tmp_path / "foo"]
-    )
-    eg1.add_task(["true"], key="0")
-    eg1.add_task(["false"], key="1", dependencies=[0])
-    eg1.add_task(["true"], key="2", dependencies=[1])
-    assert eg1.execute() == (1, ["1"])
-    del eg1
-
-    eg1 = _execgraph.ExecGraph(
-        2,
-        logfile=tmp_path / "bar",
-        readonly_logfiles=[tmp_path / "foo"],
-        rerun_failures=False,
-    )
-    eg1.add_task(["true"], key="0")
-    eg1.add_task(["false"], key="1", dependencies=[0])
-    eg1.add_task(["true"], key="2", dependencies=[1])
-    assert eg1.execute() == (0, [])
-    del eg1
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="requires Linux")
@@ -1246,12 +1248,52 @@ def test_slurm_cancel(tmp_path):
     assert nfailed == 0
 
 
-def test_surrogate_pid(tmp_path):
+def test_storageroot_1(tmp_path: Path):
+    (tmp_path / "d1").mkdir()
+    with open(tmp_path / "d1" / "first.log", "w") as f:
+        f.write("""{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":[""]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"python-y4begakspvwurs3yw5qzl27t","runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"python-y4begakspvwurs3yw5qzl27t","host":"dhmgena138.dhm.desres.deshaw.com","pid":24267,"slurm_jobid":"19811878_0", "r": 0}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"python-y4begakspvwurs3yw5qzl27t","status":0, "r": 0}}""")
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "d1" / "first.log")
+    assert os.path.normpath(eg.storageroot("python-y4begakspvwurs3yw5qzl27t")) == os.path.normpath(tmp_path / "d1")
+
+
+def test_storageroot_2(tmp_path: Path):
+    (tmp_path / "d1").mkdir()
+    with open(tmp_path / "d1" / "first.log", "w") as f:
+        f.write("""{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":["", "/foo"]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r0", "runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r0", "host":"dhm", "pid": 0, "r": 0}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r0","status":0, "r": 0}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r1","runcount":0,"command":"python","r":1}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r1", "host":"dhm", "pid": 0,  "r": 1}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r1","status":0, "r": 1}}
+{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":["", "/bar"]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r2","runcount":0,"command":"python","r":1}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r2", "host":"dhm", "pid": 0,  "r": 1}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r2","status":0, "r": 1}}
+{"Header":{"version":5,"time":{"secs_since_epoch":1700522107,"nanos_since_epoch":601215008},"user":"mcgibbon","hostname":"dhmlogin2.dhm.desres.deshaw.com","workflow_key":"jaguarundi-rasalhague-elnath-895bed21c52d7a99b1d5","cmdline":["/gdn/centos7/0001/x3/prefixes/desres-python/3.10.7-05c7__88c6d8c7cacb/bin/python3","-I","/gdn/centos7/user/mcgibbon/default/prefixes/wrk-retries/2023.11.18b1c7/bin/wrk","-r","100","./run.py"],"workdir":"/d/dhm/mcgibbon-0/2023.11.18-wrk-retries-dev","pid":74103,"upstreams":[],"storage_roots":["/baz"]}}
+{"Ready":{"time":{"secs_since_epoch":1700522063,"nanos_since_epoch":964087249},"key":"r3","runcount":0,"command":"python","r":0}}
+{"Started":{"time":{"secs_since_epoch":1700522066,"nanos_since_epoch":712603537},"key":"r3", "host":"dhm", "pid": 0,  "r": 0}}
+{"Finished":{"time":{"secs_since_epoch":1700522068,"nanos_since_epoch":875527800},"key":"r3","status":0, "r": 0}}""")
+
+    eg = _execgraph.ExecGraph(0, tmp_path / "d1" / "first.log")
+    assert os.path.normpath(eg.storageroot("r0")) == os.path.normpath(tmp_path / "d1")
+    assert os.path.normpath(eg.storageroot("r1")) == "/foo"
+    assert os.path.normpath(eg.storageroot("r2")) == "/bar"
+    assert os.path.normpath(eg.storageroot("r3")) == "/baz"
+
+
+def test_doublebang_1(tmp_path):
     eg = _execgraph.ExecGraph(1, tmp_path / "foo")
-    eg.add_task(["sh", "-c", r"printf '%b' '\x00\x00\x00\xff' >&3"], key="0")
+    id0 = eg.add_task(["true"], key="a")
+    id1 = eg.add_task(["true"], key="b")
+    assert id0 == 0 and id1 == 1
     eg.execute()
-    lines = [json.loads(line) for line in open(tmp_path / "foo").readlines()]
-    assert lines[2]["Started"]["pid"] == 255
+    eg.add_task(["true"], key="c", dependencies=[id0, id1])
+    eg.execute()
 
 
 def is_topological_order(graph, node_order):

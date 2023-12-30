@@ -9,10 +9,6 @@ resolver = "2"
 name = "execgraph"
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "execgraph-bench"
-required-features = ["coz"]
-
 [profile.release]
 debug = 1
 incremental = true
@@ -37,6 +33,7 @@ futures = "0.3.28"
 gethostname = "0.4.3"
 grep-cli = "0.1.9"
 hyper = "0.14.27"
+humantime = "2.1.0"
 lazy_static = "1.4.0"
 libc = "0.2.148"
 lzzzz = "1.0.4"
@@ -66,7 +63,6 @@ tokio-stream = {version = "0.1.14", features=["net"]}
 tower = "0.4.13"
 tower-http = { version = "0.4.4", features = ["trace", "add-extension", "sensitive-headers", "util"] }
 tracing = "0.1.37"
-# tracing-appender = "0.2.2"
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "fmt", "local-time"] }
 url = "2.4.1"
 whoami = "1.4.1"

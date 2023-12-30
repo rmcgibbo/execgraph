@@ -114,7 +114,7 @@ def test_1(tmp_path, seed, killmode):
 
         if killmode == "pg":
             pgrp = os.getpgid(p.pid)
-            assert pgrp != os.getpgid(os.getpid())
+            assert pgrp != os.getpgid(os.getpid())  # don't kill self
             print("[test_2] sending SIGINT to process group")
             kill_time = time.perf_counter()
             os.killpg(pgrp, signal.SIGINT)

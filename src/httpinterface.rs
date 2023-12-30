@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ffi::OsString};
 
-use crate::logfile2::ValueMaps;
+use crate::localrunner::ExitDisposition;
 
 #[derive(Serialize, Deserialize)]
 pub struct Ping {
@@ -59,8 +59,16 @@ pub struct StatusReply {
     pub etag: u64,
     /// Information about the latency of each endpoint
     pub server_metrics: ServerMetrics,
+
     /// Current estimated rate of task creation (tasks/s)
     pub rate: f64,
+
+    // Number of tasks neither in the ready queues nor inflight.
+    pub num_unready_tasks: u32,
+
+    // Total number of tasks in the task graph
+    pub num_total_tasks: u32,
+
     /// Current rate limit on task creation (tasks/s)
     pub ratelimit: u32,
     /// Arbitrary information passed in from the Python wrapper that can be accessed at the
@@ -86,6 +94,7 @@ pub struct StartRequest {
 pub struct StartResponse {
     pub transaction_id: u32,
     pub cmdline: Vec<OsString>,
+    pub runcount: u32,
     pub fd_input: Option<(i32, Vec<u8>)>,
     pub ping_interval_msecs: u64,
 }
@@ -97,14 +106,21 @@ pub struct BegunRequest {
     pub pid: u32,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MsgRequest {
+    pub transaction_id: u32,
+    pub value: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct EndRequest {
     pub transaction_id: u32,
     pub status: i32,
     pub stdout: String,
     pub stderr: String,
-    pub values: ValueMaps,
+    pub nonretryable: bool,
     pub start_request: Option<StartRequest>,
+    pub disposition: ExitDisposition,
 }
 
 #[derive(Serialize, Deserialize)]

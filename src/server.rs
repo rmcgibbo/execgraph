@@ -64,7 +64,7 @@ pub struct State<'a> {
     /// the ReadyTrackerClient is the datastructure in sync.rs that maintains the queues
     /// of which taks are ready. this is where the server gets tasks from to respond to clients
     /// with, and what it informs when tasks finish.
-    pub(crate) tracker: &'a ReadyTrackerClient,
+    pub(crate) tracker: Arc<ReadyTrackerClient>,
     /// this some metadata that can be maniupated and is used by the provisioner to launch
     /// more runners.
     pub(crate) provisioner: RwLock<RemoteProvisionerSpec>,
@@ -74,7 +74,7 @@ pub struct State<'a> {
     /// this datastructure is used to figure out when tasks haven't pinged recently enough
     /// and should be considered dead
     timeouts: TimeWheel<u32>,
-    /// the /start, /begun, /end, and /ping endpoints are designed to only be called from
+    /// the /start, /msg, /begun, /end, and /ping endpoints are designed to only be called from
     /// execgraph-remote, so they required a bearer token to be set in the http headers,
     /// and we check whether it's equal to this. the /status endpoint can be called by anyone,
     /// and the functions in the auth_server.rs server which is listening on a unix socket
@@ -91,7 +91,7 @@ pub struct State<'a> {
 impl<'a> State<'a> {
     pub fn new(
         subgraph: Arc<DiGraph<&'a Cmd, ()>>,
-        tracker: &'a ReadyTrackerClient,
+        tracker: Arc<ReadyTrackerClient>,
         token: fancy_cancellation_token::CancellationToken,
         provisioner: RemoteProvisionerSpec,
         authorization_token: String,
@@ -113,7 +113,8 @@ impl<'a> State<'a> {
         // about 117ms per tick, which seems totally fine. that means that rather than timing out after
         // precisely 30 seconds it might be timing out after 30.117 seconds.
         let tick_time = self.timeouts.tick_duration();
-        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + tick_time, tick_time);
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + tick_time, tick_time);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -142,13 +143,10 @@ impl<'a> State<'a> {
 
             for cstate in expired {
                 self.tracker
-                    .send_finished(
-                        &cstate.cmd,
-                        FinishedEvent::new_disconnected(
-                            cstate.node_id,
-                            cstate.disconnect_error_message,
-                        ),
-                    )
+                    .send_finished(FinishedEvent::new_disconnected(
+                        cstate.node_id,
+                        cstate.disconnect_error_message,
+                    ))
                     .await;
             }
 
@@ -228,10 +226,32 @@ pub async fn status_handler(
         queues: resp,
         etag,
         server_metrics: collect_server_metrics(),
-        rate: state.tracker.get_rate(),
-        ratelimit: state.tracker.get_ratelimit(),
+        rate: state.tracker.get_launch_rate(),
+        num_total_tasks: state.tracker.get_num_total_tasks(),
+        num_unready_tasks: state.tracker.get_num_unready_tasks(),
+        ratelimit: state.tracker.get_launch_ratelimit(),
         provisioner_info: state.provisioner.read().unwrap().info.clone(),
     }))
+}
+
+async fn msg_handler(
+    TypedHeader(authorization): TypedHeader<axum::headers::Authorization<Bearer>>,
+    Extension(state): Extension<Arc<State<'static>>>,
+    Postcard(request): Postcard<MsgRequest>,
+) -> Result<Response, AppError> {
+    if authorization.token() != state.authorization_token {
+        return Err(AppError::Unauthorized);
+    };
+    let cstate = match state.connections.get(&request.transaction_id) {
+        Some(cstate) => cstate,
+        None => return Ok((StatusCode::OK, "").into_response()),
+    };
+    state
+        .tracker
+        .send_setvalue(cstate.node_id, request.value)
+        .await;
+
+    Ok((StatusCode::OK, "").into_response())
 }
 
 // POST /ping
@@ -349,7 +369,7 @@ async fn start_request_impl(
     // Hold the connection for up to ``HOLD_RATELIMITED_TIME`` (30 seconds), and then if
     // we're still rate limited, respond to the execgraph-remote with a "RateLimited"
     // (a 429 http code) which will cause it to exit.
-    let node_id = async {
+    let (node_id, runcount) = async {
         tokio::select! {
             _ = state.token.hard_cancelled() => {
                 Err(AppError::Shutdown)
@@ -390,6 +410,7 @@ async fn start_request_impl(
 
     Ok(StartResponse {
         transaction_id,
+        runcount,
         cmdline: cmd.cmdline.clone(),
         fd_input: cmd.fd_input.clone(),
         ping_interval_msecs: PING_INTERVAL_MSECS,
@@ -476,17 +497,15 @@ async fn end_handler(
 
     state
         .tracker
-        .send_finished(
-            &cstate.cmd,
-            FinishedEvent {
-                id: cstate.node_id,
-                status: ExitStatus::Code(request.status),
-                stdout: request.stdout,
-                stderr: request.stderr,
-                values: request.values,
-                flag: Some(flag.clone()),
-            },
-        )
+        .send_finished(FinishedEvent {
+            id: cstate.node_id,
+            status: ExitStatus::Code(request.status),
+            disposition: request.disposition,
+            stdout: request.stdout,
+            stderr: request.stderr,
+            flag: Some(flag.clone()),
+            nonretryable: request.nonretryable,
+        })
         .await;
 
     match request.start_request {
@@ -578,10 +597,10 @@ pub fn router(state: Arc<State<'static>>) -> Router {
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
                     let ray = rand::random::<u32>();
-                    tracing::info_span!("req", "uri" = request.uri().path(), "id" = ray)
+                    tracing::debug_span!("req", "uri" = request.uri().path(), "id" = ray)
                 })
                 .on_request(|request: &Request<Body>, _span: &Span| {
-                    tracing::info!(
+                    tracing::debug!(
                         "started {:?} {} {}",
                         request.headers(),
                         request.method(),
@@ -589,7 +608,7 @@ pub fn router(state: Arc<State<'static>>) -> Router {
                     )
                 })
                 .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
-                    tracing::info!(
+                    tracing::debug!(
                         "status={} latency={:?}",
                         response.status().as_u16(),
                         latency
@@ -605,6 +624,7 @@ pub fn router(state: Arc<State<'static>>) -> Router {
         .route("/begun", post(begun_handler))
         .route("/end", post(end_handler))
         .route("/ping", post(ping_handler))
+        .route("/msg", post(msg_handler))
         .route("/status", get(status_handler))
         .route(
             "/mark-slurm-job-cancelation",

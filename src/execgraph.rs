@@ -2,10 +2,10 @@ use crate::{
     admin_server::run_admin_service_forever,
     fancy_cancellation_token::{CancellationState, CancellationToken},
     graphtheory::transitive_closure_dag,
-    localrunner::{run_local_process_loop, LocalQueueType},
-    logfile2::{LogEntry, LogFile, LogFileRO, LogFileRW},
+    localrunner::{run_local_process_loop, ExitDisposition, LocalQueueType},
+    logfile2::{LogEntry, LogFile, LogFileRW},
     server::{router, State as ServerState},
-    sync::new_ready_tracker,
+    sync::{new_ready_tracker, RetryMode},
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as b64, Engine};
@@ -33,7 +33,7 @@ pub struct Cmd {
     pub display: Option<String>,
     pub affinity: BitArray<u64>,
 
-    pub runcount: u32,
+    pub runcount_base: u32,
     pub priority: u32,
     pub storage_root: u32,
 
@@ -48,6 +48,8 @@ pub struct Cmd {
     #[derivative(PartialEq = "ignore")]
     #[derivative(Hash = "ignore")]
     pub postamble: Option<Capsule>,
+
+    pub max_retries: u32,
 }
 
 lazy_static::lazy_static! {
@@ -74,10 +76,20 @@ impl Capsule {
         Capsule { capsule }
     }
 
-    fn call(&self) -> Result<i32> {
+    fn call(
+        &self,
+        success: bool, // did the task succeed or fail?
+        runcount: u32, // what runcount was the task on?
+        disposition: Option<ExitDisposition>, // if the task failed, did it fail with a clean exit or did it complete due to a signal or from being lost
+        ntasks: u64, // how many total tasks are in the task graph?
+    ) -> Result<i32> {
         use pyo3::AsPyPointer;
-        const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
+        const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule-v3\0";
         let capsule_name_ptr = CAPSULE_NAME.as_ptr() as *const i8;
+        let success_u32: u32 = if success { 1 } else { 0 };
+        let signaled_or_lost: u32 = disposition
+            .map(|x| x.is_signaled_or_lost())
+            .unwrap_or(false) as u32;
 
         unsafe {
             let pyobj = self.capsule.as_ptr();
@@ -89,9 +101,9 @@ impl Capsule {
                 assert!(!ptr.is_null()); // guarenteed by https://docs.python.org/3/c-api/capsule.html#c.PyCapsule_IsValid
                 let f = std::mem::transmute::<
                     *mut std::ffi::c_void,
-                    fn(*const std::ffi::c_void) -> i32,
+                    fn(*const std::ffi::c_void, u32, u32, u32, u64) -> i32,
                 >(ptr);
-                Ok(f(ctx))
+                Ok(f(ctx, success_u32, runcount, signaled_or_lost, ntasks))
             } else {
                 Err(anyhow!("Not a capsule!"))
             }
@@ -139,7 +151,7 @@ impl Cmd {
     pub fn call_preamble(&self) {
         match &self.preamble {
             Some(preamble) => {
-                match preamble.call() {
+                match preamble.call(false, 0, None, 0) {
                     Ok(i) if i != 0 => {
                         panic!("Preamble failed with error code {}", i);
                     }
@@ -153,10 +165,10 @@ impl Cmd {
         };
     }
 
-    pub fn call_postamble(&self) {
+    pub fn call_postamble(&self, success: bool, runcount: u32, disposition: ExitDisposition, ntasks: u64) {
         match &self.postamble {
             Some(postamble) => {
-                match postamble.call() {
+                match postamble.call(success, runcount, Some(disposition), ntasks) {
                     Ok(i) if i != 0 => {
                         panic!("Postamble failed with error code {}", i);
                     }
@@ -175,23 +187,18 @@ pub struct ExecGraph {
     deps: Graph<Cmd, (), Directed>,
     key_to_nodeid: HashMap<String, NodeIndex<u32>>,
     pub(crate) logfile: LogFile<LogFileRW>,
-    pub(crate) readonly_logfiles: Vec<LogFile<LogFileRO>>,
     completed: HashSet<String>,
 }
 
 impl ExecGraph {
     #[tracing::instrument(skip_all)]
-    pub fn new(
-        logfile: LogFile<LogFileRW>,
-        readonly_logfiles: Vec<LogFile<LogFileRO>>,
-    ) -> ExecGraph {
-        ExecGraph {
+    pub fn new(logfile: LogFile<LogFileRW>) -> Result<ExecGraph> {
+        Ok(ExecGraph {
             deps: Graph::new(),
             key_to_nodeid: HashMap::new(),
             logfile,
-            readonly_logfiles,
             completed: HashSet::new(),
-        }
+        })
     }
 
     pub fn ntasks(&self) -> usize {
@@ -224,7 +231,7 @@ impl ExecGraph {
         for dep in dependencies.iter().map(|&i| NodeIndex::from(i)) {
             if dep == new_node || self.deps.node_weight(dep).is_none() {
                 self.deps.remove_node(new_node);
-                return Err(anyhow!("Invalid dependency index"));
+                return Err(anyhow!("Invalid dependency index. dep={:?} new_node={:?}", dep, new_node));
             }
             self.deps.add_edge(dep, new_node, ());
         }
@@ -243,14 +250,10 @@ impl ExecGraph {
         rerun_failures: bool,
         provisioner: Option<RemoteProvisionerSpec>,
         ratelimit_per_second: u32,
+        retry_mode: RetryMode,
     ) -> Result<(u32, Vec<String>)> {
-        fn extend_graph_lifetime<'a>(
-            g: Arc<DiGraph<&'a Cmd, ()>>,
-        ) -> Arc<DiGraph<&'static Cmd, ()>> {
+        fn extend_graph_lifetime(g: Arc<DiGraph<&Cmd, ()>>) -> Arc<DiGraph<&'static Cmd, ()>> {
             unsafe { std::mem::transmute::<_, Arc<DiGraph<&'static Cmd, ()>>>(g) }
-        }
-        fn transmute_lifetime<'a, T>(x: &'a T) -> &'static T {
-            unsafe { std::mem::transmute::<_, _>(x) }
         }
 
         let count_offset = self.completed.len().try_into().unwrap();
@@ -258,7 +261,6 @@ impl ExecGraph {
             &mut self.deps,
             &mut self.completed,
             &mut self.logfile,
-            &self.readonly_logfiles,
             target,
             rerun_failures,
         )?);
@@ -278,6 +280,7 @@ impl ExecGraph {
             count_offset,
             failures_allowed,
             ratelimit_per_second,
+            retry_mode,
         );
 
         // Run local processes
@@ -291,7 +294,7 @@ impl ExecGraph {
                 let token = token.clone();
                 tokio::spawn(run_local_process_loop(
                     subgraph,
-                    transmute_lifetime(&tracker),
+                    tracker.clone(),
                     token,
                     LocalQueueType::NormalLocalQueue, // 0 for local queue
                 ))
@@ -303,7 +306,7 @@ impl ExecGraph {
                         let token = token.clone();
                         tokio::spawn(run_local_process_loop(
                             subgraph,
-                            transmute_lifetime(&tracker),
+                            tracker.clone(),
                             token,
                             LocalQueueType::ConsoleQueue, // 1 for console queue
                         ))
@@ -322,7 +325,7 @@ impl ExecGraph {
             let authorization_token = b64.encode(rand::random::<u128>().to_le_bytes());
             let state = Arc::new(ServerState::new(
                 subgraph,
-                transmute_lifetime(&tracker),
+                tracker.clone(),
                 token1.clone(),
                 provisioner.clone(),
                 authorization_token.clone(),
@@ -395,8 +398,8 @@ impl ExecGraph {
 
         let n_failed = servicer.n_failed;
 
-        // // get indices of the tasks we executed, mapped back from the subgraph node ids
-        // // to the node ids in the deps graph
+        // get indices of the tasks we executed, mapped back from the subgraph node ids
+        // to the node ids in the deps graph
         let completed: Vec<String> = servicer
             .finished_order
             .iter()
@@ -408,6 +411,7 @@ impl ExecGraph {
         }
         debug!("nfailed={}, ncompleted={}", n_failed, completed.len());
         self.logfile.flush()?;
+
         Ok((n_failed, completed))
     }
 }
@@ -439,12 +443,11 @@ async fn spawn_and_wait_for_provisioner(
     Ok(())
 }
 
-#[tracing::instrument(skip(deps, completed, logfile, readonly_logfiles))]
+#[tracing::instrument(skip(deps, completed, logfile))]
 fn get_subgraph<'a, 'b: 'a>(
     deps: &'b mut DiGraph<Cmd, ()>,
     completed: &mut HashSet<String>,
     logfile: &mut LogFile<LogFileRW>,
-    readonly_logfiles: &[LogFile<LogFileRO>],
     target: Option<u32>,
     rerun_failures: bool,
 ) -> Result<DiGraph<&'a Cmd, ()>> {
@@ -489,65 +492,93 @@ fn get_subgraph<'a, 'b: 'a>(
         None => deps.filter_map(|_n, w| Some(w), |_e, _w| Some(())),
     };
 
-    let mut reused_old_keys = HashSet::new();
+    let mut backrefs_to_write = HashSet::new();
+    let mut failed_within_this_execgraph = HashSet::new();
+    let mut failed_in_prior_execgraph = HashSet::new();
 
     // Now let's remove all edges from the dependency graph if the source has already finished
     // or if we've already exeuted the task in a previous call to execute
     let mut filtered_subgraph = subgraph.filter_map(
         |_n, &w| {
-            if completed.contains(&w.key) {
-                // if we already ran this command within this process, don't record it
-                // in reused_old_keys. that's only for stuff that was run in a previous
-                // session
-                trace!(
-                    "Skipping {} because it was already run successfully within this session",
-                    w.key
-                );
-                return None; // returning none excludes it from filtered_subgraph
+            if logfile.has_success(&w.key) {
+                if completed.contains(&w.key) {
+                    // If we already ran this command within this process, don't record it
+                    // in `backrefs_to_write` (which becomes Backref entries in the log). We only create
+                    // backref entries for jobs that were reused from a prior ExecGraph() objection
+                    // generally in a separate invocation of the program. Merely calling execute() twice
+                    // on the same ExecGraph doesn't create Backref entries.
+                    trace!(
+                        "Skipping {:?} because it was already run successfully within this session",
+                        w.key
+                    );
+                    return None; // returning none excludes it from filtered_subgraph
+                } else {
+                    trace!(
+                        "Skipping {:?} because it already ran successfully accord to the log file",
+                        w.key
+                    );
+                    backrefs_to_write.insert(w.key.clone());
+                    return None;
+                }
             }
-            let has_success = logfile.has_success(&w.key)
-                || readonly_logfiles.iter().any(|l| l.has_success(&w.key));
 
-            if has_success {
-                trace!(
-                    "Skipping {} because it already ran successfully accord to the log file",
-                    w.key
-                );
-                reused_old_keys.insert(w.key.clone());
-                return None;
+            if logfile.has_failure(&w.key) {
+                if completed.contains(&w.key) {
+                    failed_within_this_execgraph.insert(w.key.clone());
+                } else {
+                    failed_in_prior_execgraph.insert(w.key.clone());
+                }
             }
 
-            trace!("Retaining {} because it has not been run before", w.key);
+            trace!("Retaining {:?} because it has not been run before", w.key);
             Some(w)
         },
         |_e, &w| Some(w),
     );
 
-    // If we are skipping failures, we need to further filter the graph down
-    // to not include the failures or any downstream tasks, and add the failures
-    // that were important to `reused_old_keys`.
-    if !rerun_failures {
+    // There are two types of "previously failed" in the filtered subgraph at this point
+    // and we need to handle them differently.
+    //
+    // 1) One category are tasks that failed in a previous call to `execute()` on this
+    //    instance of ExecGraph. These are called `failed_within_this_execgraph`.
+    // 2) The other category are tasks that failed in some previous instance of ExecGraph
+    //    but not in this instance. These are called `failed_in_prior_execgraph`.
+
+    //
+    // In all cases, we need to remove tasks that fall into the first category from the graph.
+    // (Two subsequent calles to execute() on the same graph object cannot trigger a failed
+    // task to be retried!)
+    // The argument `rerun_failures` controls whether the second category of tasks are rerun.
+    //
+
+    let failed_tasks_to_be_removed_from_graph = {
+        // always remove tasks that failed within this run (category 1 above)
+        let mut failed_tasks_to_be_removed_from_graph = failed_within_this_execgraph;
+        if rerun_failures == false {
+            // if we're in `rerun_failures=false` mode, then also remove any that failed in prior runs
+            failed_tasks_to_be_removed_from_graph.extend(failed_in_prior_execgraph.clone().into_iter());
+
+            // And we need to write backref entries for these because they are important we loaded
+            // from the logfile for a prior ExecGraph instance that was integral to the current execution.
+            backrefs_to_write.extend(failed_in_prior_execgraph.into_iter());
+        }
+        failed_tasks_to_be_removed_from_graph
+    };
+
+    if failed_tasks_to_be_removed_from_graph.len() > 0 {
         trace!("Recomputing transitive closure of filtered subgraph");
         let tc = transitive_closure_dag(&filtered_subgraph)?;
-        let failures = tc
-            .node_indices()
-            .filter(|&n| {
-                let w = tc[n];
-                logfile.has_failure(&w.key)
-                    || readonly_logfiles.iter().any(|l| l.has_failure(&w.key))
-            })
-            .collect::<HashSet<NodeIndex>>();
+        trace!("Found N={} commands that previously failed: {:?}", failed_tasks_to_be_removed_from_graph.len(), failed_tasks_to_be_removed_from_graph);
+        let size_before_filter = filtered_subgraph.node_count();
 
-        trace!("Found N={} commands that previously failed", failures.len());
         filtered_subgraph = filtered_subgraph.filter_map(
             |n, &w| {
-                if failures.contains(&n) {
+                if failed_tasks_to_be_removed_from_graph.contains(&w.key) {
                     trace!("Skipping {} because it previously failed", w.key);
-                    reused_old_keys.insert(w.key.clone());
                     return None;
                 }
                 for e in tc.edges_directed(n, Direction::Incoming) {
-                    if failures.contains(&e.source()) {
+                    if failed_tasks_to_be_removed_from_graph.contains(&filtered_subgraph[e.source()].key) {
                         trace!(
                             "Skipping {} because it's downstream of a task that previously failed.",
                             w.key
@@ -560,11 +591,15 @@ fn get_subgraph<'a, 'b: 'a>(
             },
             |_e, _w| Some(()),
         );
+
+        let size_after_filter = filtered_subgraph.node_count();
+        trace!("Reduced size of graph from {} to {}", size_before_filter, size_after_filter);
+        assert!(size_after_filter < size_before_filter);
     }
 
     // See test_copy_reused_keys_logfile.
-    for key in reused_old_keys {
-        trace!("Writing backref for key={}", key);
+    for key in backrefs_to_write {
+        trace!("Writing Backref for key={}", key);
         logfile.write(LogEntry::new_backref(&key))?;
         completed.insert(key);
     }

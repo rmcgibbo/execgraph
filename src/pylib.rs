@@ -1,4 +1,3 @@
-use anyhow::Context;
 use bitvec::array::BitArray;
 use pyo3::{
     exceptions::{PyIOError, PyIndexError, PyOSError, PyRuntimeError, PyValueError},
@@ -13,7 +12,9 @@ use tracing::{debug, warn};
 
 use crate::{
     execgraph::{Cmd, ExecGraph, RemoteProvisionerSpec},
-    logfile2::{self, load_ro_logfiles_recursive, LogEntry, LogFile, LogFileRW},
+    logfile2::{self, LogEntry, LogFile, LogFileRW},
+    logging,
+    sync::RetryMode,
 };
 
 /// Parallel execution of shell commands with DAG dependencies.
@@ -43,6 +44,7 @@ pub struct PyExecGraph {
     failures_allowed: u32,
     key: String,
     rerun_failures: bool,
+    retry_mode: RetryMode,
 }
 
 #[pymethods]
@@ -51,11 +53,11 @@ impl PyExecGraph {
     #[pyo3(signature=(
         num_parallel,
         logfile,
-        readonly_logfiles = vec![],
         storage_roots = vec![PathBuf::from("")],
         failures_allowed = 1,
         newkeyfn = None,
-        rerun_failures=true
+        rerun_failures = true,
+        retry_mode = "all_failures".to_owned(),
     ))]
     #[tracing::instrument(skip(py))]
     #[allow(clippy::too_many_arguments)]
@@ -63,35 +65,26 @@ impl PyExecGraph {
         py: Python,
         mut num_parallel: i32,
         logfile: PathBuf,
-        readonly_logfiles: Vec<PathBuf>,
         storage_roots: Vec<PathBuf>,
         failures_allowed: u32,
         newkeyfn: Option<PyObject>,
         rerun_failures: bool,
+        retry_mode: String,
     ) -> PyResult<PyExecGraph> {
         if num_parallel < 0 {
             num_parallel = std::thread::available_parallelism()?.get().try_into()?;
         }
 
-        let mut log =
-            LogFile::<LogFileRW>::new(&logfile).map_err(|e| PyIOError::new_err(e.to_string()))?;
-        let readonly_logs = load_ro_logfiles_recursive(readonly_logfiles.clone())?;
+        let mut log = LogFile::<LogFileRW>::new(&logfile).map_err(|e| match e {
+            logfile2::LogfileError::MismatchedVersion { .. } => {
+                PyRuntimeError::new_err(e.to_string())
+            }
+            _ => PyIOError::new_err(e.to_string()),
+        })?;
 
-        if log
-            .header_version()
-            .map(|v| v != logfile2::LOGFILE_VERSION)
-            .unwrap_or(false)
-        {
-            return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
-        };
-        for l in readonly_logs.iter() {
-            if l.header_version()
-                .map(|v| v != logfile2::LOGFILE_VERSION)
-                .unwrap_or(false)
-            {
-                return Err(PyRuntimeError::new_err(format!("This version of wrk uses the v{} logfile format. Cannot continue from a prior workflow using an older or newer format.", logfile2::LOGFILE_VERSION)));
-            };
-        }
+        let stdout_mirror_to_file = logfile.parent().unwrap().join("log.txt");
+        logging::init_logging(Some(&stdout_mirror_to_file))
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         let key = match log.workflow_key() {
             Some(key) => key,
@@ -104,15 +97,25 @@ impl PyExecGraph {
         debug!("Writing new log header key={}", key);
         log.write(LogEntry::new_header(
             &key,
-            readonly_logfiles,
             storage_roots
                 .iter()
                 .map(|s| PathBuf::from(s.as_os_str().to_string_lossy().replace("$KEY", &key)))
                 .collect(),
         )?)?;
 
+        let retry_mode = match &retry_mode as &str {
+            "all_failures" => RetryMode::AllFailures,
+            "only_signaled_or_lost" => RetryMode::OnlySignaledOrLost,
+            _ => {
+                return Err(PyRuntimeError::new_err(format!(
+                    "Unrecognized option {}. Use either 'all_failures' or 'only_signaled_or_lost'",
+                    retry_mode
+                )));
+            }
+        };
+
         Ok(PyExecGraph {
-            g: ExecGraph::new(log, readonly_logs),
+            g: ExecGraph::new(log).map_err(|e| PyIOError::new_err(e.to_string()))?,
             num_parallel: num_parallel as u32,
             failures_allowed: (if failures_allowed == 0 {
                 u32::MAX
@@ -121,18 +124,14 @@ impl PyExecGraph {
             }),
             key,
             rerun_failures,
+            retry_mode,
         })
     }
 
-    fn all_storage_roots(&self) -> Vec<PathBuf> {
-        let mut result = self.g.logfile.storage_roots();
-        result.extend(
-            self.g
-                .readonly_logfiles
-                .iter()
-                .flat_map(|l| l.storage_roots()),
-        );
-        result
+    /// Get the set of burned keys. These are keys that have started entries but no finished
+    /// entries, or are explicitly marked in the log files as being burned.
+    fn burned_keys(&self) -> Vec<String> {
+        self.g.logfile.burned_keys()
     }
 
     /// Get the number of tasks in the graph
@@ -140,79 +139,21 @@ impl PyExecGraph {
         self.g.ntasks()
     }
 
-    /// Get the runcount that should be used for a task with this key.
-    fn logfile_runcount(&self, key: &str) -> (u32, Option<PathBuf>) {
-        let from_current_logfile = match self.g.logfile.runcount(key) {
-            // The task is new and has never been executed before.
-            // obviously this calls for a runcount of zero, and we don't
-            // know the task directory yet -- caller will be able to choose.
-            None => (0, None),
-            // During the last round, the task was added to the task graph,
-            // became ready, but was not started. so no directory would have
-            // been created, and we can reuse the prior run count.
-            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => (runcount, None),
-            // The task was previously started, but not finished. this shouldn't
-            // happen, because we should create a "fake" finished record with a
-            // fake timeout_status, but maybe we got sigkilled or something. Anyways,
-            // we're going to need a new directory. This is basically like a failure.
-            Some(logfile2::RuncountStatus::Started { runcount, .. }) => (runcount + 1, None),
-            // The task previously finished successfully. We reuse the old run count
-            // because we're not going to actually run it again -- this lets us refer
-            // to the assets in the correct directory.
-            Some(logfile2::RuncountStatus::Finished {
-                runcount,
-                storage_root,
-                success,
-            }) if success => (
-                runcount,
-                Some(
-                    self.g
-                        .logfile
-                        .storage_root(storage_root)
-                        .with_context(|| {
-                            format!("getting {}th entry from this logfile", storage_root)
-                        })
-                        .expect("Unable to find storage root")
-                        .join(format!("{}.{}", key, runcount)),
-                ),
-            ),
-            // New directory for the next run, as above.
-            Some(logfile2::RuncountStatus::Finished { runcount, .. }) => (runcount + 1, None),
-        };
-        // if the current logfile gave a cache hit, go with that.
-        if from_current_logfile.1.is_some() {
-            return from_current_logfile;
-        }
-
-        // if any of the prior log files gave a cache hit, go with that
-        for l in self.g.readonly_logfiles.iter() {
-            if let Some(logfile2::RuncountStatus::Finished {
-                runcount,
-                storage_root,
-                success,
-            }) = l.runcount(key)
-            {
-                if success {
-                    return (
-                        runcount,
-                        Some(
-                            l.storage_root(storage_root)
-                                .with_context(|| {
-                                    format!(
-                                        "getting {}th entry from upstream logfile",
-                                        storage_root
-                                    )
-                                })
-                                .expect("Unable to find storage root")
-                                .join(format!("{}.{}", key, runcount)),
-                        ),
-                    );
-                }
+    /// If, according to the logfile, this task has previously been run and succeeded,
+    /// get the storageroot.
+    fn storageroot(&self, key: &str) -> Option<PathBuf> {
+        if let Some(logfile2::RuncountStatus::Finished {
+            storage_root,
+            success,
+            ..
+        }) = self.g.logfile.runcount(key)
+        {
+            if success {
+                return Some(storage_root.to_path_buf());
             }
         }
 
-        // otherwise vall back to the cache miss from the current log file.
-        from_current_logfile
+        None
     }
 
     /// Get the workflow-level key, created by the ``newkeyfn``
@@ -298,7 +239,8 @@ impl PyExecGraph {
         fd_input = None,
         preamble = None,
         postamble = None,
-        storage_root = 0
+        storage_root = 0,
+        max_retries = 0,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn add_task(
@@ -312,19 +254,37 @@ impl PyExecGraph {
         preamble: Option<PyObject>,
         postamble: Option<PyObject>,
         storage_root: u32,
+        max_retries: u32,
     ) -> PyResult<u32> {
-        let runcount = self.logfile_runcount(&key as &str).0;
+        // Question: if it was previously a success, why are we even adding it to the graph? Why not
+        // just skip it.
+        // Answer: I think so that we can record a Backref in the log file.
+        let runcount_base = match self.g.logfile.runcount(&key as &str) {
+            Some(logfile2::RuncountStatus::Ready { runcount, .. }) => runcount,
+            Some(logfile2::RuncountStatus::Started { runcount, .. }) => runcount + 1,
+            Some(logfile2::RuncountStatus::Finished {
+                runcount, success, ..
+            }) => {
+                if success {
+                    runcount
+                } else {
+                    runcount + 1
+                }
+            }
+            None => 0,
+        };
         let cmd = Cmd {
             cmdline,
             key,
             display,
             fd_input: fd_input.map(|(fd, buf)| (fd, buf.extract::<Vec<u8>>().unwrap())),
             storage_root,
-            runcount,
+            runcount_base,
             priority: 0,
             affinity: BitArray::<u64>::new(affinity),
             preamble: preamble.map(crate::execgraph::Capsule::new),
             postamble: postamble.map(crate::execgraph::Capsule::new),
+            max_retries,
         };
         self.g
             .add_task(cmd, dependencies)
@@ -386,12 +346,12 @@ impl PyExecGraph {
             }
         }
 
-        let x = remote_provisioner_cmd.map(|cmd| RemoteProvisionerSpec {
+        let provisioner = remote_provisioner_cmd.map(|cmd| RemoteProvisionerSpec {
             cmd,
             info: remote_provisioner_info,
         });
 
-        py.allow_threads(move || {
+        let result = py.allow_threads(move || {
             let rt = Runtime::new().expect("Failed to build tokio runtime");
             rt.block_on(async {
                 self.g
@@ -400,13 +360,17 @@ impl PyExecGraph {
                         self.num_parallel,
                         self.failures_allowed,
                         self.rerun_failures,
-                        x,
+                        provisioner,
                         ratelimit_per_second,
+                        self.retry_mode,
                     )
                     .await
             })
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
-        })
+        });
+
+        logging::flush_logging().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        result
     }
 }
 
@@ -416,14 +380,14 @@ impl From<logfile2::LogfileError> for PyErr {
     }
 }
 
-extern "C" fn test_callback(_ctx: *const std::ffi::c_void) -> i32 {
-    println!("Hello from test_callback");
+extern "C" fn test_callback(_ctx: *const std::ffi::c_void, foo: i32, bar: i32, ntasks: u32) -> i32 {
+    println!("Hello from test_callback foo={} bar={} ntasks={}", foo, bar, ntasks);
     0
 }
 
 #[pyfunction]
 fn test_make_capsule(py: Python) -> PyResult<PyObject> {
-    const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule\0";
+    const CAPSULE_NAME: &[u8] = b"Execgraph::Capsule-v3\0";
     let name: *const std::os::raw::c_char = CAPSULE_NAME.as_ptr() as *const i8;
     let obj = unsafe {
         let cb = test_callback as *const () as *mut std::ffi::c_void;
@@ -465,33 +429,8 @@ pub fn execgraph(_py: Python, m: &PyModule) -> PyResult<()> {
     unsafe {
         time::util::local_offset::set_soundness(time::util::local_offset::Soundness::Unsound);
     } // YOLO
-    tracing_subscriber::fmt()
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
 
-    // // Log to file
-    // let file_appender = RollingFileAppender::new(
-    //     Rotation::NEVER,
-    //     crate::constants::FAIL_COMMAND_PREFIX,
-    //     "execgraph.log",
-    // );
-    // let (non_blocking_appender, guard) = tracing_appender::non_blocking(file_appender);
-    // std::mem::forget(guard); // LEAK ME
-    // let file_layer = tracing_subscriber::fmt::layer()
-    //     .with_writer(non_blocking_appender)
-    //     .with_filter(
-    //         tracing_subscriber::EnvFilter::try_from_env(tracing_subscriber::EnvFilter::DEFAULT_ENV)
-    //             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-    //     );
-    // // Log to console
-    // let fmt_layer =
-    //     tracing_subscriber::fmt::layer().with_filter(tracing::level_filters::LevelFilter::ERROR);
-    // tracing_subscriber::registry()
-    //     .with(fmt_layer)
-    //     .with(file_layer)
-    //     .init();
-
+    logging::init_logging(None).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     m.add_class::<PyExecGraph>()?;
     m.add_function(wrap_pyfunction!(test_make_capsule, m)?)?;
     m.add_function(wrap_pyfunction!(load_logfile, m)?)?;

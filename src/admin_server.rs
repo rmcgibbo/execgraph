@@ -5,6 +5,7 @@ use crate::httpinterface::ShutdownRequest;
 use crate::httpinterface::StatusReply;
 use crate::httpinterface::UpdateRatelimitRequest;
 use crate::httpinterface::UpdateRemoteProvisionerInfoRequest;
+use crate::rawlog;
 use crate::server::status_handler;
 use crate::server::{AppError, State};
 use axum::routing::{get, post};
@@ -43,12 +44,13 @@ async fn post_shutdown_handler(
     use time::OffsetDateTime;
     let local = OffsetDateTime::now_local().unwrap();
 
-    eprintln!(
-        "[{}]: \x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin '{}'",
+    rawlog!(
+        "[{}]: \x1b[1;33mWarning\x1b[0m: {} shutdown triggered by admin '{}'\n",
         local.format(&Rfc2822).unwrap(),
         if payload.soft { "Soft" } else { "Hard" },
         payload.username,
-    );
+    )
+    .expect("Unable to print");
     if payload.soft {
         state.tracker.trigger_soft_shutdown();
     } else {

@@ -1,19 +1,20 @@
 use advisory_lock::{AdvisoryFileLock, FileLockMode};
 use bufreaderwriter::seq::BufReaderWriterSeq as BufReaderWriter;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeSeq, Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     env,
     io::{BufRead, Seek, Write},
     marker::PhantomData,
     path::PathBuf,
+    sync::Arc,
     time::SystemTime,
 };
 use thiserror::Error;
 
 pub type Result<T> = core::result::Result<T, LogfileError>;
 pub type ValueMaps = Vec<HashMap<String, String>>;
-pub const LOGFILE_VERSION: u32 = 4;
+pub const LOGFILE_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum LogEntry {
@@ -22,6 +23,8 @@ pub enum LogEntry {
     Started(StartedEntry),
     Finished(FinishedEntry),
     Backref(BackrefEntry),
+    LogMessage(LogMessageEntry),
+    BurnedKey(BurnedKeyEntry),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -35,10 +38,12 @@ pub struct HeaderEntry {
     pub workdir: String,
     pub pid: u32,
 
-    #[serde(default)]
-    pub upstreams: Vec<PathBuf>,
-    #[serde(default)]
-    pub storage_roots: Vec<PathBuf>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_vec_arc_pathbuf",
+        serialize_with = "serialize_vec_arc_pathbuf"
+    )]
+    pub storage_roots: Vec<Arc<PathBuf>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -61,6 +66,12 @@ pub struct StartedEntry {
 
     #[serde(default)]
     pub slurm_jobid: String, // If the value is not present when deserializing, use the Default::default().
+
+    #[serde(default)]
+    pub runcount: u32, // If the value is not present when deserializing, use the Default::default().
+
+    #[serde(default, rename = "r")]
+    pub storage_root: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,8 +79,23 @@ pub struct FinishedEntry {
     pub time: SystemTime,
     pub key: String,
     pub status: i32,
+
+    #[serde(default, rename = "values")]
+    pub _deprecated_values: ValueMaps,
+
     #[serde(default)]
-    pub values: ValueMaps, // If the value is not present when deserializing, use the Default::default().
+    pub runcount: u32, // If the value is not present when deserializing, use the Default::default().
+
+    #[serde(default, rename = "r")]
+    pub storage_root: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LogMessageEntry {
+    pub time: SystemTime,
+    pub key: String,
+    pub runcount: u32,
+    pub values: ValueMaps,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -77,12 +103,13 @@ pub struct BackrefEntry {
     pub key: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BurnedKeyEntry {
+    pub key: String,
+}
+
 impl LogEntry {
-    pub fn new_header(
-        workflow_key: &str,
-        upstreams: Vec<PathBuf>,
-        storage_roots: Vec<PathBuf>,
-    ) -> Result<LogEntry> {
+    pub fn new_header(workflow_key: &str, storage_roots: Vec<PathBuf>) -> Result<LogEntry> {
         Ok(LogEntry::Header(HeaderEntry {
             version: LOGFILE_VERSION,
             time: SystemTime::now(),
@@ -91,8 +118,10 @@ impl LogEntry {
             workflow_key: workflow_key.to_owned(),
             cmdline: env::args().collect(),
             workdir: env::current_dir()?.to_string_lossy().to_string(),
-            upstreams,
-            storage_roots,
+            storage_roots: storage_roots
+                .into_iter()
+                .map(|item| Arc::new(item))
+                .collect(),
             pid: std::process::id(),
         }))
     }
@@ -107,27 +136,53 @@ impl LogEntry {
         })
     }
 
-    pub fn new_started(key: &str, host: &str, pid: u32, slurm_jobid: String) -> LogEntry {
+    pub fn new_started(
+        key: &str,
+        runcount: u32,
+        storage_root: u32,
+        host: &str,
+        pid: u32,
+        slurm_jobid: String,
+    ) -> LogEntry {
         LogEntry::Started(StartedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
+            storage_root,
             host: host.to_owned(),
-            slurm_jobid: slurm_jobid,
+            slurm_jobid,
+            runcount,
             pid,
         })
     }
 
-    pub fn new_finished(key: &str, status: i32, values: ValueMaps) -> LogEntry {
+    pub fn new_finished(key: &str, runcount: u32, storage_root: u32, status: i32) -> LogEntry {
         LogEntry::Finished(FinishedEntry {
             time: SystemTime::now(),
             key: key.to_owned(),
-            values,
             status,
+            runcount,
+            storage_root,
+            _deprecated_values: vec![],
+        })
+    }
+
+    pub fn new_logmessage(key: &str, runcount: u32, values: ValueMaps) -> LogEntry {
+        LogEntry::LogMessage(LogMessageEntry {
+            time: SystemTime::now(),
+            key: key.to_owned(),
+            runcount,
+            values,
         })
     }
 
     pub fn new_backref(key: &str) -> LogEntry {
         LogEntry::Backref(BackrefEntry {
+            key: key.to_owned(),
+        })
+    }
+
+    pub fn new_burnedkey(key: &str) -> LogEntry {
+        LogEntry::BurnedKey(BurnedKeyEntry {
             key: key.to_owned(),
         })
     }
@@ -151,16 +206,26 @@ impl LogEntry {
     pub fn is_backref(&self) -> bool {
         matches!(self, LogEntry::Backref(_x))
     }
+
+    pub fn is_logmessage(&self) -> bool {
+        matches!(self, LogEntry::LogMessage(_x))
+    }
+
+    pub fn is_burnedkey(&self) -> bool {
+        matches!(self, LogEntry::BurnedKey(_x))
+    }
 }
 
 pub struct LogFileRO;
 pub struct LogFileRW;
+
 pub struct LogFile<T> {
     f: BufReaderWriter<std::fs::File>,
     path: std::path::PathBuf,
     lockf: Option<(std::io::BufWriter<std::fs::File>, std::path::PathBuf)>,
     header: Option<HeaderEntry>,
     runcounts: HashMap<String, RuncountStatus>,
+    burned_keys: Vec<String>,
     mode: PhantomData<T>,
 }
 pub struct LogFileSnapshotReader {
@@ -171,17 +236,25 @@ pub struct LogFileSnapshotReader {
 pub enum RuncountStatus {
     Ready {
         runcount: u32,
-        storage_root: u32,
     },
     Started {
         runcount: u32,
-        storage_root: u32,
     },
     Finished {
         runcount: u32,
-        storage_root: u32,
+        storage_root: Arc<PathBuf>,
         success: bool,
     },
+}
+
+pub fn expand_storage_roots_relative_to_maindir(root: &std::path::Path, storage_roots: &Vec<Arc<PathBuf>>) -> Vec<Arc<PathBuf>> {
+    storage_roots.iter().map(|p| {
+        if p.is_absolute() {
+            p.clone()
+        } else {
+            Arc::new(root.parent().unwrap().join((**p).clone()))
+        }
+    }).collect()
 }
 
 impl LogFile<LogFileRW> {
@@ -195,7 +268,7 @@ impl LogFile<LogFileRW> {
             .open(&lockf_path)?;
         lockf.try_lock(FileLockMode::Exclusive)?;
         let mut lockf = std::io::BufWriter::new(lockf);
-        serde_json::to_writer(&mut lockf, &LogEntry::new_header("", vec![], vec![])?)?;
+        serde_json::to_writer(&mut lockf, &LogEntry::new_header("", vec![])?)?;
         lockf.flush()?;
 
         let mut f = std::fs::OpenOptions::new()
@@ -203,12 +276,14 @@ impl LogFile<LogFileRW> {
             .create(true)
             .write(true)
             .open(&path)?;
-        let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(path.as_ref(), &mut f)?;
+
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
+            burned_keys,
             lockf: Some((lockf, lockf_path)),
             mode: PhantomData::<LogFileRW>,
         })
@@ -216,93 +291,47 @@ impl LogFile<LogFileRW> {
 
     pub fn write(&mut self, e: LogEntry) -> Result<()> {
         match e {
-            LogEntry::Header(ref h) => {
-                // TODO: check for consistency with prior header?
-                self.header = Some(h.clone())
-            }
             LogEntry::Ready(ref r) => {
                 self.runcounts.insert(
                     r.key.clone(),
                     RuncountStatus::Ready {
                         runcount: r.runcount,
-                        storage_root: r.storage_root,
                     },
                 );
             }
-            LogEntry::Started(ref s) => {
-                let r = self
-                    .runcounts
-                    .remove(&s.key)
-                    .expect("I see a Started entry, but no Ready entry");
-                if let RuncountStatus::Ready {
-                    runcount: c,
-                    storage_root: srt,
-                } = r
-                {
-                    self.runcounts.insert(
-                        s.key.clone(),
-                        RuncountStatus::Started {
-                            runcount: c,
-                            storage_root: srt,
-                        },
-                    );
-                } else {
-                    panic!("Malformed?");
-                }
+            LogEntry::Started(ref r) => {
+                self.runcounts.insert(
+                    r.key.clone(),
+                    RuncountStatus::Started {
+                        runcount: r.runcount,
+                    },
+                );
             }
-            LogEntry::Finished(ref f) => {
-                let r = self
-                    .runcounts
-                    .remove(&f.key)
-                    .expect("I see a Finished entry, but no prior entry");
-                if let RuncountStatus::Started {
-                    runcount: c,
-                    storage_root: srt,
-                } = r
-                {
-                    self.runcounts.insert(
-                        f.key.clone(),
-                        RuncountStatus::Finished {
-                            runcount: c,
-                            storage_root: srt,
-                            success: f.status == 0,
-                        },
-                    );
-                } else {
-                    panic!("Malformed");
-                }
+            LogEntry::Finished(ref r) => {
+                let storage_root = self
+                    .header
+                    .as_ref()
+                    .map(|h| h.storage_roots[r.storage_root as usize].clone())
+                    .expect("Writing a Finished entry, but no Header exists");
+                self.runcounts.insert(
+                    r.key.clone(),
+                    RuncountStatus::Finished {
+                        runcount: r.runcount,
+                        storage_root,
+                        success: r.status == 0,
+                    },
+                );
             }
-            LogEntry::Backref(_) => {}
+            LogEntry::Header(ref h) => {
+                let mut h = h.clone();
+                h.storage_roots = expand_storage_roots_relative_to_maindir(&self.path, &h.storage_roots);
+                self.header = Some(h);
+            }
+            _ => {}
         }
-
         serde_json::to_writer(&mut self.f, &e)?;
         self.f.write_all(&[b'\n'])?;
         Ok(())
-    }
-}
-
-pub fn load_ro_logfiles_recursive(mut paths: Vec<PathBuf>) -> Result<Vec<LogFile<LogFileRO>>> {
-    let mut loaded = HashSet::new();
-    let mut result = vec![];
-    loop {
-        match paths.pop() {
-            Some(path) => {
-                if loaded.contains(&path) {
-                    panic!("Infinite loop");
-                }
-                let p = LogFile::<LogFileRO>::new(&path)?;
-                loaded.insert(path);
-
-                if let Some(ref h) = p.header {
-                    for pp in h.upstreams.iter() {
-                        paths.push(pp.clone());
-                    }
-                }
-
-                result.push(p);
-            }
-            None => return Ok(result),
-        }
     }
 }
 
@@ -310,12 +339,13 @@ impl LogFile<LogFileRO> {
     #[tracing::instrument]
     fn new<P: AsRef<std::path::Path> + std::fmt::Debug>(path: P) -> Result<Self> {
         let mut f = std::fs::OpenOptions::new().read(true).open(&path)?;
-        let (runcounts, header) = LogFile::<LogFileRO>::load_runcounts(&mut f)?;
+        let (runcounts, burned_keys, header) = LogFile::<LogFileRO>::load_runcounts(path.as_ref(), &mut f)?;
         Ok(LogFile {
             f: BufReaderWriter::new_reader(f),
             path: path.as_ref().to_path_buf().canonicalize()?,
             header,
             runcounts,
+            burned_keys,
             lockf: None,
             mode: PhantomData::<LogFileRO>,
         })
@@ -324,14 +354,22 @@ impl LogFile<LogFileRO> {
 
 impl<T> LogFile<T> {
     fn load_runcounts(
+        path: &std::path::Path,
         f: &mut std::fs::File,
-    ) -> Result<(HashMap<String, RuncountStatus>, Option<HeaderEntry>)> {
-        let mut runcounts = HashMap::new();
+    ) -> Result<(
+        HashMap<String, RuncountStatus>,
+        Vec<String>,
+        Option<HeaderEntry>,
+    )> {
+        let mut runcounts = HashMap::<String, RuncountStatus>::new();
         let mut header = None;
         let mut workflow_key = None;
+        let mut started_but_not_finished = HashSet::<String>::new();
+        let mut burned_keys = Vec::new();
 
         let mut reader = std::io::BufReader::new(f);
         let mut line = String::new();
+        let mut iline = 0;
         loop {
             line.clear();
             let nbytes = reader.read_line(&mut line)?;
@@ -341,11 +379,12 @@ impl<T> LogFile<T> {
             let len = line.trim_end_matches(&['\r', '\n'][..]).len();
             line.truncate(len);
             let value: LogEntry = serde_json::from_str(&line).map_err(|e| {
-                eprintln!("Error parsing line={}", line);
+                tracing::error!("Unable to parse {}th line. Got {}", iline, line);
                 e
             })?;
+            iline += 1;
             match value {
-                LogEntry::Header(h) => {
+                LogEntry::Header(mut h) => {
                     match workflow_key {
                         None => workflow_key = Some(h.workflow_key.clone()),
                         Some(ref existing) => {
@@ -354,6 +393,11 @@ impl<T> LogFile<T> {
                             }
                         }
                     };
+                    if h.version != LOGFILE_VERSION {
+                        return Err(LogfileError::MismatchedVersion { current: LOGFILE_VERSION, found: h.version });
+                    }
+
+                    h.storage_roots = expand_storage_roots_relative_to_maindir(path.as_ref(), &h.storage_roots);
                     header = Some(h);
                 }
                 LogEntry::Ready(r) => {
@@ -361,85 +405,54 @@ impl<T> LogFile<T> {
                         r.key,
                         RuncountStatus::Ready {
                             runcount: r.runcount,
-                            storage_root: r.storage_root,
                         },
                     );
                 }
                 LogEntry::Started(s) => {
-                    let r = runcounts
-                        .remove(&s.key)
-                        .expect("I see a Started entry, but no Ready entry");
-                    if let RuncountStatus::Ready {
-                        runcount: c,
-                        storage_root: srt,
-                    } = r
-                    {
-                        runcounts.insert(
-                            s.key,
-                            RuncountStatus::Started {
-                                runcount: c,
-                                storage_root: srt,
-                            },
-                        );
-                    } else {
-                        panic!("Malformed?");
-                    }
+                    started_but_not_finished.insert(s.key.clone());
+                    runcounts.insert(
+                        s.key,
+                        RuncountStatus::Started {
+                            runcount: s.runcount,
+                        },
+                    );
                 }
                 LogEntry::Finished(f) => {
-                    let r = runcounts
-                        .remove(&f.key)
-                        .expect("I see a Finished entry, but no prior entry");
-                    if let RuncountStatus::Started {
-                        runcount: c,
-                        storage_root: srt,
-                    } = r
-                    {
-                        runcounts.insert(
-                            f.key,
-                            RuncountStatus::Finished {
-                                runcount: c,
-                                storage_root: srt,
-                                success: f.status == 0,
-                            },
-                        );
-                    } else {
-                        panic!("Malformed");
+                    if f.status >= 0 {
+                        // If a task started but finished with a negative return code, that means it failed due to a signal
+                        // or being "lost". It would really be better if we recorded that into the log file with more precision,
+                        // but alas. In particular if it was "lost" then it's possible that it continued executing and uploaded
+                        // its results to ot the success path. But since we believe it failed, this will mean that on our rerun
+                        // we will try to make a second or successive upload to the same success path, which will then fail.
+                        // So we'll let all negative-status failures remain in the `started_but_not_finished` list, so they'll
+                        // get recorded as BurnedKeys.
+                        started_but_not_finished.remove(&f.key);
                     }
+                    let storage_root = header
+                        .as_ref().map(|h| h.storage_roots[f.storage_root as usize].clone())
+                        .expect("Writing a Finished entry, but no Header exists");
+                    runcounts.insert(
+                        f.key,
+                        RuncountStatus::Finished {
+                            runcount: f.runcount,
+                            storage_root,
+                            success: f.status == 0,
+                        },
+                    );
+                }
+                LogEntry::BurnedKey(f) => {
+                    burned_keys.push(f.key);
                 }
                 _ => {}
             }
         }
 
-        Ok((runcounts, header))
+        burned_keys.extend(started_but_not_finished);
+        Ok((runcounts, burned_keys, header))
     }
 
     pub fn workflow_key(&self) -> Option<String> {
         self.header.as_ref().map(|h| h.workflow_key.clone())
-    }
-
-    pub fn storage_roots(&self) -> Vec<PathBuf> {
-        let n = self
-            .header
-            .as_ref()
-            .map(|h| h.storage_roots.len())
-            .unwrap_or(0) as u32;
-        (0..n)
-            .map(|id| self.storage_root(id))
-            .collect::<Option<Vec<_>>>()
-            .unwrap()
-    }
-
-    pub fn storage_root(&self, id: u32) -> Option<PathBuf> {
-        self.header
-            .as_ref()
-            .and_then(|h| h.storage_roots.get(id as usize))
-            .map(|p| {
-                if p.is_absolute() {
-                    p.clone()
-                } else {
-                    self.path.parent().unwrap().join(p)
-                }
-            })
     }
 
     pub fn header_version(&self) -> Option<u32> {
@@ -448,6 +461,10 @@ impl<T> LogFile<T> {
 
     pub fn flush(&mut self) -> std::result::Result<(), std::io::Error> {
         self.f.flush()
+    }
+
+    pub fn burned_keys(&self) -> Vec<String> {
+        self.burned_keys.clone()
     }
 
     pub fn runcount(&self, key: &str) -> Option<RuncountStatus> {
@@ -490,106 +507,218 @@ impl LogFileSnapshotReader {
     }
 
     pub fn read_current_and_outdated(&mut self) -> Result<(Vec<LogEntry>, Vec<LogEntry>)> {
-        let all_entries = self.read()?;
-        let count = all_entries.len();
-
+        let mut all_entries = self.read()?;
         let mut result_current = Vec::new();
-        let mut rev_iter = all_entries.into_iter().rev();
-        let mut pending_backrefs = std::collections::HashSet::new();
-        let mut header = None;
+        let mut result_outdated = Vec::new();
 
-        // iterate backward adding LogEntries to result_current until we hit the first header
+        let mut highest_current_runcount = HashMap::new();
+        let mut pending_backrefs = HashMap::new();
+        let mut burnedkeyentries = Vec::new();
+
+        #[derive(Clone)]
+        enum PendingBackefStatus {
+            AnyRuncount,
+            Runcount(u32),
+        }
+
+        if let Some(LogEntry::Header(header)) = all_entries.get(0) {
+            if header.version == 4 {
+                interpolate_runcounts_missing_from_v4_logfile_format(&mut all_entries)?;
+            }
+        };
+
+        //
+        // First, iterate backward until the first header. All the entries we hit are from the latest run of the workflow,
+        // so they're generally current.
+        // But because of automatic retries, we might have later runs of tasks (with a higher runcount) and earlier runs
+        // of the same task (with a lower runcount), so we only consider the ones with the higher runcount current.
+        // Note, we're assuming here that the ones with the higher runcount come later in the log than the ones
+        // with the earlier runcount, which is a precondition.
+        //
+        // Essentially we put the entries associated with the highest runcount of each task into results_current
+        // and most other things are outdated.
+        //
+        // However, BurnedKeys are always current.
+        // And we need to "resolve" Backref, which are entries from prior runs of the workflow that are still needed.
+        //
+
+        let mut rev_iter = all_entries.into_iter().rev();
         for item in rev_iter.by_ref() {
-            match &item {
+            match item {
                 LogEntry::Header(_) => {
-                    header = Some(item);
+                    result_current.push(item);
                     break;
                 }
-                LogEntry::Backref(b) => {
-                    pending_backrefs.insert(b.key.clone());
+                LogEntry::Finished(ref f) => {
+                    if f.runcount as i64
+                        >= highest_current_runcount
+                            .get(&f.key)
+                            .map(|&x| x as i64)
+                            .unwrap_or(-1)
+                    {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
                 }
-                _ => {
+                LogEntry::Started(ref f) => {
+                    if f.runcount == *highest_current_runcount.get(&f.key).unwrap_or(&f.runcount) {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::Ready(ref f) => {
+                    if f.runcount == *highest_current_runcount.get(&f.key).unwrap_or(&f.runcount) {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::LogMessage(ref f) => {
+                    if f.runcount == *highest_current_runcount.get(&f.key).unwrap_or(&f.runcount) {
+                        highest_current_runcount.insert(f.key.clone(), f.runcount);
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::Backref(ref b) => {
+                    pending_backrefs.insert(b.key.clone(), PendingBackefStatus::AnyRuncount);
                     result_current.push(item);
                 }
-            };
-        }
-        let nbackrefs = pending_backrefs.len();
-
-        // keep iterating backward and adding LogEntries if they're in the pending_backrefs
-        // until we clear all of the pending backrefs
-        let mut result_outdated: Vec<LogEntry> = vec![];
-        for item in rev_iter.by_ref() {
-            match &item {
-                LogEntry::Ready(v) => {
-                    if pending_backrefs.contains(&v.key) {
-                        assert!(pending_backrefs.remove(&v.key));
-                        result_current.push(item);
-                    } else {
-                        result_outdated.push(item);
-                    }
-                }
-                LogEntry::Started(v) => {
-                    if pending_backrefs.contains(&v.key) {
-                        result_current.push(item);
-                    } else {
-                        result_outdated.push(item);
-                    }
-                }
-                LogEntry::Finished(v) => {
-                    if pending_backrefs.contains(&v.key) {
-                        result_current.push(item);
-                    } else {
-                        result_outdated.push(item);
-                    }
-                }
-                _ => {
-                    result_outdated.push(item);
-                }
-            }
-            if pending_backrefs.is_empty() {
-                break;
+                LogEntry::BurnedKey(_) => burnedkeyentries.push(item),
             }
         }
 
-        // put the header on the front
-        if let Some(header) = header {
-            result_current.push(header);
+        let mut get_is_current_pending_backref = |key: String, runcount: u32| -> bool {
+            let existing_pending_backref = pending_backrefs.get(&key);
+            // * if there's an item in pending_backrefs under this key and it's an AnyRuncount, say it's current
+            //   but as a side effect, upgrade the runcount in pending_backrefs to the its runcount
+            // * if there's no entry in pending backrefs, it's not current.
+            // * if there's an entry in pending _backrefs under this key and its for the current runcount, its curret.
+            match existing_pending_backref {
+                Some(s) => match s {
+                    PendingBackefStatus::AnyRuncount => {
+                        pending_backrefs.insert(key, PendingBackefStatus::Runcount(runcount));
+                        true
+                    }
+                    PendingBackefStatus::Runcount(r) => runcount == *r,
+                },
+                None => false,
+            }
+        };
+
+        // Next, iterate backward from the prior runs of the workflow from before, resolving the pending backrefs
+        // and otherwise putting the remaining entries from prior runs of the workflow into their rightful place.
+        // (which is basically that everything is outdated except for BurnedKeys, which are always kept).
+        let mut needs_prior_header = false;
+        for item in rev_iter {
+            match item {
+                LogEntry::Header(_) => {
+                    if needs_prior_header {
+                        result_current.push(item);
+                    } else {
+                        result_outdated.push(item);
+                    }
+                },
+                LogEntry::Backref(_) => result_outdated.push(item),
+                LogEntry::BurnedKey(_) => {
+                    burnedkeyentries.push(item);
+                }
+                LogEntry::Ready(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
+                        result_current.push(item)
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::Started(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
+                        result_current.push(item)
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::Finished(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
+                        result_current.push(item)
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+                LogEntry::LogMessage(ref f) => {
+                    if get_is_current_pending_backref(f.key.clone(), f.runcount) {
+                        needs_prior_header = true;
+                        result_current.push(item)
+                    } else {
+                        result_outdated.push(item);
+                    }
+                }
+            }
         }
 
-        // keep iterating backward and put everything else into the outdated list
-        result_outdated.extend(rev_iter);
+        //
+        // Now, find some keys that we need to burn.
+        //
+        // We need to burn a key when we have a key going into the outdated list that is not in the current list.
+        // But also we don't need to burn keys that are already burned.
+        //
+        let mut outdated_started = HashSet::new();
+        let mut current_started = HashSet::new();
+        let mut already_burned = HashSet::new();
+        for item in result_outdated.iter() {
+            match item {
+                LogEntry::Started(s) => {
+                    outdated_started.insert(s.key.clone());
+                }
+                LogEntry::Finished(s) => {
+                    outdated_started.insert(s.key.clone());
+                }
+                _ => {}
+            }
+        }
+        for item in result_current.iter() {
+            match item {
+                LogEntry::Started(s) => {
+                    current_started.insert(s.key.clone());
+                }
+                LogEntry::Finished(s) => {
+                    current_started.insert(s.key.clone());
+                }
+                LogEntry::BurnedKey(_) => {
+                    panic!("These are not supposed to be in this list at this point in the algorithm.");
+                }
+                _ => {}
+            }
+        }
 
-        let current: Vec<LogEntry> = result_current.into_iter().rev().collect();
-        let outdated: Vec<LogEntry> = result_outdated.into_iter().rev().collect();
-        assert!(current.len() + outdated.len() + nbackrefs == count);
+        for item in burnedkeyentries.iter() {
+            if let LogEntry::BurnedKey(item) = item {
+                already_burned.insert(item.key.clone());
+            } else {
+                panic!("These are all supposed to be of this type, so what is this?");
+            }
+        }
 
-        // Gather all current keys
-        let current_keys = current
-            .iter()
-            .filter_map(|x| match x {
-                LogEntry::Header(_v) => None,
-                LogEntry::Ready(v) => Some(&v.key),
-                LogEntry::Started(v) => Some(&v.key),
-                LogEntry::Finished(v) => Some(&v.key),
-                LogEntry::Backref(v) => Some(&v.key),
-            })
-            .collect::<HashSet<&String>>();
+        result_current.reverse();
+        result_outdated.reverse();
 
-        // And then filter out all outdated entries that have the same keys.
-        // the main use for this method is to delete work directories related to
-        // outdated keys, so we don't want to delete these.
-        let outdated_filtered = outdated
-            .into_iter()
-            .filter(|x| match x {
-                LogEntry::Header(_v) => true,
-                LogEntry::Ready(v) => !current_keys.contains(&v.key),
-                LogEntry::Started(v) => !current_keys.contains(&v.key),
-                LogEntry::Finished(v) => !current_keys.contains(&v.key),
-                LogEntry::Backref(v) => !current_keys.contains(&v.key),
-            })
-            .collect::<Vec<LogEntry>>();
+        result_current.extend(burnedkeyentries);
 
-        Ok((current, outdated_filtered))
+        for key in outdated_started.difference(&current_started) {
+            if !already_burned.contains(key) {
+                result_current.push(LogEntry::BurnedKey(BurnedKeyEntry { key: key.clone() }));
+            }
+        }
+
+        Ok((result_current, result_outdated))
     }
 
     pub fn read(&mut self) -> Result<Vec<LogEntry>> {
@@ -636,6 +765,12 @@ pub enum LogfileError {
     #[error("Mismatched keys")]
     WorkflowKeyMismatch,
 
+    #[error("The current software uses the v{current} logfile format. Unfortunately it cannot load logfile created by prior software using the v{found} format.")]
+    MismatchedVersion {
+        current: u32,
+        found: u32,
+    },
+
     #[error("the log is locked")]
     AlreadyLocked,
 }
@@ -647,4 +782,76 @@ impl From<advisory_lock::FileLockError> for LogfileError {
             advisory_lock::FileLockError::AlreadyLocked => LogfileError::AlreadyLocked,
         }
     }
+}
+
+fn interpolate_runcounts_missing_from_v4_logfile_format(
+    all_entries: &mut Vec<LogEntry>,
+) -> Result<()> {
+    let mut runcount_and_storageroots = HashMap::<String, (u32, u32)>::new();
+    for entry in all_entries {
+        match entry {
+            LogEntry::Header(h) => assert!(h.version == 4),
+            LogEntry::Ready(r) => {
+                if let Some((key, (old_runcount, storage_root))) =
+                    runcount_and_storageroots.remove_entry(&r.key)
+                {
+                    let new_runcount = std::cmp::max(old_runcount, r.runcount);
+                    runcount_and_storageroots.insert(key, (new_runcount, storage_root));
+                    r.runcount = new_runcount;
+                } else {
+                    runcount_and_storageroots.insert(r.key.clone(), (r.runcount, r.storage_root));
+                }
+            }
+            LogEntry::Started(r) => {
+                if let Some((key, (old_runcount, storage_root))) =
+                    runcount_and_storageroots.remove_entry(&r.key)
+                {
+                    let new_runcount = std::cmp::max(old_runcount, r.runcount);
+                    runcount_and_storageroots.insert(key, (new_runcount, storage_root));
+                    r.runcount = new_runcount;
+                    r.storage_root = storage_root;
+                }
+            }
+            LogEntry::Finished(r) => {
+                if let Some((key, (old_runcount, storage_root))) =
+                    runcount_and_storageroots.remove_entry(&r.key)
+                {
+                    let new_runcount = std::cmp::max(old_runcount, r.runcount);
+                    runcount_and_storageroots.insert(key, (new_runcount, storage_root));
+                    r.runcount = new_runcount;
+                    r.storage_root = storage_root;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+
+fn deserialize_vec_arc_pathbuf<'de, D>(
+    deserializer: D,
+) -> core::result::Result<Vec<Arc<PathBuf>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Vec<PathBuf> = Deserialize::deserialize(deserializer)?;
+    Ok(v.into_iter()
+        .map(|item| Arc::new(item))
+        .collect::<Vec<Arc<PathBuf>>>())
+}
+
+fn serialize_vec_arc_pathbuf<S>(
+    v: &Vec<Arc<PathBuf>>,
+    serializer: S,
+) -> core::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(v.len()))?;
+    for e in v {
+        seq.serialize_element(&**e)?;
+    }
+    seq.end()
 }
