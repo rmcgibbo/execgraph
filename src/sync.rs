@@ -729,8 +729,8 @@ impl ExitStatus {
     pub fn as_i32(&self) -> i32 {
         match self {
             ExitStatus::Code(c) => *c,
-            ExitStatus::Cancelled => 130,
-            ExitStatus::Disconnected => 127,
+            ExitStatus::Cancelled => -10,
+            ExitStatus::Disconnected => -1,
         }
     }
     fn is_success(&self) -> bool {

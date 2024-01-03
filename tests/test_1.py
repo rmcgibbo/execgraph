@@ -643,7 +643,7 @@ eg.execute()
     assert "user" in log[0]["Header"]
     assert log[1]["Ready"]["key"] == "key"
     assert log[2]["Started"]["key"] == "key"
-    assert log[3]["Finished"]["status"] == 127
+    assert log[3]["Finished"]["status"] == -1
 
 
 def test_sigint_2(tmp_path):
