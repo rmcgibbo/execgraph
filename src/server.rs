@@ -576,10 +576,10 @@ pub fn router(state: Arc<State<'static>>) -> Router {
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
                     let ray = rand::random::<u32>();
-                    tracing::info_span!("req", "uri" = request.uri().path(), "id" = ray)
+                    tracing::debug_span!("req", "uri" = request.uri().path(), "id" = ray)
                 })
                 .on_request(|request: &Request<Body>, _span: &Span| {
-                    tracing::info!(
+                    tracing::debug!(
                         "started {:?} {} {}",
                         request.headers(),
                         request.method(),
@@ -587,7 +587,7 @@ pub fn router(state: Arc<State<'static>>) -> Router {
                     )
                 })
                 .on_response(|response: &Response<_>, latency: Duration, _span: &Span| {
-                    tracing::info!(
+                    tracing::debug!(
                         "status={} latency={:?}",
                         response.status().as_u16(),
                         latency

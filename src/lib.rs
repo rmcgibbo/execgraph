@@ -4,6 +4,7 @@ pub mod http_extensions;
 pub mod httpinterface;
 pub mod localrunner;
 pub mod logfile2;
+pub mod logging;
 #[cfg(feature = "pyo3")]
 pub mod pylib;
 pub mod sync;

@@ -502,15 +502,18 @@ def test_copy_reused_keys_logfile(tmp_path):
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.execute()
     del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n"
 
     eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
     eg.add_task(["sh", "-c", "echo 1"], key="foo")
     eg.add_task(["sh", "-c", "echo 2"], key="bar")
     eg.execute()
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n[1/1] sh -c echo 2\n2\n"
 
     eg.add_task(["sh", "-c", "echo 3"], key="baz")
     eg.execute()
     del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n[1/1] sh -c echo 2\n2\n[3/3] sh -c echo 3\n3\n"
 
     log = _execgraph.load_logfile(tmp_path / "foo", "all")
 
@@ -540,6 +543,14 @@ def test_copy_reused_keys_logfile(tmp_path):
     assert clog[8]["Started"]["key"] == "baz"
     assert clog[9]["Finished"]["key"] == "baz"
     assert len(clog) == 10
+
+
+def test_log_1(tmp_path):
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo 1"], key="foo")
+    eg.execute()
+    del eg
+    assert open(tmp_path / "log.txt").read() == "[1/1] sh -c echo 1\n1\n"
 
 
 def test_stdout(tmp_path):
@@ -853,6 +864,16 @@ def test_fd3_7(tmp_path):
     eg.execute()
     contents = _execgraph.load_logfile(tmp_path / "foo", "all")
     assert contents[-1]["Finished"]["values"] == [{"a": "c"}, {"foo": "foo"}]
+
+
+def test_fd3_8(tmp_path):
+    # long string. line buffering
+    eg = _execgraph.ExecGraph(8, logfile=tmp_path / "foo")
+    eg.add_task(["sh", "-c", "echo foo=abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789 >&3"], key="foo")
+    eg.execute()
+    del eg
+    contents = [x for x in _execgraph.load_logfile(tmp_path / "foo", "all") if "Finished" in x][0]["Finished"]["values"][0]["foo"]
+    assert contents == "abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789_abcdefg123456789"
 
 
 def test_dup(tmp_path):
