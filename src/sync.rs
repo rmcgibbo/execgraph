@@ -553,7 +553,7 @@ impl<'a> ReadyTrackerServer<'a> {
         }
 
         let statuses = &mut self.statuses;
-        let ready = self
+        let ready: Vec<NodeIndex> = self
             .g
             .edges_directed(e.id, Direction::Outgoing)
             .filter_map(|edge| {
@@ -575,7 +575,9 @@ impl<'a> ReadyTrackerServer<'a> {
             })
             .collect();
 
+        let nready = ready.len();
         self.add_to_ready_queue(ready).await?;
+        saturating_sub(&self.n_unready_tasks_approximate_for_eta_purposes_only, nready);
         Ok(())
     }
 
@@ -589,7 +591,6 @@ impl<'a> ReadyTrackerServer<'a> {
         self.n_ready_or_inflight = self.n_ready_or_inflight.checked_add(
             u32::try_from(ready.len()).expect("arithmetic overflow")
         ).expect("arithmetic overflow");
-        checked_sub(&self.n_unready_tasks_approximate_for_eta_purposes_only, ready.len());
         let mut inserts = vec![vec![]; NUM_RUNNER_TYPES];
 
         for index in ready.into_iter() {
@@ -975,10 +976,10 @@ enum ShutdownState {
 /// Decrement the value of an AtomicU32 by other, saturating at zero.
 /// Note that this does not do a full compare-and-swap loop -- it just errors out if
 /// someone else modifies it.
-fn checked_sub(x: &AtomicU32, other: usize) {
+fn saturating_sub(x: &AtomicU32, other: usize) {
     let old_value = x.load(SeqCst);
     let other_32 = u32::try_from(other).expect("arithmetic overflow");
-    let new_value = old_value.checked_sub(other_32).expect("arithmetic overflow");
+    let new_value = old_value.saturating_sub(other_32);
     x.compare_exchange(old_value, new_value, SeqCst, SeqCst).expect("Some kind of race");
 }
 
